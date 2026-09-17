@@ -1,0 +1,275 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: initial implementation
+  generated_at: 2026-09-17T21:56:00+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: null
+task_id: null
+branch: main
+base_ref: null
+target:
+  current_head: unknown
+  reviewed_head: null
+  commit_range: null
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 75840a70-dea0-4d8c-9bb4-fe97c78bc11e
+  connection: available
+  os: Linux
+  shell: /bin/bash
+  working_directory: /home/ibis/CodexProjects/RemoteDesktopMCP
+  repository: ssaattww/RemoteDesktopMCP
+  branch: main
+  head_sha: unknown
+  source_state: dirty
+  source_fingerprint: null
+  ownership: current_task
+  writable_paths:
+    - /home/ibis/CodexProjects/RemoteDesktopMCP
+  dependencies:
+    - name: node
+      status: available
+      evidence: v22.13.1
+    - name: npm
+      status: available
+      evidence: v11.4.2
+  evidence:
+    - Local repository initialized on main with no commits yet.
+    - Local git remote is unset.
+    - GitHub connector confirms ssaattww/RemoteDesktopMCP exists and is private.
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - npm run lint, npm run check, npm run build executed locally.
+  technical_head: unknown
+  administrative_parent: null
+  commit:
+    state: commit_pending
+    review_target_sha: null
+  push:
+    state: unauthorized
+    head_sha: unknown
+  ci_wait:
+    state: not_required
+    required_for: not_required
+  final_publication:
+    sequence: unknown
+    pr_action: unauthorized
+authoritative_requirements:
+  - source: user_instruction
+    reference: current chat
+    summary: Add lint to RemoteDesktopMCP.
+development_policy:
+  method: validation-only
+  testing_order: Configuration change followed by local lint, type-check, build, and audit.
+  governing_source: target repository has no stricter testing policy yet
+validation_plan:
+  commands:
+    - npm run lint
+    - npm run check
+    - npm run build
+    - npm audit --audit-level=low
+  required_failure_diagnostics: []
+blocked:
+  - item: publication
+    reason: Local git remote is unset and commit/push/PR were not authorized in this task.
+    required_input_or_decision: User instruction to publish when desired.
+authorized_actions:
+  - read_repository
+  - edit_code
+  - edit_documentation
+  - edit_configuration
+  - write_report
+  - write_handoff
+write_boundary:
+  allowed:
+    - path_or_operation: /home/ibis/CodexProjects/RemoteDesktopMCP
+      reason: Current task worktree.
+  forbidden:
+    - path_or_operation: commit/push/PR
+      reason: Not requested in current task.
+scope:
+  - Add TypeScript lint with ESLint and typescript-eslint.
+  - Add Markdown lint without introducing known npm audit findings.
+  - Add one npm command that runs both linters.
+non_goals:
+  - Add CI workflow.
+  - Publish commits or create a PR.
+  - Change product behavior.
+files:
+  changed:
+    - path: package.json
+      purpose: Add lint scripts and dev dependencies.
+    - path: package-lock.json
+      purpose: Lock lint dependency graph.
+    - path: eslint.config.js
+      purpose: Configure TypeScript ESLint recommended rules.
+    - path: .markdownlint.json
+      purpose: Configure Markdown rules; disable MD013.
+    - path: scripts/lint-markdown.mjs
+      purpose: Lint repository Markdown while excluding generated/vendor directories.
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: Replace bare reference URLs with Markdown links.
+    - path: doc/report/2026-09-17-lint-setup.md
+      purpose: Persist detailed implementation report.
+    - path: doc/report/2026-09-17-lint-setup-handoff.yaml
+      purpose: Persist continuation state.
+  inspected:
+    - path: tsconfig.json
+      purpose: Confirm TypeScript source boundary.
+    - path: .gitignore
+      purpose: Confirm generated and reference directory handling.
+  intentionally_untouched:
+    - path_or_area: src product behavior
+      reason: Lint setup does not require behavior changes.
+commands:
+  - command: npm run lint
+    purpose: Run TypeScript and Markdown lint.
+    exit_code: 0
+    result: passed
+    head_sha: unknown
+    evidence: ESLint passed; markdownlint reported 0 issues.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: npm run check
+    purpose: Type-check source.
+    exit_code: 0
+    result: passed
+    head_sha: unknown
+    evidence: tsc --noEmit completed successfully.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: npm run build
+    purpose: Verify production TypeScript build.
+    exit_code: 0
+    result: passed
+    head_sha: unknown
+    evidence: tsc build completed successfully.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: npm audit --audit-level=low
+    purpose: Verify final dependency graph.
+    exit_code: 0
+    result: passed
+    head_sha: unknown
+    evidence: 0 vulnerabilities.
+    execution_environment: connected_computer
+    source_fingerprint: null
+tests:
+  - name: lint
+    phase: verification
+    result: passed
+    head_sha: unknown
+    evidence: npm run lint exit 0
+  - name: type-check
+    phase: verification
+    result: passed
+    head_sha: unknown
+    evidence: npm run check exit 0
+  - name: build
+    phase: verification
+    result: passed
+    head_sha: unknown
+    evidence: npm run build exit 0
+ci:
+  required: false
+  workflow: null
+  run_id: null
+  head_sha: unknown
+  conclusion: not_applicable
+  artifacts: []
+implementation:
+  outcome: completed
+  final_head: unknown
+  commits: []
+  addressed_findings: []
+  failure_diagnostics:
+    - type: other
+      location: null
+      summary: markdownlint-cli2 was rejected after npm audit found high severity dependency vulnerabilities.
+  blocked_items: []
+  summary:
+    - ESLint and Markdown lint are locally available through npm run lint.
+    - Final dependency audit reports 0 vulnerabilities.
+review:
+  mode: not_applicable
+  reviewed_head: unknown
+  reviewer:
+    identity: unknown
+    role: not_applicable
+    continuity:
+      previous_reviewer_identity: null
+      changed: false
+      reason: null
+    independence:
+      implemented_change: true
+      implemented_review_fix: false
+      served_as_normal_reviewer: false
+      inherited_conversation: true
+      evidence: []
+  verdict: not_applicable
+  required_coverage: []
+  independent_closure:
+    initial_independent_reviewed_head: null
+    closure_reviewed_heads: []
+    reviewer_continuity: null
+    closure_scope: []
+    completeness_matrix: []
+  validation_assessment: []
+  reserved_report_paths: []
+  report_attestation:
+    allowed: not_applicable
+    reviewed_implementation_head: null
+    allowed_paths: []
+    required_first_parent: null
+    maximum_commits_after_reviewed_head: null
+    forbidden_path_classes: []
+    no_later_commits_required: not_applicable
+    validation_status: not_applicable
+    validation_evidence: []
+  summary: []
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-17-lint-setup.md
+  reviewed_head: null
+  attestation_head: null
+  pr_comments: []
+  summary:
+    - Detailed local lint setup and validation report persisted.
+findings: []
+held: []
+unexplored: []
+unknown:
+  - field_or_fact: Git commit SHA
+    reason: Repository has no commits yet.
+not_applicable:
+  - field_or_area: CI
+    reason: No publication occurred and no commit exists.
+remaining_risks:
+  - The current validation evidence is bound to an uncommitted worktree rather than a Git SHA.
+source_payloads: []
+extensions: []
+next_action:
+  type: user_decision
+  target_skill: none
+  mode: null
+  summary: Publish the initial repository only when explicitly requested.
+  instructions:
+    - Add or configure the local Git remote only when requested.
+    - Re-run the full local gate after any content change before commit or push.
+  required_attachments_or_references:
+    - doc/report/2026-09-17-lint-setup.md
+  requested_authorized_actions:
+    - commit
+    - push
+    - create_pr
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-17-lint-setup-handoff.yaml
+  packet_url: null
+  transport_note: Local repository handoff; remote publication not performed.
