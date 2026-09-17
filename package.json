@@ -10,11 +10,12 @@
     "dev": "tsx watch src/index.ts",
     "check": "tsc -p tsconfig.json --noEmit",
     "user:hash": "tsx src/hash-password.ts",
-    "lint": "npm run lint:ts && npm run lint:md",
+    "lint": "npm run lint:ts && npm run lint:md && npm run lint:md:terms:design",
     "lint:ts": "eslint \"src/**/*.ts\"",
     "lint:md": "node scripts/lint-markdown.mjs",
     "lint:md:terms:candidates": "node scripts/check-markdown-whitelist.mjs --list-unknown",
-    "lint:md:terms": "node scripts/check-markdown-whitelist.mjs"
+    "lint:md:terms": "node scripts/check-markdown-whitelist.mjs",
+    "lint:md:terms:design": "node scripts/check-markdown-whitelist.mjs --files doc/design/functional-requirements.md doc/design/tailscale-funnel-architecture.md"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

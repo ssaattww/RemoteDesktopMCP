@@ -1,0 +1,65 @@
+name: lint
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Prepare diagnostics
+        shell: bash
+        run: |
+          mkdir -p ci-artifacts
+          printf 'lint=not_run\n' > ci-artifacts/test-results.txt
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set +e
+          npm ci >ci-artifacts/npm-ci.stdout.log 2>ci-artifacts/npm-ci.stderr.log
+          status=$?
+          printf 'command=npm ci\nexit_code=%s\n' "$status" > ci-artifacts/npm-ci.result.txt
+          cat ci-artifacts/npm-ci.stdout.log
+          cat ci-artifacts/npm-ci.stderr.log >&2
+          exit "$status"
+
+      - name: Run lint
+        shell: bash
+        run: |
+          set +e
+          npm run lint >ci-artifacts/lint.stdout.log 2>ci-artifacts/lint.stderr.log
+          status=$?
+          printf 'lint_exit_code=%s\n' "$status" > ci-artifacts/test-results.txt
+          cat ci-artifacts/lint.stdout.log
+          cat ci-artifacts/lint.stderr.log >&2
+          exit "$status"
+      - name: Record environment
+        if: always()
+        shell: bash
+        run: |
+          {
+            printf 'sha=%s\n' "$GITHUB_SHA"
+            printf 'node=' && node --version
+            printf 'npm=' && npm --version
+          } > ci-artifacts/environment.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-diagnostics-${{ github.sha }}
+          path: ci-artifacts
+          if-no-files-found: error
+          retention-days: 14
