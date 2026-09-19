@@ -1,0 +1,181 @@
+version: 1
+entries:
+  - term: RemoteDesktopMCP
+    description: 本製品名。
+  - term: MCP
+    description: 通信規約の略称。
+  - term: Tailscale
+    description: 利用するネットワーク製品名。
+  - term: Tailscale Funnel
+    aliases: [Funnel]
+    description: Tailscale の公開機能名。
+  - term: ChatGPT
+    description: 接続元サービス名。
+  - term: Google
+    description: 本人確認に利用するサービス名。
+  - term: OAuth
+    description: 認可規約の名称。
+  - term: OIDC
+    description: 本人確認規約の略称。
+  - term: PKCE
+    description: 認可コード保護方式の略称。
+  - term: CIMD
+    description: クライアント識別情報方式の略称。
+  - term: DCR
+    description: 動的クライアント登録方式の略称。
+  - term: DDNS
+    description: 動的 DNS の略称。
+  - term: DNS
+    description: 名前解決方式の略称。
+  - term: HTTP
+    description: 通信規約の略称。
+  - term: HTTPS
+    description: 暗号化された HTTP 通信の表記。
+  - term: TLS
+    description: 通信暗号化方式の略称。
+  - term: IP
+    description: 通信規約の略称。
+  - term: LAN
+    description: 構内通信網の略称。
+  - term: NAT-PMP
+    description: ポート割り当て方式の名称。
+  - term: UPnP
+    description: 機器間自動設定方式の名称。
+  - term: CLI
+    description: コマンド操作画面の略称。
+  - term: API
+    description: プログラム間インターフェースの略称。
+  - term: OS
+    description: 基本処理系の略称。
+  - term: PID
+    description: プロセス識別子の略称。
+  - term: ID
+    description: 識別子の略称。
+  - term: URI
+    description: リソース識別子の略称。
+  - term: URL
+    description: リソース位置表現の略称。
+  - term: IdP
+    description: 認証情報提供者の略称。
+  - term: tailnet
+    description: Tailscale 内の私設ネットワーク名称。
+  - term: root
+    description: 基準位置を表す技術用語。
+  - term: アカウント
+    description: 認証主体。
+  - term: アクセス
+    description: 利用または接続。
+  - term: アクセストークン
+    description: OAuth のアクセス資格情報。
+  - term: アプリ
+    description: 応用機能の略称。
+  - term: インターネット
+    description: 公開ネットワーク。
+  - term: インターフェース
+    description: 接続境界。
+  - term: インフラ
+    description: 基盤。
+  - term: エラーレスポンス
+    description: 失敗時の応答。
+  - term: エンドポイント
+    description: 通信の接続先。
+  - term: クライアント
+    description: サービスの利用側。
+  - term: グローバル
+    description: 公開範囲を表す語。
+  - term: コード
+    description: 実装または認可コード。
+  - term: コマンド
+    description: 実行命令。
+  - term: コンポーネント
+    description: 構成単位。
+  - term: サーバー
+    description: 要求を受けるサービス。
+  - term: サーバープロセス
+    description: サーバーとして動くプロセス。
+  - term: サービス
+    description: 提供機能。
+  - term: セッション
+    description: 接続または処理単位。
+  - term: テキストファイル
+    description: 文字情報のファイル。
+  - term: トークン
+    description: 認証や認可の資格情報。
+  - term: ネットワーク
+    description: 通信経路。
+  - term: ノード
+    description: ネットワーク参加端末。
+  - term: パス
+    description: 位置表現。
+  - term: パスワード
+    description: 本人確認用の秘密文字列。
+  - term: パッチ
+    description: 部分変更。
+  - term: ファイル
+    description: 保存情報の単位。
+  - term: プログラム
+    description: 実行対象。
+  - term: プロセス
+    description: OS 上の実行単位。
+  - term: ヘッダー
+    description: 通信の付加情報領域。
+  - term: ポート
+    description: 通信先番号。
+  - term: ポートフォワーディング
+    description: 通信転送機能。
+  - term: メールアドレス
+    description: 電子郵便の宛先識別子。
+  - term: モデム
+    description: 回線接続装置。
+  - term: ユーザー
+    description: 利用主体。
+  - term: リソース
+    description: 利用対象。
+  - term: リダイレクト
+    description: 別 URI への遷移。
+  - term: リモート
+    description: 外部からの操作形態。
+  - term: ルーター
+    description: ネットワーク転送装置。
+  - term: ローカル
+    description: 対象端末内の範囲。
+  - term: ローカルサービス
+    description: 対象端末内だけのサービス。
+  - term: ローカルパス
+    description: 対象端末内のファイル位置。
+  - term: ローカルポート
+    description: 対象端末内の待受ポート。
+  - term: ローテーション
+    description: 定期的な更新運用。
+  - term: ログ
+    description: 操作や結果の記録。
+  - term: PC
+    description: 対象端末を表す一般的な略称。
+  - term: stdout
+    description: 標準出力の識別名。
+  - term: stderr
+    description: 標準エラー出力の識別名。
+  - term: ベータ
+    description: 正式提供前の段階。
+  - term: バインド
+    description: 待受先への関連付け。
+  - term: コールバック
+    description: 処理後に呼び戻す接続先。
+  - term: ループバック
+    description: 同一端末内の通信経路。
+  - term: メタデータ
+    description: 対象を説明する付加情報。
+  - term: レート制限
+    description: 一定時間内の要求数制限。
+  - term: リフレッシュトークン
+    description: アクセストークン更新用の資格情報。
+  - term: スタックトレース
+    description: 呼び出し履歴。
+  - term: ツール
+    description: MCP が公開する操作単位。
+  - term: オリジン
+    description: 通信元を区別する単位。
+  - term: スコープ
+    description: OAuth の権限範囲。
+  - term: リリース
+    description: 公開版の提供単位。
