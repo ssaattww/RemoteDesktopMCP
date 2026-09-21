@@ -88,7 +88,7 @@ current HEAD では次に変更された。
 
 ## Verdict
 
-`pass_with_ci_pending`
+判定: pass_with_ci_pending
 
 RDMCP-R1、RDMCP-R2、RDMCP-R3 はすべて resolved。直接的な回帰および追加 finding は確認されなかった。
 
