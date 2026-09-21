@@ -1,0 +1,207 @@
+schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+  generated_at: 2026-09-22T06:44:54+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-R4-fix-verification
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  current_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  commit_range: 15e6372f12f390bbcde8bae7e74bf94788c1b063..71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  source_state: clean
+  ownership: current_task
+  writable_paths:
+    - doc/report/2026-09-22-pr1-r4-fix-verification.md
+    - doc/report/2026-09-22-pr1-r4-fix-verification-handoff.yaml
+  dependencies:
+    - name: node/npm
+      status: available
+      evidence: build/check/lint commands executed locally
+    - name: Desktop Commander
+      status: available
+      evidence: installed package 0.2.50 inspected on FA780
+  evidence:
+    - GitHub PR current HEAD and local worktree HEAD matched before review.
+    - No active RDC terminal sessions existed at task start.
+    - Validation outputs are stored outside the worktree at C:\Users\donabe\Project\RemoteDesktopMCP-pr1-review-20260922-0642.
+
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - FA780 worktree was available at the exact reviewed HEAD.
+    - npm and git validation commands executed locally.
+  technical_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  administrative_parent: null
+  commit:
+    state: commit_pending
+    review_target_sha: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  push:
+    state: push_pending
+    head_sha: unknown
+  ci_wait:
+    state: unavailable
+    required_for: merge_gate
+  final_publication:
+    sequence: not_applicable
+    pr_action: update
+
+authoritative_requirements:
+  - source: pr
+    reference: RDMCP-R4 comment 5767547391
+    summary: Reuse Desktop Commander for local file/process operations and avoid duplicate local implementations.
+development_policy:
+  method: review
+  testing_order: validation-only
+  governing_source: uploaded chat-review-worker/review-worker skills
+
+validation_plan:
+  commands:
+    - npm run lint:md:terms:design
+    - npm run lint:ts
+    - npm run check
+    - npm run build
+    - npm audit --audit-level=low
+    - git diff --check
+    - npm run lint
+  required_failure_diagnostics:
+    - results
+    - stdout
+    - stderr
+    - relevant environment/source identity
+
+scope:
+  - Verify RDMCP-R4 required actions against current PR HEAD.
+  - Inspect the R4 change for direct regressions against actual Desktop Commander 0.2.50 tool contracts.
+non_goals:
+  - Implement findings.
+  - Re-review resolved RDMCP-R1 through RDMCP-R3 from scratch.
+  - Merge PR #1.
+
+review:
+  mode: fix_verification
+  reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  reviewer:
+    identity: current ChatGPT normal-review chat
+    role: normal_reviewer
+    continuity:
+      previous_reviewer_identity: current ChatGPT normal-review chat
+      changed: false
+      reason: null
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: true
+      inherited_conversation: true
+      evidence:
+        - This chat authored RDMCP-R4 and did not implement its fix.
+  verdict: fail
+  required_coverage:
+    - criterion: requirement and design conformance
+      disposition: checked_finding
+      evidence: RDMCP-R5 and RDMCP-R6
+    - criterion: correctness and edge cases
+      disposition: checked_finding
+      evidence: merged process streams and stale PID mapping
+    - criterion: scope discipline and unrelated changes
+      disposition: checked_no_finding
+      evidence: R4 delta is documentation/report only
+    - criterion: changed files and direct dependencies
+      disposition: checked_finding
+      evidence: Desktop Commander 0.2.50 implementation inspected
+    - criterion: API/data/config/workflow compatibility
+      disposition: checked_finding
+      evidence: process_output contract cannot be implemented from read_process_output
+    - criterion: error handling and failure diagnostics
+      disposition: checked_finding
+      evidence: Desktop Commander restart lacks mapping generation invalidation
+    - criterion: security and secret handling
+      disposition: checked_no_finding
+      evidence: no new R4 secret-handling defect found
+    - criterion: tests and validation adequacy
+      disposition: checked_finding
+      evidence: no focused contract tests for stream provenance or stale process handles
+    - criterion: current-HEAD CI
+      disposition: held
+      evidence: connector returned no matching workflow run; full local lint is red on pre-existing MD036
+    - criterion: report/tracking/documentation accuracy
+      disposition: checked_no_finding
+      evidence: R4 report accurately marks fix verification and CI pending
+    - criterion: regression and maintainability
+      disposition: checked_finding
+      evidence: RDMCP-R5 and RDMCP-R6
+
+findings:
+  - id: RDMCP-R5
+    severity: high
+    origin: introduced_by_fix
+    location: doc/design/functional-requirements.md process operation requirements; doc/design/multi-pc-architecture.md process_output mapping
+    description: Desktop Commander 0.2.50 merges stdout and stderr into one line buffer, so read_process_output cannot provide the separate stdout/stderr contract described by the design.
+    impact: The public process output contract is not implementable as written without changing the contract, requiring an upstream capability, or defining a justified exception.
+    evidence: Installed Desktop Commander 0.2.50 TerminalManager appends stdout and stderr to session.outputLines; readProcessOutput returns the merged lines. FA780 probe confirmed merged output.
+    required_action: Define a process output contract that the pinned RDC version can supply, or require an RDC/upstream tool that exposes structured stdout/stderr; add a focused contract validation.
+  - id: RDMCP-R6
+    severity: high
+    origin: introduced_by_fix
+    location: doc/design/multi-pc-architecture.md local delegation, process mapping, and failure handling
+    description: Logical process IDs map to Desktop Commander local PID without a Desktop Commander instance generation, while the design permits the local MCP child to restart.
+    impact: After restart and OS PID reuse, a stale logical process ID can resolve to a different new process; process_kill could terminate the wrong process.
+    evidence: Desktop Commander 0.2.50 TerminalManager keys active/completed sessions by PID and force_terminate accepts PID only; design has no generation invalidation rule.
+    required_action: Bind mapping to at least node_id + Desktop Commander generation + PID, invalidate prior-generation mappings on transport/process restart, and validate stale-ID rejection.
+
+held:
+  - item: exact-head CI
+    reason: GitHub connector returned no run for reviewed HEAD and the repository push workflow is not represented by a matching connector result.
+    owner: repository workflow/implementation owner
+    remaining_risk: Current publication CI state is not verified.
+    verdict_impact: Does not change fail verdict; cannot be reported as passing.
+
+remaining_risks:
+  - Full repository lint fails on pre-existing MD036 in doc/report/2026-09-19-pr1-design-review-fix-verification.md.
+  - Product code still contains the temporary direct local-operation scaffold until delegation implementation.
+
+report:
+  report_type: verification_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-22-pr1-r4-fix-verification.md
+  reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  attestation_head: null
+  pr_comments: []
+next_action:
+  type: implementation
+  target_skill: chat-implementation-worker
+  mode: review-follow-up
+  summary: Address RDMCP-R5 and RDMCP-R6, then return to this normal review chat for fix verification.
+  instructions:
+    - Preserve RDMCP-R5 and RDMCP-R6 severity as High.
+    - Do not reimplement duplicate local operations merely to recover stdout/stderr without an explicit approved design exception.
+    - Add Desktop Commander generation invalidation to logical process identity.
+    - Provide focused evidence for both findings on the new reviewed HEAD.
+    - Use only exact-head CI evidence matching the new PR current HEAD.
+  required_attachments_or_references:
+    - doc/report/2026-09-22-pr1-r4-fix-verification.md
+    - PR #1 RDMCP-R4 comment and R4 implementation follow-up
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-22-pr1-r4-fix-verification-handoff.yaml
+  packet_url: null
+  transport_note: Handoff accompanies the normal-review report; merge remains user-owned.
