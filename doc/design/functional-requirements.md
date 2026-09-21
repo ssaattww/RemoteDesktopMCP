@@ -3,6 +3,7 @@
 ## 目的
 
 RemoteDesktopMCP は、許可された単一ユーザーがリモートから対象 PCのファイル操作およびプロセス操作を行うための MCP サーバーとする。
+ローカルのファイル操作およびプロセス操作そのものは再実装せず、各実行ノードで `@wonderwhy-er/desktop-commander` が提供する MCP ツールへ委譲する制御層とする。
 初期版では必要最小限の機能に限定する。
 
 ## 認証
@@ -24,6 +25,18 @@ RemoteDesktopMCP は、許可された単一ユーザーがリモートから対
 - `session_close` で明示的に終了できる。終了、失効、サーバー再起動後の `session_id` は再利用しない。
 - `session_list` は有効なセッションだけを列挙し、`session_id`、作成時刻、最終活動時刻、失効予定時刻を返す。
 - 起動したプロセスは起動時の `session_id` と関連付けて監査する。セッション終了または失効だけを理由にプロセスを自動停止せず、同じユーザーの別の有効なセッションから論理プロセス識別子を指定して状態取得、出力取得、停止を行えるようにする。
+
+## ローカル操作の再利用境界
+
+- 各実行ノードは、ローカルの `@wonderwhy-er/desktop-commander` を `stdio` MCP サーバーとして起動または接続し、ファイル操作とプロセス操作をその MCP ツールへ委譲する。
+- 起動時に `listTools()` で利用可能なツールと入力定義を確認し、実行時は `callTool()` を通して呼び出す。
+- RemoteDesktopMCP が公開する `file_*` と `process_*` は、外部認可、`session_id`、`node_id`、監査、ローカル方針を適用した後で `Desktop Commander` のツールへ変換する公開用の委譲層とする。
+- RemoteDesktopMCP 自身では、同等のファイル探索、ファイル読書き、部分編集、プロセス起動、出力取得、停止処理を実装しない。
+- RemoteDesktopMCP が独自に持つ責務は、外部ユーザー認証・認可、RemoteDesktopMCP セッション、ノード認証と要求振り分け、監査、公開ツールの許可方針、ノードをまたぐ論理識別子の管理とする。
+- `Desktop Commander` の管理用ツールや初期版で許可していないツールを、そのまま外部 MCP へ公開しない。
+- 必須の `Desktop Commander` ツールが存在しない場合、その操作を利用不可として扱い、RemoteDesktopMCP 独自実装へ自動的に切り替えない。
+- `Desktop Commander` 側のローカル設定と RemoteDesktopMCP の方針の両方を満たす要求だけを許可する。RemoteDesktopMCP から `Desktop Commander` のローカル設定を変更する機能は提供しない。
+- `Desktop Commander` で提供されないローカル操作を将来追加する場合は、独自実装が必要な理由と責務境界を設計へ追加し、既存ツールで代替できないことを確認してから実装する。
 
 ## ファイル操作
 

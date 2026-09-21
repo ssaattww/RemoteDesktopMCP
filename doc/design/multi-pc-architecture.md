@@ -10,8 +10,8 @@
 
 各 PC では同じ RemoteDesktopMCP を動作させ、設定によって次の役割を持たせる。
 
-- 統括ノード: ChatGPT からの MCP 接続、ユーザー認証、対象ノード選択、要求振り分けを担当する。
-- 実行ノード: 自分自身のファイル操作、プロセス操作、セッション管理を実行する。
+- 統括ノード: ChatGPT からの MCP 接続、ユーザー認証、RemoteDesktopMCP セッション管理、対象ノード選択、要求振り分けを担当する。
+- 実行ノード: ローカル方針を確認し、ファイル操作とプロセス操作をローカルの `@wonderwhy-er/desktop-commander` へ委譲する。
 - 兼任ノード: 統括ノードと実行ノードの両方を同一 PC 上で担当する。
 
 初期版では、1構成につき有効な統括ノードは1台とする。
@@ -43,13 +43,18 @@ roles:
 flowchart LR
     ChatGPT[ChatGPT] -->|HTTPS| Funnel[Tailscale Funnel]
     Funnel -->|loopback| C[統括ノード]
-    C --> Local[同一 PC の実行機能]
+    C --> CA[統括 PC の委譲層]
+    CA -->|stdio MCP| CD[Desktop Commander]
 
     subgraph Tailnet[Tailscale 私設経路]
         C <--> P1[実行ノード PC 1]
         C <--> P2[実行ノード PC 2]
         C <--> PN[実行ノード PC N]
     end
+
+    P1 --> P1A[委譲層] -->|stdio MCP| P1D[Desktop Commander]
+    P2 --> P2A[委譲層] -->|stdio MCP| P2D[Desktop Commander]
+    PN --> PNA[委譲層] -->|stdio MCP| PND[Desktop Commander]
 ```
 
 ChatGPT から見える MCP 接続先は統括ノードだけとする。
@@ -143,6 +148,65 @@ MCP ツールから登録、削除、書き換えはできない。
 ユーザー認証は統括ノードで一度だけ行う。
 実行ノードへはユーザーのアクセストークンそのものを転送せず、統括ノードが検証済み要求として必要情報だけを渡す。
 
+## ローカル操作の委譲
+
+実行ノードはファイル操作とプロセス操作の実行機能を独自実装しない。
+ローカルの `@wonderwhy-er/desktop-commander` を `stdio` MCP サーバーとして起動または接続し、RemoteDesktopMCP の委譲層が MCP クライアントとして利用する。
+
+この構成は `Desktop Commander` の `Remote Device` がローカル MCP を起動し、`listTools()` と `callTool()` で処理を委譲する境界と同じ考え方を採用する。
+ただし RemoteDesktopMCP は `Desktop Commander` の内部実装を外部向け API として直接 `import` せず、MCP 規約を安定した境界として利用する。
+
+起動時は次を行う。
+
+1. 配備時に検証済みの `@wonderwhy-er/desktop-commander` 版を固定し、実行コマンドと引数をローカル設定から決定する。本番運用で自動的に `latest` へ追従しない。
+2. MCP クライアントから `listTools()` を実行し、必要なツール名と入力定義が存在することを確認する。
+3. 利用できる RemoteDesktopMCP 操作だけを実行ノードの能力として統括ノードへ通知する。
+4. 必須ツールが存在しない操作は利用不可とし、同等処理を RemoteDesktopMCP 内へ自動的に再実装しない。
+
+初期版の対応は次とする。
+
+| RemoteDesktopMCP 公開操作 | `Desktop Commander` の主な委譲先 | RemoteDesktopMCP 側の処理 |
+| --- | --- | --- |
+| `file_search` | `start_search` (`searchType="files"`), `get_more_search_results`, `stop_search` | `node_id`、`session_id`、root 方針を確認し、検索結果を公開形式へ正規化する |
+| `content_search` | `start_search` (`searchType="content"`), `get_more_search_results`, `stop_search` | 検索範囲と結果数を制限し、検索用識別子を外部へ直接依存させない |
+| `file_read` | `read_file` | 許可 root を確認して引数と結果を公開形式へ変換する |
+| `file_patch` | `edit_block` | 書き込み可否を確認し、部分変更だけを許可する |
+| `process_start` | `start_process` | RemoteDesktopMCP の論理プロセス識別子と `Desktop Commander` のローカル識別子を対応付ける |
+| `process_status` | `list_sessions`, `read_process_output` | ローカル状態を RemoteDesktopMCP の状態表現へ正規化する |
+| `process_output` | `read_process_output` | stdout、stderr、終了状態を公開形式へ正規化する |
+| `process_kill` | `force_terminate` | 論理プロセス識別子から起動元ノードとローカル識別子を解決して停止する |
+
+`Desktop Commander` への呼び出しは、RemoteDesktopMCP の認証、認可、`session_id`、`node_id`、監査、ローカル方針の確認が成功した後にだけ `callTool()` で行う。
+`Desktop Commander` の全ツール一覧をそのまま外部へ公開せず、上表で許可した公開操作だけを RemoteDesktopMCP の契約として提供する。
+
+`Desktop Commander` の `allowedDirectories` などローカル設定は対象 PC の管理者がローカルで管理する。
+RemoteDesktopMCP の許可 root や書き込み方針はそれと同じか、より狭い範囲だけを許可できる。
+両方の方針を満たさない要求は拒否し、RemoteDesktopMCP から `set_config_value` など `Desktop Commander` の設定変更ツールを公開しない。
+
+RemoteDesktopMCP が独自に実装するのは、`Desktop Commander` が提供しない次の制御責務とする。
+
+- 外部ユーザーの OAuth/OIDC 認証と認可
+- RemoteDesktopMCP の `session_id` 管理
+- `node_id` の登録、認証、要求振り分け
+- `request_id` を用いた統括ノードと実行ノードの監査関連付け
+- 公開ツールの許可方針と引数制約
+- 複数 PC をまたぐ論理プロセス識別子とローカル識別子の対応付け
+- Tailscale Funnel を含む外部公開経路との接続
+
+初期版では、`Desktop Commander` で提供されないローカルのファイル操作またはプロセス操作を独自実装する例外は設けない。
+将来例外が必要になった場合は、機能名、`Desktop Commander` で代替できない根拠、必要なローカル権限、監査方法、検証項目を設計へ追加してから実装する。
+
+### 現在の `src/index.ts` の扱い
+
+現在の `src/index.ts` は最終構成ではなく、公開接続と認証の検証を開始するための暫定 `scaffold` とする。
+`RDC` 委譲を実装する段階で、重複するローカル操作は次のように整理する。
+
+- `searchFiles()` と `readdir` / `stat` による探索は削除し、`file_search` / `content_search` から `Desktop Commander` の検索ツールへ委譲する。
+- `launch_configured_process` 内の直接 `spawn` は削除する。固定起動設定を残す場合も、RemoteDesktopMCP の許可方針として検証した後に `start_process` へ委譲する。
+- `create_file_download` と `/downloads/:token` は初期版の機能要件に含まれないため、現在の直接ファイル読み出し実装を初期版から削除する。将来必要になった場合は別途設計し、ローカル操作委譲を迂回する例外を暗黙に作らない。
+- `getRoot()` やパスの正規化処理は RemoteDesktopMCP の方針確認に必要な範囲だけ残してよいが、それ自体が対象 PC のファイルを読み書きする実装にはしない。
+- OAuth/OIDC、RemoteDesktopMCP セッション、ノード振り分け、監査など RemoteDesktopMCP 固有責務は引き続き本体で実装する。
+
 ## 要求の振り分け
 
 ファイル操作とプロセス操作には対象ノードを指定できるようにする。
@@ -173,17 +237,26 @@ MCP ツールから登録、削除、書き換えはできない。
 sequenceDiagram
     participant U as ChatGPT
     participant C as 統括ノード
-    participant L as 同一 PC 実行機能
+    participant LA as 統括 PC 委譲層
+    participant LD as 統括 PC Desktop Commander
     participant R as 遠隔実行ノード
+    participant RA as 遠隔 PC 委譲層
+    participant RD as 遠隔 PC Desktop Commander
 
     U->>C: ツール要求 + node_id
     C->>C: ユーザー認可と対象ノード決定
     alt 統括ノード自身が対象
-        C->>L: ローカル実行
-        L-->>C: 結果
+        C->>LA: 方針確認済み要求
+        LA->>LD: MCP callTool
+        LD-->>LA: 結果
+        LA-->>C: 正規化した結果
     else 遠隔 PC が対象
         C->>R: 検証済み要求
-        R->>R: ローカル方針を確認して実行
+        R->>R: ローカル方針を確認
+        R->>RA: 委譲要求
+        RA->>RD: MCP callTool
+        RD-->>RA: 結果
+        RA-->>R: 正規化した結果
         R-->>C: 結果
     end
     C-->>U: MCP 応答
@@ -252,14 +325,19 @@ PC 間ファイル転送は初期版の対象外とする。
 
 ## 統括ノード兼任時
 
-統括ノード自身を対象にした要求では、外部の実行ノードへ通信せず同一プロセス内の実行機能へ振り分けてよい。
-ただし、認証、認可、対象ノード決定、ローカル方針確認、監査ログ記録は遠隔ノードと同じ処理経路を通す。
-兼任時だけ検査を省略する実装にはしない。
+統括ノード自身を対象にした要求では、外部の実行ノードへ通信せず同一 PC の委譲層へ振り分ける。
+委譲層はローカルの `@wonderwhy-er/desktop-commander` へ MCP 経由で処理を渡し、統括ノード自身が対象の場合でもファイル操作やプロセス操作を本体内で直接実行しない。
+認証、認可、対象ノード決定、ローカル方針確認、監査ログ記録は遠隔ノードと同じ処理経路を通す。
+兼任時だけ検査や `Desktop Commander` 委譲を省略する実装にはしない。
 
 ## 障害時の扱い
 
 実行ノードが切断された場合、そのノードを切断状態として扱い、新しい操作を送らない。
 実行中処理の状態が不明になった場合は成功と推測せず、状態不明として返す。
+
+実行ノード上の `Desktop Commander` 子プロセスまたは `stdio` MCP 接続が利用不能になった場合、影響する操作を利用不可として扱う。
+委譲層は再接続または再起動を試みてよいが、その間に同等処理を RemoteDesktopMCP の直接実装へ切り替えない。
+処理中に `Desktop Commander` 接続が失われ、完了を確認できない場合は成功と推測せず状態不明として返す。
 
 統括ノードが停止した場合、ChatGPT から全実行ノードへの操作はできなくなる。
 初期版では統括ノードの自動切り替えは実装しない。
@@ -286,3 +364,8 @@ PC 間ファイル転送は初期版の対象外とする。
 6. 未登録ノードからの接続を拒否する。
 7. 実行ノード切断時に別ノードへ誤って処理を振り替えない。
 8. 同じ操作を統括ノードと実行ノードの監査ログで追跡できる。
+9. 実行ノード起動時に `listTools()` で必要な `Desktop Commander` ツールを確認し、欠けている操作を利用不可として通知する。
+10. `file_*` と `process_*` の実行が `Desktop Commander` の `callTool()` を経由し、RemoteDesktopMCP 内の同等処理へ自動的に切り替わらない。
+11. RemoteDesktopMCP が拒否するパスや操作は `Desktop Commander` が許可していても実行されず、`Desktop Commander` のローカル設定が拒否する操作も実行されない。
+12. `Desktop Commander` の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
+13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版外の直接ファイル取得処理が `RDC` 委譲実装時に削除され、同等のローカル操作が二重実装されていない。
