@@ -158,7 +158,7 @@ MCP ツールから登録、削除、書き換えはできない。
 
 起動時は次を行う。
 
-1. 配備時に検証済みの `@wonderwhy-er/desktop-commander` 版を固定し、実行コマンドと引数をローカル設定から決定する。本番運用で自動的に `latest` へ追従しない。
+1. 初期版の検証基準を `@wonderwhy-er/desktop-commander` 0.2.50 とし、配備時は検証済みの版を固定して実行コマンドと引数をローカル設定から決定する。本番運用で自動的に `latest` へ追従しない。
 2. MCP クライアントから `listTools()` を実行し、必要なツール名と入力定義が存在することを確認する。
 3. 利用できる RemoteDesktopMCP 操作だけを実行ノードの能力として統括ノードへ通知する。
 4. 必須ツールが存在しない操作は利用不可とし、同等処理を RemoteDesktopMCP 内へ自動的に再実装しない。
@@ -173,8 +173,25 @@ MCP ツールから登録、削除、書き換えはできない。
 | `file_patch` | `edit_block` | 書き込み可否を確認し、部分変更だけを許可する |
 | `process_start` | `start_process` | RemoteDesktopMCP の論理プロセス識別子と `Desktop Commander` のローカル識別子を対応付ける |
 | `process_status` | `list_sessions`, `read_process_output` | ローカル状態を RemoteDesktopMCP の状態表現へ正規化する |
-| `process_output` | `read_process_output` | stdout、stderr、終了状態を公開形式へ正規化する |
+| `process_output` | `read_process_output` | 統合出力、実行状態、取得できる場合は終了コードを公開形式へ正規化する。stdout / stderr の出所は推測しない |
 | `process_kill` | `force_terminate` | 論理プロセス識別子から起動元ノードとローカル識別子を解決して停止する |
+
+### プロセス出力契約
+
+初期版は、固定した `Desktop Commander` 版が `read_process_output` で提供する単一の統合出力をそのまま意味上の基準とする。
+`process_output` の初期版公開形式は少なくとも次を持つ。
+
+- `output`: 取得できた単一の統合出力
+- `state`: 実行中、終了、状態不明などの RemoteDesktopMCP 側の状態
+- `exit_code`: `Desktop Commander` から取得できた終了コード。実行中または不明の場合は `null`
+
+初期版では個別の `stdout` / `stderr` 欄を公開契約に含めない。
+統合出力の各行を stdout または stderr と推測して分類せず、`Desktop Commander` が保持していない出所情報を新しく作らない。
+将来、固定する `Desktop Commander` 版が出所付き出力を安定して提供する場合は、公開契約を別途拡張してよい。
+
+固定する `Desktop Commander` 版を更新するときは、更新前にプロセス出力契約を機械検証する。
+検証用プロセスから stdout と stderr の両方へ識別可能な文字列を出力して終了させ、`read_process_output` が両方を統合出力として返すこと、終了状態と終了コードを取得できること、RemoteDesktopMCP が出所情報を推測して付与しないことを確認する。
+この検証を満たさない版へは更新しない。
 
 `Desktop Commander` への呼び出しは、RemoteDesktopMCP の認証、認可、`session_id`、`node_id`、監査、ローカル方針の確認が成功した後にだけ `callTool()` で行う。
 `Desktop Commander` の全ツール一覧をそのまま外部へ公開せず、上表で許可した公開操作だけを RemoteDesktopMCP の契約として提供する。
@@ -292,9 +309,30 @@ RemoteDesktopMCP のセッションは MCP の通信セッションや個々の 
 プロセスは必ず起動時の `session_id` と起動元ノードに関連付ける。
 異なる PC では OS の PID が重複し得るため、外部へ返すプロセス識別子はノードをまたいで一意な論理識別子とする。
 
-統括ノードは論理プロセス識別子から、実行ノードとそのノード上の実プロセスへ対応付ける。
+統括ノードは論理プロセス識別子から、少なくとも `{ node_id, desktop_commander_generation, pid }` を含む世代付き対応情報を保持する。
+論理プロセス識別子は PID そのものを外部へ返さず、RemoteDesktopMCP が生成する不透明で一意な値とする。
+
+各実行ノードは、現在利用しているローカル `Desktop Commander` MCP 子プロセスと `stdio` 通信接続の組を表す `desktop_commander_generation` を持つ。
+世代識別子は新しいローカル `Desktop Commander` 接続ごとに暗号学的乱数から生成する `16 bytes` の不透明な値とし、旧接続の値を再利用しない。
+初回接続が利用可能になったときと、子プロセスまたは通信接続を再生成して新しい接続が利用可能になったときに、新しい世代識別子を生成する。
+統括ノードとの通信だけが再接続し、同じローカル `Desktop Commander` 接続を継続している場合は世代を変更しない。
+実行ノードは現在の世代識別子を統括ノードへ通知し、統括ノードも論理プロセス対応情報の検証に使用する。
+実行ノード自体が再起動した場合も新しい世代識別子を生成する。再接続時に通知された世代が統括ノードの記録と異なる場合、統括ノードは旧世代の実行中対応情報を `stale` / 状態不明へ遷移させる。
+
+`process_start` が成功したとき、現在の `desktop_commander_generation` と `Desktop Commander` が返した PID を組にして論理プロセス識別子へ対応付ける。
+実行中の `process_status`、`process_output`、`process_kill` は、対応情報の世代が実行ノードの現在世代と一致する場合だけ PID を `Desktop Commander` へ渡す。
+世代が一致しない論理プロセス識別子は `stale` / 状態不明として扱い、新しい世代の `Desktop Commander` へ PID を渡さない。
+特に `process_kill` では世代不一致時に `force_terminate` を呼び出さない。
+
+ローカル `Desktop Commander` 接続が失われた時点で、その世代に属する実行中の論理プロセス対応情報を即時に `stale` / 状態不明へ遷移させる。
+新しい `Desktop Commander` 接続が同じ PID を使用しても、旧世代の論理プロセス識別子を新しいプロセスへ再対応付けしない。
+
+プロセス終了を確認できた場合は、終了状態、取得済みの統合出力、取得できた終了コードを RemoteDesktopMCP 側の確定結果として保持し、PID を必要とする実行中対応情報から退役させる。
+確定済みプロセスの `process_status` と `process_output` はこの確定結果から返してよく、`process_kill` は終了済みとして拒否する。
+終了確認前に `Desktop Commander` 接続を失った場合は、終了したと推測せず状態不明とする。
+
 セッションが終了または失効しても、そのことだけを理由に実行中プロセスは停止しない。
-同じユーザーの別の有効なセッションから論理プロセス識別子を指定した場合は、状態取得、出力取得、停止を行えるようにする。
+同じユーザーの別の有効なセッションから論理プロセス識別子を指定した場合は、上記の世代検証を通過した場合だけ状態取得、出力取得、停止を行えるようにする。
 
 ## ファイル操作の制約
 
@@ -336,7 +374,9 @@ PC 間ファイル転送は初期版の対象外とする。
 実行中処理の状態が不明になった場合は成功と推測せず、状態不明として返す。
 
 実行ノード上の `Desktop Commander` 子プロセスまたは `stdio` MCP 接続が利用不能になった場合、影響する操作を利用不可として扱う。
-委譲層は再接続または再起動を試みてよいが、その間に同等処理を RemoteDesktopMCP の直接実装へ切り替えない。
+接続喪失を検出した時点で、現在の `desktop_commander_generation` に属する実行中プロセス対応情報を `stale` / 状態不明へ遷移させ、以後その PID を `Desktop Commander` へ渡さない。
+委譲層は再接続または再起動を試みてよいが、新しい子プロセスまたは通信接続が利用可能になった時点で新しい `desktop_commander_generation` を生成する。
+新しい世代の接続が確立しても旧世代の対応情報を復活させず、その間に同等処理を RemoteDesktopMCP の直接実装へ切り替えない。
 処理中に `Desktop Commander` 接続が失われ、完了を確認できない場合は成功と推測せず状態不明として返す。
 
 統括ノードが停止した場合、ChatGPT から全実行ノードへの操作はできなくなる。
@@ -369,3 +409,6 @@ PC 間ファイル転送は初期版の対象外とする。
 11. RemoteDesktopMCP が拒否するパスや操作は `Desktop Commander` が許可していても実行されず、`Desktop Commander` のローカル設定が拒否する操作も実行されない。
 12. `Desktop Commander` の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
 13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版外の直接ファイル取得処理が `RDC` 委譲実装時に削除され、同等のローカル操作が二重実装されていない。
+14. 固定した `Desktop Commander` 版に対して、stdout と stderr の両方へ識別可能な文字列を出す検証用プロセスを実行し、`read_process_output` と RemoteDesktopMCP の `process_output` が両方を単一の統合出力として返し、終了状態と取得可能な終了コードを返し、stdout / stderr の出所を推測して付与しない。
+15. 世代 `G1` で起動した論理プロセス識別子を保持したまま `Desktop Commander` を再起動して世代 `G2` に変更し、`G2` で同じ PID のプロセスが存在する条件でも、旧論理プロセス識別子の `process_status`、`process_output`、`process_kill` が `stale` / 状態不明となり、`read_process_output` や `force_terminate` を呼び出さない。
+16. 終了確認済みプロセスは PID を必要とする実行中対応情報から退役し、確定済みの状態・統合出力・終了コードから状態取得と出力取得を返し、停止要求を終了済みとして拒否する。
