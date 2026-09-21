@@ -30,13 +30,13 @@ RemoteDesktopMCP は、許可された単一ユーザーがリモートから対
 
 - 各実行ノードは、ローカルの `@wonderwhy-er/desktop-commander` を `stdio` MCP サーバーとして起動または接続し、ファイル操作とプロセス操作をその MCP ツールへ委譲する。
 - 起動時に `listTools()` で利用可能なツールと入力定義を確認し、実行時は `callTool()` を通して呼び出す。
-- RemoteDesktopMCP が公開する `file_*` と `process_*` は、外部認可、`session_id`、`node_id`、監査、ローカル方針を適用した後で `Desktop Commander` のツールへ変換する公開用の委譲層とする。
+- RemoteDesktopMCP が公開する `file_*` と `process_*` は、外部認可、`session_id`、`node_id`、監査、ローカル方針を適用した後で Desktop Commander のツールへ変換する公開用の委譲層とする。
 - RemoteDesktopMCP 自身では、同等のファイル探索、ファイル読書き、部分編集、プロセス起動、出力取得、停止処理を実装しない。
 - RemoteDesktopMCP が独自に持つ責務は、外部ユーザー認証・認可、RemoteDesktopMCP セッション、ノード認証と要求振り分け、監査、公開ツールの許可方針、ノードをまたぐ論理識別子の管理とする。
-- `Desktop Commander` の管理用ツールや初期版で許可していないツールを、そのまま外部 MCP へ公開しない。
-- 必須の `Desktop Commander` ツールが存在しない場合、その操作を利用不可として扱い、RemoteDesktopMCP 独自実装へ自動的に切り替えない。
-- `Desktop Commander` 側のローカル設定と RemoteDesktopMCP の方針の両方を満たす要求だけを許可する。RemoteDesktopMCP から `Desktop Commander` のローカル設定を変更する機能は提供しない。
-- `Desktop Commander` で提供されないローカル操作を将来追加する場合は、独自実装が必要な理由と責務境界を設計へ追加し、既存ツールで代替できないことを確認してから実装する。
+- Desktop Commander の管理用ツールや初期版で許可していないツールを、そのまま外部 MCP へ公開しない。
+- 必須の Desktop Commander ツールが存在しない場合、その操作を利用不可として扱い、RemoteDesktopMCP 独自実装へ自動的に切り替えない。
+- Desktop Commander 側のローカル設定と RemoteDesktopMCP の方針の両方を満たす要求だけを許可する。RemoteDesktopMCP から Desktop Commander のローカル設定を変更する機能は提供しない。
+- Desktop Commander で提供されないローカル操作を将来追加する場合は、独自実装が必要な理由と責務境界を設計へ追加し、既存ツールで代替できないことを確認してから実装する。
 
 ## ファイル操作
 
@@ -56,7 +56,7 @@ RemoteDesktopMCP は、許可された単一ユーザーがリモートから対
 
 - コマンドまたはプログラムを起動できること。
 - 起動したプロセスの実行状態を取得できること。
-- 起動したプロセスの出力を、`Desktop Commander` が保持する単一の統合出力として取得できること。初期版では stdout と stderr の出所を区別して返すことを要求せず、区別できない情報を推測して付与しないこと。
+- 起動したプロセスの出力を、Desktop Commander が保持する単一の統合出力として取得できること。初期版では stdout と stderr の出所を区別して返すことを要求せず、区別できない情報を推測して付与しないこと。
 - 起動したプロセスを停止できること。
 - プロセスの終了コードを取得できること。
 

@@ -11,6 +11,10 @@ entries:
     description: Tailscale の公開機能名。
   - term: ChatGPT
     description: 接続元サービス名。
+  - term: Desktop Commander
+    description: ローカルのファイル操作およびプロセス操作を提供する製品名。
+  - term: Remote Device
+    description: Desktop Commander のリモート接続機能名。
   - term: Google
     description: 本人確認に利用するサービス名。
   - term: OAuth
