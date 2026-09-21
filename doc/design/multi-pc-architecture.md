@@ -320,14 +320,21 @@ RemoteDesktopMCP のセッションは MCP の通信セッションや個々の 
 実行ノード自体が再起動した場合も新しい世代識別子を生成する。再接続時に通知された世代が統括ノードの記録と異なる場合、統括ノードは旧世代の実行中対応情報を `stale` / 状態不明へ遷移させる。
 
 `process_start` が成功したとき、現在の `desktop_commander_generation` と `Desktop Commander` が返した PID を組にして論理プロセス識別子へ対応付ける。
-実行中の `process_status`、`process_output`、`process_kill` は、対応情報の世代が実行ノードの現在世代と一致する場合だけ PID を `Desktop Commander` へ渡す。
-世代が一致しない論理プロセス識別子は `stale` / 状態不明として扱い、新しい世代の `Desktop Commander` へ PID を渡さない。
-特に `process_kill` では世代不一致時に `force_terminate` を呼び出さない。
+統括ノードは、実行中または終了未確認の対応情報について `{ node_id, desktop_commander_generation, pid }` を `process_key` とし、各 `process_key` の現在所有者となる論理プロセス識別子を `current_process_owner` として最大1件だけ保持する。
 
-ローカル `Desktop Commander` 接続が失われた時点で、その世代に属する実行中の論理プロセス対応情報を即時に `stale` / 状態不明へ遷移させる。
+新しい `process_start` が返した `process_key` に `current_process_owner` がすでに存在する場合、統括ノードは新しい論理プロセス識別子を外部へ返す前に、既存所有者の対応情報を `stale` / 状態不明へ遷移させ、PID を `Desktop Commander` へ渡せる状態から外す。
+その後、同じ `process_key` の `current_process_owner` を新しい論理プロセス識別子へ原子的に置き換える。
+論理プロセス識別子の生成自体は `process_start` 完了前に行ってよいが、`current_process_owner` の置き換えが完了するまで外部へ公開しない。
+
+実行中の `process_status`、`process_output`、`process_kill` は、対応情報の世代が実行ノードの現在世代と一致し、かつその論理プロセス識別子が `process_key` の `current_process_owner` である場合だけ PID を `Desktop Commander` へ渡す。
+世代が一致しない、または `current_process_owner` ではない論理プロセス識別子は `stale` / 状態不明として扱い、現在の `Desktop Commander` へ PID を渡さない。
+特に `process_kill` では世代不一致または所有者不一致時に `force_terminate` を呼び出さない。
+
+ローカル `Desktop Commander` 接続が失われた時点で、その世代に属する実行中の論理プロセス対応情報を即時に `stale` / 状態不明へ遷移させ、その世代の `current_process_owner` 索引を削除する。
 新しい `Desktop Commander` 接続が同じ PID を使用しても、旧世代の論理プロセス識別子を新しいプロセスへ再対応付けしない。
 
 プロセス終了を確認できた場合は、終了状態、取得済みの統合出力、取得できた終了コードを RemoteDesktopMCP 側の確定結果として保持し、PID を必要とする実行中対応情報から退役させる。
+その論理プロセス識別子が `process_key` の `current_process_owner` である場合だけ所有者索引を削除し、確定済みの最終結果は以後 `current_process_owner` 判定へ参加させない。
 確定済みプロセスの `process_status` と `process_output` はこの確定結果から返してよく、`process_kill` は終了済みとして拒否する。
 終了確認前に `Desktop Commander` 接続を失った場合は、終了したと推測せず状態不明とする。
 
@@ -411,4 +418,5 @@ PC 間ファイル転送は初期版の対象外とする。
 13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版外の直接ファイル取得処理が `RDC` 委譲実装時に削除され、同等のローカル操作が二重実装されていない。
 14. 固定した `Desktop Commander` 版に対して、stdout と stderr の両方へ識別可能な文字列を出す検証用プロセスを実行し、`read_process_output` と RemoteDesktopMCP の `process_output` が両方を単一の統合出力として返し、終了状態と取得可能な終了コードを返し、stdout / stderr の出所を推測して付与しない。
 15. 世代 `G1` で起動した論理プロセス識別子を保持したまま `Desktop Commander` を再起動して世代 `G2` に変更し、`G2` で同じ PID のプロセスが存在する条件でも、旧論理プロセス識別子の `process_status`、`process_output`、`process_kill` が `stale` / 状態不明となり、`read_process_output` や `force_terminate` を呼び出さない。
-16. 終了確認済みプロセスは PID を必要とする実行中対応情報から退役し、確定済みの状態・統合出力・終了コードから状態取得と出力取得を返し、停止要求を終了済みとして拒否する。
+16. 終了確認済みプロセスは PID を必要とする実行中対応情報から退役し、`current_process_owner` 索引から外れ、確定済みの状態・統合出力・終了コードから状態取得と出力取得を返し、停止要求を終了済みとして拒否する。
+17. `Desktop Commander` を再起動せず同じ世代 `G1` のまま、検証用の委譲実装から2回の `process_start` に同じ PID `P` を順に返す。1回目の終了を RemoteDesktopMCP が未確認の状態で2回目を開始し、2回目の論理プロセス識別子を公開する前に1回目が `stale` / 状態不明へ遷移すること、`current_process_owner[{node_id,G1,P}]` が2回目だけを指すこと、1回目の `process_status`、`process_output`、`process_kill` が `read_process_output` や `force_terminate` を呼び出さないことを確認する。
