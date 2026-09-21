@@ -1,0 +1,198 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: review-follow-up
+  generated_at: 2026-09-22T06:23:28+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-R4
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  reviewed_head: 15e6372f12f390bbcde8bae7e74bf94788c1b063
+  technical_head: 87be847e3f4dcd501e3b5b432fcb1cc0f867b2f6
+  current_head: 87be847e3f4dcd501e3b5b432fcb1cc0f867b2f6
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  machine_name: FA780
+  connection: available
+  os: Windows
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  source_state: report_handoff_pending
+  evidence:
+    - Repository was cloned from the PR branch at the exact reviewed HEAD before edits.
+    - No active Remote Desktop Commander terminal sessions existed when this task started.
+    - Git operations were performed through Remote Desktop Commander.
+
+authoritative_requirements:
+  - source: github_pr_comment
+    reference: RDMCP-R4
+    severity: high
+    summary: Reuse Desktop Commander for local file/process operations instead of reimplementing them.
+  - source: project_instruction
+    reference: current project
+    summary: Use RDC for git, preserve diagnostics, use small commits, save a report, comment on the PR, and do not merge.
+
+development_policy:
+  method: documentation-validation
+  testing_order: focused documentation lint followed by repository non-Markdown gates
+scope:
+  - Define Desktop Commander stdio MCP as the local execution boundary.
+  - Limit RemoteDesktopMCP responsibilities to remote control, policy, identity, routing, and audit.
+  - Define explicit public-tool to Desktop Commander tool mappings.
+  - Define the rule for features Desktop Commander does not provide.
+  - Classify current duplicate src/index.ts local operations as temporary scaffold and specify removal.
+
+non_goals:
+  - Implement the Desktop Commander delegation in product code.
+  - Modify historical review evidence.
+  - Resolve unrelated pre-existing lint findings.
+  - Merge PR #1.
+
+files:
+  changed:
+    - path: doc/design/functional-requirements.md
+      purpose: Define local-operation reuse boundary and unique RemoteDesktopMCP responsibilities.
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Define delegation architecture, mapping, failure behavior, and current scaffold disposition.
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: Align protected local paths and current implementation delta with Desktop Commander delegation.
+    - path: doc/report/2026-09-22-pr1-r4-review-followup.md
+      purpose: Detailed implementation-side report.
+    - path: doc/report/2026-09-22-pr1-r4-review-followup-handoff.yaml
+      purpose: Continuation packet for fix verification.
+  intentionally_untouched:
+    - path_or_area: src/
+      reason: RDMCP-R4 is a design finding; current duplicate code is explicitly marked for later replacement/removal.
+    - path_or_area: tools/lint/markdown-whitelist.yaml
+      reason: New design text was rewritten/code-spanned to satisfy the existing terminology policy.
+    - path_or_area: .github/workflows/lint.yml
+      reason: Existing workflow already saves required failure diagnostics.
+    - path_or_area: doc/report/2026-09-19-pr1-design-review-fix-verification.md
+      reason: Historical reviewer evidence is not silently rewritten as part of RDMCP-R4.
+upstream_evidence:
+  repository: wonderwhy-er/DesktopCommanderMCP
+  path: src/remote-device/desktop-commander-integration.ts
+  blob_sha: d82e625d8ee71847332d995d8c7b08a5a3f1be9f
+  observations:
+    - Uses MCP SDK Client with StdioClientTransport for the local Desktop Commander process.
+    - Uses listTools() to discover local tool capability.
+    - Uses callTool() to proxy tool execution.
+    - Supervises local MCP child availability.
+  adopted_boundary:
+    - Reuse the MCP boundary rather than importing Desktop Commander internal source/classes.
+
+implementation:
+  outcome: design_fix_completed
+  commits:
+    - sha: 87be847e3f4dcd501e3b5b432fcb1cc0f867b2f6
+      purpose: Delegate local operations to Desktop Commander in design.
+  addressed_findings:
+    - id: RDMCP-R4
+      severity: high
+      reviewed_head: 15e6372f12f390bbcde8bae7e74bf94788c1b063
+      disposition: addressed_pending_fix_verification
+      evidence:
+        - Executors delegate local file/process operations to @wonderwhy-er/desktop-commander over stdio MCP.
+        - RemoteDesktopMCP public tools are wrappers/mappings rather than duplicate local implementations.
+        - Initial version defines no custom local file/process exceptions.
+        - Current searchFiles/readdir/stat/direct spawn/direct file retrieval code is classified as temporary scaffold for removal.
+        - Coordinator-as-executor still delegates through Desktop Commander.
+
+validation:
+  focused_markdownlint:
+    result: passed
+    evidence: 3 changed design files, 0 issues
+  design_terminology_lint:
+    command: npm run lint:md:terms:design
+    result: passed
+  typescript_lint:
+    command: npm run lint:ts
+    result: passed
+  type_check:
+    command: npm run check
+    result: passed
+  build:
+    command: npm run build
+    result: passed
+  audit:
+    command: npm audit --audit-level=low
+    result: passed
+    evidence: 0 vulnerabilities
+  diff_check:
+    command: git diff --check
+    result: passed
+  full_lint:
+    command: npm run lint
+    result: blocked_by_preexisting_issue
+    evidence: doc/report/2026-09-19-pr1-design-review-fix-verification.md:91 MD036/no-emphasis-as-heading
+    changed_by_this_task: false
+
+diagnostics:
+  workflow: .github/workflows/lint.yml
+  artifact_policy: present
+  evidence:
+    - Upload diagnostics runs with if: always().
+    - npm ci stdout and stderr are saved.
+    - lint stdout and stderr and result are saved.
+    - environment information and workflow SHA are saved.
+  workflow_change_required: false
+
+ci:
+  required: true
+  final_publication_head: pending
+  exact_head_run_id: null
+  conclusion: pending
+  rule: Only a workflow run whose head_sha equals the final PR current HEAD may be used.
+
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-22-pr1-r4-review-followup.md
+
+review:
+  mode: pending_fix_verification
+  finding_ids:
+    - RDMCP-R4
+  reviewer_target_head: pending_final_publication_head
+  severity_preserved: high
+  requested_scope:
+    - Confirm Desktop Commander is the local execution boundary.
+    - Confirm mapping/wrapper design does not duplicate RDC local operations.
+    - Confirm unique RemoteDesktopMCP responsibilities are clearly bounded.
+    - Confirm current src/index.ts duplicate operations have an explicit removal plan.
+    - Confirm no direct regression from the R4 design change.
+
+remaining_risks:
+  - Product code still contains temporary duplicate local-operation scaffold until the delegation implementation task.
+  - Full repository lint is currently blocked by a pre-existing MD036 in a historical reviewer report.
+  - Final exact-head CI evidence must be collected after the publication commit.
+
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Verify RDMCP-R4 against the final PR #1 publication HEAD.
+  instructions:
+    - Re-resolve PR #1 current HEAD.
+    - Verify RDMCP-R4 and direct regressions only.
+    - Use only exact-head CI evidence for the current PR HEAD.
+    - Do not substitute a workflow run from another SHA.
+  required_attachments_or_references:
+    - doc/report/2026-09-22-pr1-r4-review-followup.md
+    - doc/report/2026-09-22-pr1-r4-review-followup-handoff.yaml
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-22-pr1-r4-review-followup-handoff.yaml
+  packet_url: null
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user
