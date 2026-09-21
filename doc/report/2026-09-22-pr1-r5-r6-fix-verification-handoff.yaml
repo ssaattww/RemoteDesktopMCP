@@ -1,0 +1,216 @@
+schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+  generated_at: 2026-09-22T07:39:34+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-R5-RDMCP-R6-fix-verification
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  source_reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  reviewed_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  commit_range: 3b097d7d4dabeed3cdd01b9d0f27c9bca951559d..75c50f61ae2855817aacebe739e8e731e7c64f1e
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  machine_name: FA780
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  source_state: clean
+  ownership: current_task
+  writable_paths:
+    - doc/report/2026-09-22-pr1-r5-r6-fix-verification.md
+    - doc/report/2026-09-22-pr1-r5-r6-fix-verification-handoff.yaml
+  evidence:
+    - GitHub PR current HEAD and local worktree HEAD matched before review.
+    - Worktree was clean at review start.
+    - Reviewer validation logs are stored at C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r5-r6-rereview-20260922-0729.
+    - RDC remote transport briefly reported FA780 offline during validation; the same device reconnected and the same local evidence directory was recovered.
+
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - FA780 provided exact-head worktree and RDC 0.2.50 behavior probes.
+    - Reviewer validation exits were recovered after transport reconnection.
+  technical_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  administrative_parent: null
+  commit:
+    state: commit_pending
+    review_target_sha: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  push:
+    state: push_pending
+    head_sha: unknown
+  ci_wait:
+    state: unavailable
+    required_for: merge_gate
+  final_publication:
+    sequence: report/handoff commit then exact-head CI lookup
+    pr_action: update
+
+authoritative_requirements:
+  - source: pr_review
+    reference: RDMCP-R5
+    severity: high
+    summary: Align process output contract with pinned Desktop Commander behavior.
+  - source: pr_review
+    reference: RDMCP-R6
+    severity: high
+    summary: Prevent stale logical process IDs from targeting a process after Desktop Commander generation changes.
+development_policy:
+  method: review
+  testing_order: exact-head design validation plus Desktop Commander behavior probes
+  governing_source: uploaded chat-review-worker/review-worker skills
+
+scope:
+  - Verify RDMCP-R5 and RDMCP-R6 fixes.
+  - Check direct regressions introduced by those design changes.
+non_goals:
+  - Implement findings.
+  - Merge PR #1.
+  - Rewrite historical reviewer reports.
+
+review:
+  mode: fix_verification
+  reviewed_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  reviewer:
+    identity: current ChatGPT normal-review chat
+    role: normal_reviewer
+    continuity:
+      previous_reviewer_identity: current ChatGPT normal-review chat
+      changed: false
+      reason: null
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: true
+      inherited_conversation: true
+  verdict: fail
+  resolved_findings:
+    - id: RDMCP-R5
+      severity: high
+      disposition: resolved
+      evidence:
+        - public process output contract is combined output, state, and exit_code
+        - stdout/stderr provenance is not fabricated
+        - RDC 0.2.50 probe returned both markers in combined output and exit code 7
+    - id: RDMCP-R6
+      severity: high
+      disposition: resolved
+      evidence:
+        - mapping includes node_id, desktop_commander_generation, and pid
+        - generation mismatch invalidates stale mappings before forwarding PID to RDC
+        - stale kill does not call force_terminate
+findings:
+  - id: RDMCP-R7
+    severity: high
+    origin: introduced_by_fix
+    location: doc/design/multi-pc-architecture.md process identity and validation rules
+    description: The generation-aware mapping still cannot distinguish PID reuse within the same Desktop Commander generation when an old process ended but RemoteDesktopMCP has not yet observed completion.
+    impact: An old logical process ID can pass generation checks and target a new process with the same PID; process_kill could terminate the wrong process.
+    evidence:
+      - Desktop Commander 0.2.50 keys terminal sessions by PID.
+      - Active session lookup has priority over completed session lookup.
+      - The design permits multiple logical IDs but does not define a unique current owner for the same node_id/generation/pid tuple.
+    required_action:
+      - Maintain a unique current owner per node_id/generation/pid tuple.
+      - Before publishing a new logical ID for a reused tuple, mark the prior mapping stale/state_unknown.
+      - Never forward PID from a non-current-owner logical ID.
+      - Exclude completed final snapshots from active PID ownership.
+      - Add a same-generation PID-reuse validation case without restarting RDC.
+
+validation:
+  diagnostics_path: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r5-r6-rereview-20260922-0729
+  focused_markdownlint:
+    result: passed
+    evidence: 2 design files, 0 issues
+  design_terminology_lint:
+    command: npm run lint:md:terms:design
+    result: passed
+  typescript_lint:
+    command: npm run lint:ts
+    result: passed
+  type_check:
+    command: npm run check
+    result: passed
+  build:
+    command: npm run build
+    result: passed
+  audit:
+    command: npm audit --audit-level=low
+    result: passed
+    evidence: 0 vulnerabilities
+  diff_check:
+    command: git diff --check
+    result: passed
+  implementation_handoff_yaml:
+    result: passed
+  full_lint:
+    command: npm run lint
+    result: failed_pre_existing
+    evidence: doc/report/2026-09-19-pr1-design-review-fix-verification.md:91 MD036/no-emphasis-as-heading
+    changed_by_this_task: false
+  rdc_process_contract_probe:
+    result: passed_for_r5
+    evidence:
+      - stdout marker and stderr marker were both returned as combined output
+      - cmd.exe exit /b 7 was returned as exit code 7
+
+ci:
+  required: true
+  reviewed_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  exact_head_run_id: null
+  commit_status_count: 0
+  conclusion: not_verified
+  rule: only a run whose head_sha equals the final PR current HEAD may be used
+
+held:
+  - item: exact-head CI
+    reason: connector returned no workflow runs and no commit statuses for reviewed HEAD
+    owner: repository workflow/implementation owner
+    remaining_risk: CI success is not established
+    verdict_impact: independent of fail verdict caused by RDMCP-R7
+
+report:
+  report_type: verification_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-22-pr1-r5-r6-fix-verification.md
+remaining_risks:
+  - RDMCP-R7 must be resolved before design review can pass.
+  - Full repository lint remains red on the pre-existing historical report MD036.
+  - Product delegation implementation remains future work.
+
+next_action:
+  type: implementation
+  target_skill: chat-implementation-worker
+  mode: review-follow-up
+  summary: Address RDMCP-R7 and return to this normal review chat for fix verification.
+  instructions:
+    - Preserve RDMCP-R7 severity as High.
+    - Define unique current ownership for node_id/generation/pid.
+    - Invalidate old logical mapping before exposing a new mapping for a reused tuple.
+    - Add same-generation PID-reuse validation.
+    - Use only exact-head CI evidence matching the new PR current HEAD.
+  required_attachments_or_references:
+    - doc/report/2026-09-22-pr1-r5-r6-fix-verification.md
+    - PR #1 RDMCP-R7 review comment
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-22-pr1-r5-r6-fix-verification-handoff.yaml
+  packet_url: null
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user
