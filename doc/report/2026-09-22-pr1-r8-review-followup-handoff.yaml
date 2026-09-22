@@ -171,7 +171,7 @@ validation:
   lint:
     command: npm run lint
     result: passed
-    evidence: markdownlint 19 files, 0 issues; design terminology lint passed
+    evidence: markdownlint 20 files, 0 issues; design terminology lint passed
   type_check:
     command: npm run check
     result: passed
