@@ -221,7 +221,7 @@ PR の current HEAD と workflow run の `head_sha` が一致する run だけ�
 
 - R8 は設計修正であり、製品実装は今後の作業。
 - 実装時には排他制御と決定的な並行実行テストが必要。
-- publication commit 後の exact-head CI は未確認。
+- report / handoff を含む最終コミットの current HEAD に一致する CI は、最終 push 後に確認する。
 
 ## 次のアクション
 
@@ -229,4 +229,4 @@ PR の current HEAD と workflow run の `head_sha` が一致する run だけ�
 
 ## マージ境界
 
-merge は実施しない。
+マージは実施しない。
