@@ -45,7 +45,7 @@ flowchart LR
     C --> CA[統括 PC の Desktop Commander 呼び出し]
     CA -->|stdio MCP| CD[Desktop Commander]
 
-    subgraph Tailnet[Tailscale tailnet]
+    subgraph Tailnet[tailnet]
         C <--> P1[実行ノード PC 1]
         C <--> P2[実行ノード PC 2]
         C <--> PN[実行ノード PC N]
@@ -116,7 +116,7 @@ PSK は暗号学的に安全な乱数32バイトを `base64url` で表現した�
 2. 統括ノードは `node_id` に対応する PSK を取得し、新しい `server_nonce` を生成する。
 3. 統括ノードは `HMAC-SHA-256` で `rdmcp-node-auth-v1|coordinator|node_id|client_nonce|server_nonce` のHMAC値を計算し、`server_nonce` とHMAC値を返す。
 4. 実行ノードは統括ノードから受け取ったHMAC値を検証し、同じ入力の役割だけを `executor` に変えて計算したHMAC値を返す。
-5. 統括ノードも実行ノードから受け取ったHMAC値を検証し、双方の検証が成功した後だけ接続を認証済みとする。
+5. 統括ノードも実行ノードから受け取ったHMAC値を検証し、双方の検証に成功した場合だけ接続を許可する。
 
 `client_nonce` と `server_nonce` は接続ごとに新しく生成する。
 以前の認証メッセージを再送しても nonce が異なるため、認証には使えない。
@@ -128,7 +128,7 @@ PSK は暗号学的に安全な乱数32バイトを `base64url` で表現した�
 メッセージ本文から `body_hash = SHA-256(body_bytes)` を計算し、セッション鍵を使った `HMAC-SHA-256` の入力は `rdmcp-node-frame-v1|connection_id|direction|sequence|request_id|body_hash` の順で固定する。
 受信側は、直前に受け付けた `sequence` 以下の値、HMAC値の不一致、`connection_id` の不一致を拒否する。
 これにより、RemoteDesktopMCP 自身でも通信相手を確認し、リプレイ攻撃を防ぐ。
-通信内容の暗号化と tailnet 内の経路保護には引き続き Tailscale を使用する。
+通信内容の暗号化と tailnet 内の通信経路の保護には引き続き Tailscale を使用する。
 
 PSK は認証設定に保存し、サーバープロセスを実行する OS ユーザーだけが読み取れる権限にする。
 認証設定の保存先はファイル操作ツールの許可範囲に含めず、PSK やセッション鍵をログへ出力しない。
@@ -175,25 +175,25 @@ RemoteDesktopMCP から Desktop Commander の内部実装を直接 `import` せ�
 | `process_output` | `read_process_output` | 統合出力、実行状態、取得できる場合は終了コードを RemoteDesktopMCP の形式へ変換する。stdout / stderr の区分は推測しない |
 | `process_kill` | `force_terminate` | 論理プロセスIDから起動元ノードと PID を特定して停止する |
 
-### プロセス出力契約
+### プロセス出力仕様
 
 初期版では、固定した Desktop Commander 版の `read_process_output` が返す統合出力を仕様の基準とする。
-`process_output` の初期版公開形式は少なくとも次を持つ。
+`process_output` は初期版で少なくとも次の値を返す。
 
-- `output`: 取得できた単一の統合出力
+- `output`: Desktop Commander から取得した統合出力
 - `state`: 実行中、終了、状態不明などの RemoteDesktopMCP 側の状態
 - `exit_code`: Desktop Commander から取得できた終了コード。実行中または不明の場合は `null`
 
-初期版では個別の `stdout` / `stderr` 欄を公開契約に含めない。
+初期版では `stdout` と `stderr` を個別の項目として返さない。
 統合出力の各行を stdout または stderr と推測して分類せず、Desktop Commander が保持していない stdout / stderr の区分情報を作らない。
 将来、Desktop Commander が stdout / stderr を区別した出力を安定して返せるようになった場合は、RemoteDesktopMCP の公開仕様を拡張してよい。
 
 固定する Desktop Commander のバージョンを更新するときは、更新前にプロセス出力仕様を自動テストする。
-検証用プロセスから stdout と stderr の両方へ識別可能な文字列を出力して終了させ、`read_process_output` が両方を統合出力として返すこと、終了状態と終了コードを取得できること、RemoteDesktopMCP が出所情報を推測して付与しないことを確認する。
+検証用プロセスで stdout と stderr の両方へ別々の文字列を出力して終了させる。`read_process_output` が両方を統合出力として返すこと、終了状態と終了コードを取得できること、RemoteDesktopMCP が stdout / stderr の区分を推測して追加しないことを確認する。
 この検証を満たさない版へは更新しない。
 
 Desktop Commander は、ユーザー認証・認可、`session_id`、`node_id`、監査、各PCの操作制限をすべて確認した後にだけ `callTool()` で呼び出す。
-Desktop Commander の全ツール一覧をそのまま外部へ公開せず、上表で許可した公開操作だけを RemoteDesktopMCP の契約として提供する。
+Desktop Commander のツールをそのまま外部公開せず、上表で定義した RemoteDesktopMCP の操作だけを MCP ツールとして公開する。
 
 Desktop Commander の `allowedDirectories` などローカル設定は対象 PC の管理者がローカルで管理する。
 RemoteDesktopMCP 側の許可ディレクトリと書き込み制限は、Desktop Commander と同じか、より厳しい範囲に設定できる。
@@ -204,9 +204,9 @@ RemoteDesktopMCP が担当する機能は、Desktop Commander が提供しない
 - 外部ユーザーの OAuth/OIDC 認証と認可
 - RemoteDesktopMCP の `session_id` 管理
 - `node_id` の登録、認証、リクエストの振り分け
-- `request_id` を使った統括ノードと実行ノードの監査ログのひも付け
+- `request_id` を使った統括ノードと実行ノードの監査ログの関連付け
 - 外部公開するツールと引数の制限
-- 複数PCをまたいで使う論理プロセスIDとローカルIDの対応管理
+- 複数PC間で一意な論理プロセスIDと、各PC上の PID との対応管理
 - Tailscale Funnel を使った外部公開
 
 初期版では、Desktop Commander で提供されないファイル操作やプロセス操作を RemoteDesktopMCP 側で独自実装しない。
@@ -219,7 +219,7 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 
 - `searchFiles()` と `readdir` / `stat` による探索は削除し、`file_search` / `content_search` から Desktop Commander の検索ツールを呼び出す。
 - `launch_configured_process` 内の直接 `spawn` は削除する。固定起動設定を残す場合も、RemoteDesktopMCP 側で起動を許可してよい設定か確認した後に `start_process` を呼び出す。
-- `create_file_download` と `/downloads/:token` は初期版の機能要件に含まれないため、現在の直接ファイル読み出し実装を初期版から削除する。将来必要になった場合は別途設計し、Desktop Commander を経由しない実装を別途設計せずに追加しない。
+- `create_file_download` と `/downloads/:token` は初期版の機能要件に含まれないため、現在の直接ファイル読み出し実装を初期版から削除する。将来必要になった場合は、Desktop Commander を経由しない理由と安全性を別途設計してから追加する。
 - `getRoot()` やパスの正規化処理は、RemoteDesktopMCP 側のアクセス制限を確認するために必要な範囲だけ残してよい。ただし、これらの処理から対象PCのファイルを直接読み書きしない。
 - OAuth/OIDC、RemoteDesktopMCP セッション、ノード振り分け、監査など RemoteDesktopMCP 固有の機能は引き続き本体で実装する。
 
@@ -245,7 +245,7 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 
 指定された `node_id` が登録済みでも切断中の場合は、対象ノードに接続できないエラーを返し、別のノードへ振り替えない。
 登録済み実行ノードが1台だけで `node_id` が省略された場合も、そのノードが切断中なら接続できないエラーを返す。
-表示名は画面表示や候補提示に使ってよいが、実行先の特定には必ず `node_id` を使う。
+表示名は画面表示やユーザーへの候補表示に使ってよいが、実行先の特定には必ず `node_id` を使う。
 
 ## リクエスト処理図
 
@@ -380,7 +380,7 @@ PC 間ファイル転送は初期版の対象外とする。
 - リクエスト種別
 - 振り分け結果
 - 成功、拒否、失敗
-- 実行ノードから返された結果状態
+- 実行ノードから返された実行結果
 
 実行ノード側にも、そのPCで実行した操作の監査ログを記録する。
 
@@ -413,7 +413,7 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 
 - 統括ノードの自動切り替え
 - 複数統括ノードの同時稼働
-- 1操作の複数ノード同時実行
+- 1回の操作を複数ノードで同時に実行する機能
 - PC 間ファイル転送
 - ChatGPT からのノード登録・削除
 
@@ -433,8 +433,8 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 10. `file_*` と `process_*` の実行が Desktop Commander の `callTool()` を経由し、RemoteDesktopMCP 内の同等処理へ自動的に切り替わらない。
 11. RemoteDesktopMCP が拒否するパスや操作は Desktop Commander が許可していても実行されず、Desktop Commander のローカル設定が拒否する操作も実行されない。
 12. Desktop Commander の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
-13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版外の直接ファイル取得処理を Desktop Commander の MCP ツール呼び出しへ置き換え、同等のローカル操作を二重実装していない。
-14. 固定した Desktop Commander バージョンで、stdout と stderr の両方へ識別用の文字列を出す検証用プロセスを実行する。`read_process_output` と RemoteDesktopMCP の `process_output` が両方を1本の統合出力として返すこと、終了状態と取得可能な終了コードを返すこと、stdout / stderr の区分を推測して付けないことを確認する。
+13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版対象外の直接ファイル取得処理を Desktop Commander の MCP ツール呼び出しへ置き換え、同じローカル操作を RemoteDesktopMCP 側にも重複実装していないことを確認する。
+14. 固定した Desktop Commander バージョンで、stdout と stderr の両方へ識別用の文字列を出す検証用プロセスを実行する。`read_process_output` と RemoteDesktopMCP の `process_output` が両方を1つの統合出力として返すこと、終了状態と取得可能な終了コードを返すこと、stdout / stderr の区分を推測して付けないことを確認する。
 15. 世代 `G1` で起動した論理プロセスIDを保持したまま Desktop Commander を再起動して世代 `G2` に変更する。`G2` で同じ PID のプロセスが存在しても、古い論理プロセスIDの `process_status`、`process_output`、`process_kill` は `stale`（無効）となり、`read_process_output` や `force_terminate` を呼び出さないことを確認する。
 16. 終了を確認したプロセスは実行中プロセスの対応表と `current_process_owner` から外す。その後の `process_status` と `process_output` は保存済みの状態・統合出力・終了コードから返し、`process_kill` は終了済みとして拒否する。
 17. Desktop Commander を再起動せず、同じ世代 `G1` のまま検証用実装から2回の `process_start` に同じ PID `P` を順に返す。1回目の終了を RemoteDesktopMCP がまだ確認していない状態で2回目を開始し、2回目の論理プロセスIDを返す前に1回目を `stale`（無効）にすること、`current_process_owner[{node_id,G1,P}]` が2回目のIDだけを指すこと、1回目のIDから `read_process_output` や `force_terminate` を呼び出さないことを確認する。

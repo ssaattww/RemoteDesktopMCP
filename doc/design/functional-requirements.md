@@ -32,7 +32,7 @@ RemoteDesktopMCP は、あらかじめ許可した1人のユーザーが、リ�
 - 起動時に `listTools()` で利用可能なツールと入力定義を確認し、実行時は `callTool()` を使って呼び出す。
 - RemoteDesktopMCP が公開する `file_*` と `process_*` は、ユーザーの認可、`session_id`、`node_id`、監査、各PCの操作制限を確認したうえで、対応する Desktop Commander ツールを呼び出す。
 - RemoteDesktopMCP 自身では、同等のファイル探索、ファイル読み書き、部分編集、プロセス起動、出力取得、停止処理を実装しない。
-- RemoteDesktopMCP が担当するのは、外部ユーザーの認証・認可、RemoteDesktopMCP セッション管理、ノード間認証、リクエストの振り分け、監査、外部公開するツールと引数の制限、複数PCをまたいで使うIDの管理とする。
+- RemoteDesktopMCP は、外部ユーザーの認証・認可、セッション管理、ノード間認証、リクエストの振り分け、監査、外部公開するツールと引数の制限、複数PC間で一意なIDの管理を担当する。
 - Desktop Commander の管理用ツールや、初期版で許可していないツールは外部 MCP へ公開しない。
 - 必須の Desktop Commander ツールがない場合、その操作は利用できないものとし、RemoteDesktopMCP の独自実装へ自動的に切り替えない。
 - Desktop Commander 側の設定と RemoteDesktopMCP 側の操作制限の両方を満たすリクエストだけを実行する。RemoteDesktopMCP から Desktop Commander のローカル設定を変更する機能は提供しない。
@@ -56,7 +56,7 @@ RemoteDesktopMCP は、あらかじめ許可した1人のユーザーが、リ�
 
 - コマンドまたはプログラムを起動できること。
 - 起動したプロセスの実行状態を取得できること。
-- 起動したプロセスの出力を、Desktop Commander が保持する1本の統合出力として取得できること。初期版では stdout と stderr を別々には返さず、Desktop Commander から判別できない区分を推測して付けないこと。
+- 起動したプロセスの出力を、Desktop Commander が保持する1つの統合出力として取得できること。初期版では stdout と stderr を別々には返さず、Desktop Commander から判別できない区分を推測して付けないこと。
 - 起動したプロセスを停止できること。
 - プロセスの終了コードを取得できること。
 
