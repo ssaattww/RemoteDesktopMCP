@@ -4,19 +4,19 @@
 
 1つの ChatGPT 接続から、複数の PC 上で動作する RemoteDesktopMCP を操作できるようにする。
 
-外部へ公開する MCP サーバーは1つに集約し、そのサーバーが要求の対象 PC を選択して各 PC へ処理を振り分ける。
+外部へ公開する MCP サーバーは1つに集約し、そのサーバーが操作対象のPCを選び、各PCへリクエストを振り分ける。
 
 ## 役割
 
 各 PC では同じ RemoteDesktopMCP を動作させ、設定によって次の役割を持たせる。
 
-- 統括ノード: ChatGPT からの MCP 接続、ユーザー認証、RemoteDesktopMCP セッション管理、対象ノード選択、要求振り分けを担当する。
-- 実行ノード: ローカル方針を確認し、ファイル操作とプロセス操作をローカルの `@wonderwhy-er/desktop-commander` へ委譲する。
+- 統括ノード: ChatGPT からの MCP 接続、ユーザー認証、RemoteDesktopMCP セッション管理、対象ノードの選択、リクエストの振り分けを担当する。
+- 実行ノード: 各PCの操作制限を確認し、実際のファイル操作とプロセス操作はローカルの `@wonderwhy-er/desktop-commander` に実行させる。
 - 兼任ノード: 統括ノードと実行ノードの両方を同一 PC 上で担当する。
 
-初期版では、1構成につき有効な統括ノードは1台とする。
+初期版では、1つの構成に統括ノードを1台だけ置く。
 実行ノードは複数台登録できる。
-統括ノード自身も実行ノードを兼任できることを必須とする。
+統括ノード自身を実行ノードとして使う構成にも対応する。
 
 構成例:
 
@@ -26,8 +26,7 @@
 | PC B | 実行ノード |
 | PC C | 実行ノード |
 
-設定上は同じ RemoteDesktopMCP に役割を持たせる。
-統括ノードだけを行う構成、実行ノードだけを行う構成、両方を兼任する構成を選べるようにする。
+どのPCでも同じ RemoteDesktopMCP を動かし、設定によって統括ノード、実行ノード、または両方の役割を選べるようにする。
 
 概念例:
 
@@ -43,18 +42,18 @@ roles:
 flowchart LR
     ChatGPT[ChatGPT] -->|HTTPS| Funnel[Tailscale Funnel]
     Funnel -->|loopback| C[統括ノード]
-    C --> CA[統括 PC の委譲層]
+    C --> CA[統括 PC の Desktop Commander 呼び出し]
     CA -->|stdio MCP| CD[Desktop Commander]
 
-    subgraph Tailnet[Tailscale 私設経路]
+    subgraph Tailnet[Tailscale tailnet]
         C <--> P1[実行ノード PC 1]
         C <--> P2[実行ノード PC 2]
         C <--> PN[実行ノード PC N]
     end
 
-    P1 --> P1A[委譲層] -->|stdio MCP| P1D[Desktop Commander]
-    P2 --> P2A[委譲層] -->|stdio MCP| P2D[Desktop Commander]
-    PN --> PNA[委譲層] -->|stdio MCP| PND[Desktop Commander]
+    P1 --> P1A[Desktop Commander 呼び出し] -->|stdio MCP| P1D[Desktop Commander]
+    P2 --> P2A[Desktop Commander 呼び出し] -->|stdio MCP| P2D[Desktop Commander]
+    PN --> PNA[Desktop Commander 呼び出し] -->|stdio MCP| PND[Desktop Commander]
 ```
 
 ChatGPT から見える MCP 接続先は統括ノードだけとする。
@@ -68,117 +67,117 @@ ChatGPT から見える MCP 接続先は統括ノードだけとする。
 遠隔の実行ノードは Tailscale の tailnet 内で統括ノードへ接続する。
 インターネットへ直接待ち受けるポートは設けない。
 
-実行ノードから統括ノードへ持続接続を開始し、その接続を双方向に利用して要求と結果を転送する構成を基本とする。
+実行ノードから統括ノードへ接続し、その接続を維持したまま双方向にリクエストと結果をやり取りする構成を基本とする。
 これにより、実行ノード側で受信用の公開設定を追加する必要をなくす。
 
 統括ノードは次を管理する。
 
 - 接続済み実行ノード一覧
-- 各ノードの一意識別子
+- `node_id`
 - 表示名
 - 接続状態
 - 最終確認時刻
 - 利用可能な操作種別
-- 実行中処理との対応関係
+- 実行中プロセスとの対応
 
-統括ノードと実行ノード間の接続は、Tailscale の暗号化だけを認証根拠にしない。
-RemoteDesktopMCP 自身でも相互に接続相手を検証する。
+Tailscale で通信が暗号化されているだけでは、接続相手を信頼済みとはみなさない。
+RemoteDesktopMCP 側でも統括ノードと実行ノードを相互認証する。
 
 ## ノード識別
 
-各実行ノードはローカルで生成した不変の `node_id` を持つ。
+各実行ノードは、再起動後も変わらない `node_id` をローカルで生成して保持する。
 
-人が識別するための表示名も持たせる。
-表示名は `pc1`、`workstation` など任意に設定できるが、処理の振り分けには `node_id` を使用する。
+管理者がPCを見分けやすいよう、表示名も設定できるようにする。
+表示名は `pc1`、`workstation` など任意に設定できるが、実際の処理先は `node_id` で特定する。
 
-最低限保持する情報は次とする。
+最低限、次の情報を保持する。
 
 - `node_id`
 - 表示名
 - 役割
-- ノード認証資格情報
+- ノード認証情報
 - 最終確認時刻
 - 接続状態
-- 利用可能な操作種別
+- 利用可能な操作
 
 `node_id`、ノード認証設定、統括ノード設定はローカル操作からだけ変更できるようにする。
 MCP ツールから登録、削除、書き換えはできない。
 
 ## ノード認証
 
-初期版のノード間認証は、統括ノードと各実行ノードの組ごとに異なる共有秘密情報を使う相互認証とする。
-共有秘密情報は暗号学的乱数 `32 bytes` を `base64url` で表現した値とし、統括ノードは許可済み実行ノードの `node_id` と対応付けて保持する。
-実行ノードは接続先統括ノード用の共有秘密情報を1件だけ保持する。
-同じ共有秘密情報を複数の実行ノードで使い回さない。
+初期版のノード間認証では、統括ノードと各実行ノードの組ごとに異なる事前共有鍵（PSK）を使う。
+PSK は暗号学的に安全な乱数32バイトを `base64url` で表現した値とする。統括ノードは、許可済み実行ノードの `node_id` と PSK を対応付けて保持する。
+実行ノードは、接続先の統括ノード用 PSK を1件だけ保持する。
+同じ PSK を複数の実行ノードで使い回さない。
 
 接続開始時の相互認証は次の順序とする。
 
-1. 実行ノードは規約版、`node_id`、暗号学的乱数 `client_nonce` を統括ノードへ送る。
-2. 統括ノードは `node_id` に対応する共有秘密情報を取得し、新しい `server_nonce` を生成する。
-3. 統括ノードは `HMAC-SHA-256` で `rdmcp-node-auth-v1|coordinator|node_id|client_nonce|server_nonce` を認証し、`server_nonce` と検証値を返す。
-4. 実行ノードは統括ノードの検証値を確認し、同じ入力の役割だけを `executor` に変えた値を `HMAC-SHA-256` で返す。
-5. 統括ノードは実行ノードの検証値を確認し、双方の確認が成功した後だけ接続を認証済みとする。
+1. 実行ノードはプロトコルのバージョン、`node_id`、暗号学的に安全な乱数 `client_nonce` を統括ノードへ送る。
+2. 統括ノードは `node_id` に対応する PSK を取得し、新しい `server_nonce` を生成する。
+3. 統括ノードは `HMAC-SHA-256` で `rdmcp-node-auth-v1|coordinator|node_id|client_nonce|server_nonce` のHMAC値を計算し、`server_nonce` とHMAC値を返す。
+4. 実行ノードは統括ノードから受け取ったHMAC値を検証し、同じ入力の役割だけを `executor` に変えて計算したHMAC値を返す。
+5. 統括ノードも実行ノードから受け取ったHMAC値を検証し、双方の検証が成功した後だけ接続を認証済みとする。
 
 `client_nonce` と `server_nonce` は接続ごとに新しく生成する。
-過去の相互認証応答は新しい乱数組では一致しないため再利用できない。
-認証完了前にファイル操作、プロセス操作、ノード状態更新を受理しない。
+以前の認証メッセージを再送しても nonce が異なるため、認証には使えない。
+認証が完了するまでは、ファイル操作、プロセス操作、ノード状態更新を受け付けない。
 
-認証後は `HKDF-SHA-256` を使い、共有秘密情報を入力、`client_nonce || server_nonce` を `salt`、`rdmcp-node-session-v1` を付加情報として接続専用鍵を生成する。
-`connection_id` は `base64url(SHA-256("rdmcp-node-connection-v1" || client_nonce || server_nonce))` として双方が同じ値を算出する。
-ノード間の各要求と結果には、`connection_id`、送信方向、方向ごとに1から始めて単調増加する `sequence`、`request_id`、送信本体を含める。
-送信本体から `body_hash = SHA-256(body_bytes)` を計算し、接続専用鍵による `HMAC-SHA-256` の入力は `rdmcp-node-frame-v1|connection_id|direction|sequence|request_id|body_hash` の順で固定する。
-受信側は方向ごとの最終 `sequence` 以下の値、検証値不一致、`connection_id` 不一致を拒否する。
-これにより、ノード間通信の相手確認と再送攻撃防止を RemoteDesktopMCP 自身でも行う。
-通信内容の秘匿と tailnet 内の経路保護には引き続き Tailscale を使用する。
+認証後は `HKDF-SHA-256` を使い、PSK を入力、`client_nonce || server_nonce` を `salt`、`rdmcp-node-session-v1` を追加情報としてセッション鍵を生成する。
+`connection_id` は `base64url(SHA-256("rdmcp-node-connection-v1" || client_nonce || server_nonce))` として双方が同じ値を計算する。
+ノード間の各リクエストと応答には、`connection_id`、送信方向、送信方向ごとに1から増加する `sequence`、`request_id`、メッセージ本文を含める。
+メッセージ本文から `body_hash = SHA-256(body_bytes)` を計算し、セッション鍵を使った `HMAC-SHA-256` の入力は `rdmcp-node-frame-v1|connection_id|direction|sequence|request_id|body_hash` の順で固定する。
+受信側は、直前に受け付けた `sequence` 以下の値、HMAC値の不一致、`connection_id` の不一致を拒否する。
+これにより、RemoteDesktopMCP 自身でも通信相手を確認し、リプレイ攻撃を防ぐ。
+通信内容の暗号化と tailnet 内の経路保護には引き続き Tailscale を使用する。
 
-共有秘密情報は認証設定領域に保存し、サーバープロセスを実行する OS ユーザーだけが読み取れる権限にする。
-認証設定領域はファイル操作ツールの許可 root に含めず、共有秘密情報や接続専用鍵をログへ出力しない。
+PSK は認証設定に保存し、サーバープロセスを実行する OS ユーザーだけが読み取れる権限にする。
+認証設定の保存先はファイル操作ツールの許可範囲に含めず、PSK やセッション鍵をログへ出力しない。
 
-新しい実行ノードを登録するときは、統括ノード側のローカル操作で共有秘密情報を生成し、信頼できる管理経路で対象 PC のローカル設定へ同じ値を一度だけ設定する。
-登録用の MCP ツール、公開 HTTP 管理 API、自動加入機能は作らない。
+新しい実行ノードを登録するときは、統括ノード上で PSK を生成し、安全な方法で対象PCのローカル設定にも同じ値を設定する。
+ノード登録用の MCP ツール、公開 HTTP 管理 API、自動参加機能は作らない。
 
-共有秘密情報を更新するときは、対象ノードとの接続を停止し、新しい値を両 PC のローカル設定へ反映してから再接続する。
-初期版では旧値と新値の同時有効化は行わず、片側を更新した時点から設定が一致するまで接続失敗を許容する。
-失効時は統括ノードの許可済みノード設定から対象 `node_id` と共有秘密情報を削除し、既存接続も直ちに切断する。
-実行ノード側で接続先資格情報を削除した場合も再接続を行わない。
+PSK を更新するときは、対象ノードとの接続を停止し、新しい値を両方のPCへ設定してから再接続する。
+初期版では新旧の PSK を同時には使わないため、両方の設定が揃うまでは接続できなくてよい。
+ノード登録を解除するときは、統括ノードの許可済みノード設定から対象 `node_id` と PSK を削除し、既存接続も直ちに切断する。
+実行ノード側で接続先の認証情報を削除した場合も再接続しない。
 
-相互認証に失敗した場合は接続を閉じ、要求を実行しない。
-監査ログには対象 `node_id`、成功または拒否、失敗段階を残すが、共有秘密情報、乱数、検証値、接続専用鍵は記録しない。
+相互認証に失敗した場合は接続を閉じ、リクエストを実行しない。
+監査ログには対象 `node_id`、認証結果、失敗した処理段階を記録する。ただし、PSK、nonce、HMAC値、セッション鍵は記録しない。
 
 ユーザー認証は統括ノードで一度だけ行う。
-実行ノードへはユーザーのアクセストークンそのものを転送せず、統括ノードが検証済み要求として必要情報だけを渡す。
+実行ノードへはユーザーのアクセストークンそのものを転送せず、統括ノードで認証・認可済みのリクエストに必要な情報だけを渡す。
 
-## ローカル操作の委譲
+## Desktop Commander の利用
 
 実行ノードはファイル操作とプロセス操作の実行機能を独自実装しない。
-ローカルの `@wonderwhy-er/desktop-commander` を `stdio` MCP サーバーとして起動または接続し、RemoteDesktopMCP の委譲層が MCP クライアントとして利用する。
+ローカルの `@wonderwhy-er/desktop-commander` を `stdio` MCP サーバーとして起動または接続し、RemoteDesktopMCP が MCP クライアントとして利用する。
 
-この構成は Desktop Commander の Remote Device がローカル MCP を起動し、`listTools()` と `callTool()` で処理を委譲する境界と同じ考え方を採用する。
-ただし RemoteDesktopMCP は Desktop Commander の内部実装を外部向け API として直接 `import` せず、MCP 規約を安定した境界として利用する。
+この構成は Desktop Commander の Remote Device と同様に、ローカル MCP を起動して `listTools()` と `callTool()` で操作する。
+RemoteDesktopMCP から Desktop Commander の内部実装を直接 `import` せず、Desktop Commander との連携は MCP インターフェースだけに依存する。
 
 起動時は次を行う。
 
-1. 初期版の検証基準を `@wonderwhy-er/desktop-commander` 0.2.50 とし、配備時は検証済みの版を固定して実行コマンドと引数をローカル設定から決定する。本番運用で自動的に `latest` へ追従しない。
+1. 初期版の検証対象を `@wonderwhy-er/desktop-commander` 0.2.50 とする。導入時は検証済みのバージョンを固定し、実行コマンドと引数はローカル設定で指定する。本番環境で自動的に `latest` へ更新しない。
 2. MCP クライアントから `listTools()` を実行し、必要なツール名と入力定義が存在することを確認する。
-3. 利用できる RemoteDesktopMCP 操作だけを実行ノードの能力として統括ノードへ通知する。
-4. 必須ツールが存在しない操作は利用不可とし、同等処理を RemoteDesktopMCP 内へ自動的に再実装しない。
+3. その実行ノードで利用できる RemoteDesktopMCP 操作を統括ノードへ通知する。
+4. 必要な Desktop Commander ツールがない操作は利用できないものとし、RemoteDesktopMCP の独自実装へ自動的に切り替えない。
 
-初期版の対応は次とする。
+初期版で各公開操作から呼び出す Desktop Commander ツールは次のとおり。
 
-| RemoteDesktopMCP 公開操作 | Desktop Commander の主な委譲先 | RemoteDesktopMCP 側の処理 |
+| RemoteDesktopMCP 公開操作 | 呼び出す Desktop Commander ツール | RemoteDesktopMCP 側の処理 |
 | --- | --- | --- |
-| `file_search` | `start_search` (`searchType="files"`), `get_more_search_results`, `stop_search` | `node_id`、`session_id`、root 方針を確認し、検索結果を公開形式へ正規化する |
-| `content_search` | `start_search` (`searchType="content"`), `get_more_search_results`, `stop_search` | 検索範囲と結果数を制限し、検索用識別子を外部へ直接依存させない |
-| `file_read` | `read_file` | 許可 root を確認して引数と結果を公開形式へ変換する |
+| `file_search` | `start_search` (`searchType="files"`), `get_more_search_results`, `stop_search` | `node_id`、`session_id`、許可ディレクトリを確認し、検索結果を RemoteDesktopMCP の返却形式へ変換する |
+| `content_search` | `start_search` (`searchType="content"`), `get_more_search_results`, `stop_search` | 検索範囲と結果数を制限し、Desktop Commander の検索IDを外部APIの仕様にしない |
+| `file_read` | `read_file` | 許可ディレクトリを確認し、引数と結果を RemoteDesktopMCP の形式へ変換する |
 | `file_patch` | `edit_block` | 書き込み可否を確認し、部分変更だけを許可する |
-| `process_start` | `start_process` | RemoteDesktopMCP の論理プロセス識別子と Desktop Commander のローカル識別子を対応付ける |
-| `process_status` | `list_sessions`, `read_process_output` | ローカル状態を RemoteDesktopMCP の状態表現へ正規化する |
-| `process_output` | `read_process_output` | 統合出力、実行状態、取得できる場合は終了コードを公開形式へ正規化する。stdout / stderr の出所は推測しない |
-| `process_kill` | `force_terminate` | 論理プロセス識別子から起動元ノードとローカル識別子を解決して停止する |
+| `process_start` | `start_process` | RemoteDesktopMCP の論理プロセスIDと Desktop Commander の PID を対応付ける |
+| `process_status` | `list_sessions`, `read_process_output` | Desktop Commander の状態を RemoteDesktopMCP の状態へ変換する |
+| `process_output` | `read_process_output` | 統合出力、実行状態、取得できる場合は終了コードを RemoteDesktopMCP の形式へ変換する。stdout / stderr の区分は推測しない |
+| `process_kill` | `force_terminate` | 論理プロセスIDから起動元ノードと PID を特定して停止する |
 
 ### プロセス出力契約
 
-初期版は、固定した Desktop Commander 版が `read_process_output` で提供する単一の統合出力をそのまま意味上の基準とする。
+初期版では、固定した Desktop Commander 版の `read_process_output` が返す統合出力を仕様の基準とする。
 `process_output` の初期版公開形式は少なくとも次を持つ。
 
 - `output`: 取得できた単一の統合出力
@@ -186,45 +185,45 @@ MCP ツールから登録、削除、書き換えはできない。
 - `exit_code`: Desktop Commander から取得できた終了コード。実行中または不明の場合は `null`
 
 初期版では個別の `stdout` / `stderr` 欄を公開契約に含めない。
-統合出力の各行を stdout または stderr と推測して分類せず、Desktop Commander が保持していない出所情報を新しく作らない。
-将来、固定する Desktop Commander 版が出所付き出力を安定して提供する場合は、公開契約を別途拡張してよい。
+統合出力の各行を stdout または stderr と推測して分類せず、Desktop Commander が保持していない stdout / stderr の区分情報を作らない。
+将来、Desktop Commander が stdout / stderr を区別した出力を安定して返せるようになった場合は、RemoteDesktopMCP の公開仕様を拡張してよい。
 
-固定する Desktop Commander 版を更新するときは、更新前にプロセス出力契約を機械検証する。
+固定する Desktop Commander のバージョンを更新するときは、更新前にプロセス出力仕様を自動テストする。
 検証用プロセスから stdout と stderr の両方へ識別可能な文字列を出力して終了させ、`read_process_output` が両方を統合出力として返すこと、終了状態と終了コードを取得できること、RemoteDesktopMCP が出所情報を推測して付与しないことを確認する。
 この検証を満たさない版へは更新しない。
 
-Desktop Commander への呼び出しは、RemoteDesktopMCP の認証、認可、`session_id`、`node_id`、監査、ローカル方針の確認が成功した後にだけ `callTool()` で行う。
+Desktop Commander は、ユーザー認証・認可、`session_id`、`node_id`、監査、各PCの操作制限をすべて確認した後にだけ `callTool()` で呼び出す。
 Desktop Commander の全ツール一覧をそのまま外部へ公開せず、上表で許可した公開操作だけを RemoteDesktopMCP の契約として提供する。
 
 Desktop Commander の `allowedDirectories` などローカル設定は対象 PC の管理者がローカルで管理する。
-RemoteDesktopMCP の許可 root や書き込み方針はそれと同じか、より狭い範囲だけを許可できる。
-両方の方針を満たさない要求は拒否し、RemoteDesktopMCP から `set_config_value` など Desktop Commander の設定変更ツールを公開しない。
+RemoteDesktopMCP 側の許可ディレクトリと書き込み制限は、Desktop Commander と同じか、より厳しい範囲に設定できる。
+どちらかの制限に違反するリクエストは拒否する。また、RemoteDesktopMCP から `set_config_value` など Desktop Commander の設定変更ツールは公開しない。
 
-RemoteDesktopMCP が独自に実装するのは、Desktop Commander が提供しない次の制御責務とする。
+RemoteDesktopMCP が担当する機能は、Desktop Commander が提供しない次のものに限定する。
 
 - 外部ユーザーの OAuth/OIDC 認証と認可
 - RemoteDesktopMCP の `session_id` 管理
-- `node_id` の登録、認証、要求振り分け
-- `request_id` を用いた統括ノードと実行ノードの監査関連付け
-- 公開ツールの許可方針と引数制約
-- 複数 PC をまたぐ論理プロセス識別子とローカル識別子の対応付け
-- Tailscale Funnel を含む外部公開経路との接続
+- `node_id` の登録、認証、リクエストの振り分け
+- `request_id` を使った統括ノードと実行ノードの監査ログのひも付け
+- 外部公開するツールと引数の制限
+- 複数PCをまたいで使う論理プロセスIDとローカルIDの対応管理
+- Tailscale Funnel を使った外部公開
 
-初期版では、Desktop Commander で提供されないローカルのファイル操作またはプロセス操作を独自実装する例外は設けない。
-将来例外が必要になった場合は、機能名、Desktop Commander で代替できない根拠、必要なローカル権限、監査方法、検証項目を設計へ追加してから実装する。
+初期版では、Desktop Commander で提供されないファイル操作やプロセス操作を RemoteDesktopMCP 側で独自実装しない。
+将来どうしても独自実装が必要になった場合は、対象機能、Desktop Commander で代替できない理由、必要な権限、監査方法、検証項目を設計書へ明記してから実装する。
 
 ### 現在の `src/index.ts` の扱い
 
 現在の `src/index.ts` は最終構成ではなく、公開接続と認証の検証を開始するための暫定実装とする。
-Desktop Commander への委譲を実装する段階で、重複するローカル操作は次のように整理する。
+Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重複するローカル操作は次のように整理する。
 
-- `searchFiles()` と `readdir` / `stat` による探索は削除し、`file_search` / `content_search` から Desktop Commander の検索ツールへ委譲する。
-- `launch_configured_process` 内の直接 `spawn` は削除する。固定起動設定を残す場合も、RemoteDesktopMCP の許可方針として検証した後に `start_process` へ委譲する。
-- `create_file_download` と `/downloads/:token` は初期版の機能要件に含まれないため、現在の直接ファイル読み出し実装を初期版から削除する。将来必要になった場合は別途設計し、ローカル操作委譲を迂回する例外を暗黙に作らない。
-- `getRoot()` やパスの正規化処理は RemoteDesktopMCP の方針確認に必要な範囲だけ残してよいが、それ自体が対象 PC のファイルを読み書きする実装にはしない。
-- OAuth/OIDC、RemoteDesktopMCP セッション、ノード振り分け、監査など RemoteDesktopMCP 固有責務は引き続き本体で実装する。
+- `searchFiles()` と `readdir` / `stat` による探索は削除し、`file_search` / `content_search` から Desktop Commander の検索ツールを呼び出す。
+- `launch_configured_process` 内の直接 `spawn` は削除する。固定起動設定を残す場合も、RemoteDesktopMCP 側で起動を許可してよい設定か確認した後に `start_process` を呼び出す。
+- `create_file_download` と `/downloads/:token` は初期版の機能要件に含まれないため、現在の直接ファイル読み出し実装を初期版から削除する。将来必要になった場合は別途設計し、Desktop Commander を経由しない実装を別途設計せずに追加しない。
+- `getRoot()` やパスの正規化処理は、RemoteDesktopMCP 側のアクセス制限を確認するために必要な範囲だけ残してよい。ただし、これらの処理から対象PCのファイルを直接読み書きしない。
+- OAuth/OIDC、RemoteDesktopMCP セッション、ノード振り分け、監査など RemoteDesktopMCP 固有の機能は引き続き本体で実装する。
 
-## 要求の振り分け
+## リクエストの振り分け
 
 ファイル操作とプロセス操作には対象ノードを指定できるようにする。
 
@@ -242,44 +241,44 @@ Desktop Commander への委譲を実装する段階で、重複するローカ�
 構成に登録された実行ノードが1台だけの場合に限り `node_id` を省略できる。
 この台数判定には統括ノード自身が兼任する実行ノードも含め、現在の接続状態は使わない。
 登録済み実行ノードが2台以上ある場合、接続中のノードが1台だけでもファイル操作とプロセス操作の `node_id` を必須とする。
-対象未指定時は対象ノード指定が必要な失敗を返し、接続中のノードを推測して実行しない。
+`node_id` が必要なのに指定されていない場合はエラーを返し、接続中のノードを推測して実行しない。
 
-明示された `node_id` が登録済みでも切断中の場合は対象ノード不在として失敗させ、別ノードへ振り替えない。
-登録済み実行ノードが1台だけで `node_id` が省略された場合も、そのノードが切断中なら不在として失敗させる。
-表示名は候補提示に使用できるが、最終的な実行対象は `node_id` で確定する。
+指定された `node_id` が登録済みでも切断中の場合は、対象ノードに接続できないエラーを返し、別のノードへ振り替えない。
+登録済み実行ノードが1台だけで `node_id` が省略された場合も、そのノードが切断中なら接続できないエラーを返す。
+表示名は画面表示や候補提示に使ってよいが、実行先の特定には必ず `node_id` を使う。
 
-## 要求処理図
+## リクエスト処理図
 
 ```mermaid
 sequenceDiagram
     participant U as ChatGPT
     participant C as 統括ノード
-    participant LA as 統括 PC 委譲層
+    participant LA as 統括 PC Desktop Commander 呼び出し
     participant LD as 統括 PC Desktop Commander
     participant R as 遠隔実行ノード
-    participant RA as 遠隔 PC 委譲層
+    participant RA as 遠隔 PC Desktop Commander 呼び出し
     participant RD as 遠隔 PC Desktop Commander
 
-    U->>C: ツール要求 + node_id
+    U->>C: ツール呼び出し + node_id
     C->>C: ユーザー認可と対象ノード決定
     alt 統括ノード自身が対象
-        C->>LA: 方針確認済み要求
+        C->>LA: 操作制限確認済みのリクエスト
         LA->>LD: MCP callTool
         LD-->>LA: 結果
-        LA-->>C: 正規化した結果
+        LA-->>C: RemoteDesktopMCP の形式に変換した結果
     else 遠隔 PC が対象
-        C->>R: 検証済み要求
-        R->>R: ローカル方針を確認
-        R->>RA: 委譲要求
+        C->>R: 認証・認可済みのリクエスト
+        R->>R: ローカルの操作制限を確認
+        R->>RA: Desktop Commander 呼び出し
         RA->>RD: MCP callTool
         RD-->>RA: 結果
-        RA-->>R: 正規化した結果
+        RA-->>R: RemoteDesktopMCP の形式に変換した結果
         R-->>C: 結果
     end
     C-->>U: MCP 応答
 ```
 
-統括ノード自身を対象にした場合も、遠隔ノードと同じ認可と監査経路を通す。
+統括ノード自身が対象の場合も、遠隔ノードと同じ手順で認証・認可と監査を行う。
 
 ## ノード管理ツール
 
@@ -300,73 +299,73 @@ sequenceDiagram
 
 ## セッションとプロセス
 
-RemoteDesktopMCP のセッションは MCP の通信セッションや個々の HTTP 接続とは独立した操作単位とし、統括ノードが管理する。
-`session_open` で生成した `session_id` は、認証済みユーザーが一致し有効期限内である限り、別の HTTP 接続から継続利用できる。
-ファイル操作とプロセス操作は明示された `session_id` を使い、接続状態から暗黙にセッションを生成または選択しない。
+RemoteDesktopMCP のセッションは、MCP の通信セッションや個々の HTTP 接続とは別に統括ノードで管理する。
+`session_open` で生成した `session_id` は、認証済みユーザーが一致し、有効期限内であれば別の HTTP 接続からも継続利用できる。
+ファイル操作とプロセス操作では明示された `session_id` を使い、接続状態からセッションを自動生成したり自動選択したりしない。
 
-統括ノードは各操作記録に `session_id` と対象 `node_id` を付与する。
-遠隔実行ノードへは監査用の `session_id` と `request_id` を渡すが、セッションの生成、失効、列挙は統括ノードだけが担当する。
+統括ノードは各操作のログに `session_id` と対象の `node_id` を記録する。
+遠隔実行ノードへはログを追跡するための `session_id` と `request_id` を渡すが、セッションの作成、期限管理、一覧表示は統括ノードだけが行う。
 プロセスは必ず起動時の `session_id` と起動元ノードに関連付ける。
-異なる PC では OS の PID が重複し得るため、外部へ返すプロセス識別子はノードをまたいで一意な論理識別子とする。
+異なるPCでは同じ PID が使われることがあるため、外部へ返すプロセスIDは複数PCをまたいで一意になるよう RemoteDesktopMCP が生成する。
 
-統括ノードは論理プロセス識別子から、少なくとも `{ node_id, desktop_commander_generation, pid }` を含む世代付き対応情報を保持する。
-論理プロセス識別子は PID そのものを外部へ返さず、RemoteDesktopMCP が生成する不透明で一意な値とする。
+統括ノードは、外部へ返す論理プロセスIDと、実際の実行先を対応付けて管理する。
+対応表には少なくとも `{ node_id, desktop_commander_generation, pid }` を保持する。
+論理プロセスIDには PID をそのまま使わず、RemoteDesktopMCP が生成した一意のIDを使う。
 
-各実行ノードは、現在利用しているローカル Desktop Commander MCP 子プロセスと `stdio` 通信接続の組を表す `desktop_commander_generation` を持つ。
-世代識別子は新しいローカル Desktop Commander 接続ごとに暗号学的乱数から生成する `16 bytes` の不透明な値とし、旧接続の値を再利用しない。
-初回接続が利用可能になったときと、子プロセスまたは通信接続を再生成して新しい接続が利用可能になったときに、新しい世代識別子を生成する。
-統括ノードとの通信だけが再接続し、同じローカル Desktop Commander 接続を継続している場合は世代を変更しない。
-実行ノードは現在の世代識別子を統括ノードへ通知し、統括ノードも論理プロセス対応情報の検証に使用する。
-実行ノード自体が再起動した場合も新しい世代識別子を生成する。再接続時に通知された世代が統括ノードの記録と異なる場合、統括ノードは旧世代の実行中対応情報を `stale` / 状態不明へ遷移させる。
+各実行ノードは、現在接続している Desktop Commander の世代を表す `desktop_commander_generation` を持つ。
+この世代IDは、Desktop Commander との新しい接続を確立するたびに、暗号学的に安全な乱数16バイトから生成する。
+Desktop Commander の子プロセスまたは `stdio` 接続を作り直した場合は新しい世代IDを生成し、以前の値は再利用しない。
+統括ノードとの通信だけが再接続し、Desktop Commander との接続が継続している場合は世代IDを変えない。
+実行ノード自身が再起動した場合も新しい世代IDを生成する。
+実行ノードは現在の世代IDを統括ノードへ通知する。統括ノードが記録している世代IDと異なる場合は、以前の世代に属する実行中プロセスの対応を無効にする。
 
 ### プロセス操作の排他制御
 
-同じ実行ノードで同じ `desktop_commander_generation` を使うプロセス操作は、同時に1件だけ実行する。
+同じ実行ノードかつ同じ Desktop Commander 世代に対するプロセス操作は、同時に1件だけ実行する。
 排他制御の単位は `{ node_id, desktop_commander_generation }` とする。
-初期版では並列性より誤操作の防止を優先し、この単位に属する `process_start`、`process_status`、`process_output`、`process_kill` が同時に Desktop Commander のプロセス用ツールを呼び出さないようにする。
+初期版では並列実行より誤操作の防止を優先し、`process_start`、`process_status`、`process_output`、`process_kill` が同じ世代の Desktop Commander プロセス用ツールを同時に呼び出さないようにする。
 
-`process_start` は、`start_process` を呼び出す前に排他区間へ入る。
-PID を受け取り、同じ PID の旧所有者がいれば失効させ、新しい所有者を登録するところまで排他状態を維持する。
-新しい論理プロセス識別子は、所有者登録を完了して排他区間を抜けた後にだけ利用者へ返す。
+`process_start` は、Desktop Commander の `start_process` を呼ぶ前にロックを取得する。
+PID の取得、同じ PID を使っていた古い論理プロセスIDの無効化、新しい論理プロセスIDの登録、状態更新までを同じロック内で行う。
+新しい論理プロセスIDは、これらの処理を完了してロックを解放した後に利用者へ返す。
 
-`process_status`、`process_output`、`process_kill` が Desktop Commander へ PID を渡す場合も、先に同じ排他区間へ入る。
-排他区間へ入った後で、世代と現在所有者を必ず確認し直す。
-確認に成功した場合だけ、その世代に紐づく Desktop Commander 接続へ処理を委譲する。
-Desktop Commander の呼び出しと、その結果に基づく状態更新が終わるまで排他状態を維持する。
-排他区間へ入る前に行った確認は、PID を渡してよいかどうかの最終判断には使わない。
+`process_status`、`process_output`、`process_kill` が Desktop Commander へ PID を渡す場合も、同じロックを取得する。
+ロック取得後に、世代IDが現在の値と一致することと、その論理プロセスIDが現在有効なIDであることを必ず確認し直す。
+確認に成功した場合だけ Desktop Commander を呼び出し、その結果に基づく状態更新が終わるまでロックを保持する。
+ロック取得前の確認結果だけで PID を Desktop Commander へ渡してはならない。
 
-確定済みの最終結果だけを返す `process_status` と `process_output` は Desktop Commander へ PID を渡さないため、この排他制御に参加しなくてよい。
-1つの要求が同時に複数の排他単位を確保する設計にはしない。
+終了済みプロセスについて、保存済みの状態や出力だけを返す `process_status` と `process_output` は Desktop Commander を呼び出さないため、このロックは不要とする。
+1つのリクエストで複数の排他単位を同時にロックしない。
 
-`process_start` が成功したとき、現在の `desktop_commander_generation` と Desktop Commander が返した PID を組にして論理プロセス識別子へ対応付ける。
-統括ノードは、実行中または終了未確認の対応情報について `{ node_id, desktop_commander_generation, pid }` を `process_key` とし、各 `process_key` の現在所有者となる論理プロセス識別子を `current_process_owner` として最大1件だけ保持する。
+`process_start` が成功したら、`{ node_id, desktop_commander_generation, pid }` を `process_key` とし、そのキーに現在有効な論理プロセスIDを最大1件だけ対応付ける。
+実装上、この現在有効なIDを `current_process_owner` として保持する。
 
-新しい `process_start` が返した `process_key` に `current_process_owner` がすでに存在する場合、統括ノードは新しい論理プロセス識別子を外部へ返す前に、既存所有者の対応情報を `stale` / 状態不明へ遷移させ、PID を Desktop Commander へ渡せる状態から外す。
-その後、同じ `process_key` の `current_process_owner` を新しい論理プロセス識別子へ原子的に置き換える。
-論理プロセス識別子の生成自体は `process_start` 完了前に行ってよいが、`current_process_owner` の置き換えが完了するまで外部へ公開しない。
+新しい `process_start` が既存と同じ `process_key` を返した場合は、新しい論理プロセスIDを利用者へ返す前に、古いIDを `stale`（無効）にする。
+その後、同じロック内で `current_process_owner` を新しい論理プロセスIDへ切り替える。
+論理プロセスID自体は `process_start` 完了前に生成してよいが、切り替えが完了するまでは外部へ返さない。
 
-実行中の `process_status`、`process_output`、`process_kill` は、対応情報の世代が実行ノードの現在世代と一致し、かつその論理プロセス識別子が `process_key` の `current_process_owner` である場合だけ PID を Desktop Commander へ渡す。
-世代が一致しない、または `current_process_owner` ではない論理プロセス識別子は `stale` / 状態不明として扱い、現在の Desktop Commander へ PID を渡さない。
-特に `process_kill` では世代不一致または所有者不一致時に `force_terminate` を呼び出さない。
+`process_status`、`process_output`、`process_kill` から Desktop Commander を呼ぶのは、世代IDが現在の値と一致し、かつ指定された論理プロセスIDが `process_key` の `current_process_owner` と一致する場合だけとする。
+どちらかが一致しないIDは `stale`（無効）として扱い、PID を Desktop Commander へ渡さない。
+特に `process_kill` では、無効なIDに対して `force_terminate` を呼び出さない。
 
-ローカル Desktop Commander 接続が失われた時点で、その世代に属する実行中の論理プロセス対応情報を即時に `stale` / 状態不明へ遷移させ、その世代の `current_process_owner` 索引を削除する。
-新しい Desktop Commander 接続が同じ PID を使用しても、旧世代の論理プロセス識別子を新しいプロセスへ再対応付けしない。
+Desktop Commander との接続が切れた場合は、その世代に属する実行中プロセスの対応をすべて `stale`（無効）にし、その世代の `current_process_owner` の対応表も削除する。
+新しい Desktop Commander 接続で同じ PID が使われても、古い論理プロセスIDを新しいプロセスへ対応付け直さない。
 
-プロセス終了を確認できた場合は、終了状態、取得済みの統合出力、取得できた終了コードを RemoteDesktopMCP 側の確定結果として保持し、PID を必要とする実行中対応情報から退役させる。
-その論理プロセス識別子が `process_key` の `current_process_owner` である場合だけ所有者索引を削除し、確定済みの最終結果は以後 `current_process_owner` 判定へ参加させない。
-確定済みプロセスの `process_status` と `process_output` はこの確定結果から返してよく、`process_kill` は終了済みとして拒否する。
-終了確認前に Desktop Commander 接続を失った場合は、終了したと推測せず状態不明とする。
+プロセスの終了を確認できた場合は、終了状態、取得済みの統合出力、取得できた終了コードを保存し、実行中プロセスの対応表から外す。
+その論理プロセスIDが `current_process_owner` だった場合は、`current_process_owner` の対応も削除する。
+終了済みプロセスの `process_status` と `process_output` は保存済みの結果から返し、`process_kill` は終了済みとして拒否する。
+終了確認前に Desktop Commander との接続が切れた場合は、終了したと推測せず状態不明とする。
 
-セッションが終了または失効しても、そのことだけを理由に実行中プロセスは停止しない。
-同じユーザーの別の有効なセッションから論理プロセス識別子を指定した場合は、上記の世代検証を通過した場合だけ状態取得、出力取得、停止を行えるようにする。
+RemoteDesktopMCP のセッションが終了または期限切れになっても、それだけを理由に実行中プロセスは停止しない。
+同じユーザーの別の有効なセッションから論理プロセスIDを指定した場合は、上記の世代IDと現在有効なIDの確認を通過した場合だけ、状態確認、出力取得、停止を行えるようにする。
 
 ## ファイル操作の制約
 
-許可 root、書き込み可否、検索対象などのファイル操作方針は各実行ノードがローカル設定として持つ。
+許可ディレクトリ、書き込み可否、検索対象などのファイル操作制限は、各実行ノードのローカル設定で管理する。
 
-統括ノードからの要求であっても、実行ノード自身のローカル方針を超える操作は許可しない。
+統括ノードからのリクエストであっても、実行ノード側のローカル設定で許可していない操作は実行しない。
 
-同じパス文字列が複数 PC に存在しても同一ファイルとは扱わない。
+同じパスが複数PCに存在しても、同じファイルとは扱わない。
 ファイルは `node_id` とローカルパスの組で識別する。
 
 PC 間ファイル転送は初期版の対象外とする。
@@ -375,34 +374,34 @@ PC 間ファイル転送は初期版の対象外とする。
 
 統括ノードは少なくとも次を記録する。
 
-- ユーザー識別子
-- セッション識別子
+- ユーザーID
+- セッションID
 - 対象 `node_id`
-- 要求種別
+- リクエスト種別
 - 振り分け結果
 - 成功、拒否、失敗
 - 実行ノードから返された結果状態
 
-実行ノードも、自ノードで実行した操作をローカル監査ログへ記録する。
+実行ノード側にも、そのPCで実行した操作の監査ログを記録する。
 
-同じ操作を統括ノードと実行ノードのログで追跡できるよう、要求ごとに共通の `request_id` を付与する。
+同じ操作を統括ノードと実行ノードのログで追跡できるよう、リクエストごとに共通の `request_id` を付与する。
 
-## 統括ノード兼任時
+## 統括ノード自身を操作する場合
 
-統括ノード自身を対象にした要求では、外部の実行ノードへ通信せず同一 PC の委譲層へ振り分ける。
-委譲層はローカルの `@wonderwhy-er/desktop-commander` へ MCP 経由で処理を渡し、統括ノード自身が対象の場合でもファイル操作やプロセス操作を本体内で直接実行しない。
-認証、認可、対象ノード決定、ローカル方針確認、監査ログ記録は遠隔ノードと同じ処理経路を通す。
-兼任時だけ検査や Desktop Commander 委譲を省略する実装にはしない。
+統括ノード自身が操作対象の場合は、外部の実行ノードへ送らず、同じPC上の Desktop Commander 呼び出し処理へ渡す。
+RemoteDesktopMCP はローカルの `@wonderwhy-er/desktop-commander` へ MCP 経由で処理を渡し、統括ノード自身が対象の場合でもファイル操作やプロセス操作を本体内で直接実行しない。
+認証、認可、対象ノードの決定、ローカルの操作制限確認、監査ログ記録は遠隔ノードと同じ手順で行う。
+統括ノード自身を操作する場合でも、認証・認可・操作制限の確認や Desktop Commander の呼び出しを省略しない。
 
-## 障害時の扱い
+## 障害発生時
 
-実行ノードが切断された場合、そのノードを切断状態として扱い、新しい操作を送らない。
-実行中処理の状態が不明になった場合は成功と推測せず、状態不明として返す。
+実行ノードとの接続が切れた場合は、そのノードを切断状態として扱い、新しい操作を送らない。
+実行中の処理結果を確認できない場合は、成功したと推測せず状態不明として返す。
 
-実行ノード上の Desktop Commander 子プロセスまたは `stdio` MCP 接続が利用不能になった場合、影響する操作を利用不可として扱う。
-接続喪失を検出した時点で、現在の `desktop_commander_generation` に属する実行中プロセス対応情報を `stale` / 状態不明へ遷移させ、以後その PID を Desktop Commander へ渡さない。
-委譲層は再接続または再起動を試みてよいが、新しい子プロセスまたは通信接続が利用可能になった時点で新しい `desktop_commander_generation` を生成する。
-新しい世代の接続が確立しても旧世代の対応情報を復活させず、その間に同等処理を RemoteDesktopMCP の直接実装へ切り替えない。
+実行ノード上の Desktop Commander 子プロセスまたは `stdio` MCP 接続が利用できなくなった場合、その間は該当する操作を実行できないものとする。
+Desktop Commander との接続が切れたことを検出した時点で、現在の `desktop_commander_generation` に属する実行中プロセスの対応を `stale`（無効）にし、以後その PID を Desktop Commander へ渡さない。
+RemoteDesktopMCP は再接続または Desktop Commander の再起動を試みてよい。新しい接続が利用可能になった時点で、新しい `desktop_commander_generation` を生成する。
+新しい世代の Desktop Commander 接続が確立しても、古い世代のプロセス対応を復元しない。また、その間だけ RemoteDesktopMCP の直接実装へ切り替えることもしない。
 処理中に Desktop Commander 接続が失われ、完了を確認できない場合は成功と推測せず状態不明として返す。
 
 統括ノードが停止した場合、ChatGPT から全実行ノードへの操作はできなくなる。
@@ -422,21 +421,21 @@ PC 間ファイル転送は初期版の対象外とする。
 
 実装後は最低限次を確認する。
 
-1. ChatGPT から1つの MCP 接続だけで複数実行ノードを列挙できる。
+1. ChatGPT から1つの MCP 接続だけで複数の実行ノードを一覧表示できる。
 2. PC 1 と PC 2 に同じパスが存在しても、指定したノードだけを操作する。
-3. 実行ノードを2台以上登録し、そのうち1台だけが接続中のときも、対象未指定のファイル操作とプロセス操作を拒否する。
+3. 実行ノードを2台以上登録し、そのうち1台だけが接続中のときも、`node_id` を省略したファイル操作とプロセス操作を拒否する。
 4. 統括ノード自身を実行ノードとして操作できる。
 5. 遠隔実行ノードは Tailscale Funnel を公開しなくても操作できる。
 6. 未登録ノードからの接続を拒否する。
-7. 実行ノード切断時に別ノードへ誤って処理を振り替えない。
+7. 実行ノードとの接続が切れた場合に、別のノードへ誤って処理を振り替えない。
 8. 同じ操作を統括ノードと実行ノードの監査ログで追跡できる。
-9. 実行ノード起動時に `listTools()` で必要な Desktop Commander ツールを確認し、欠けている操作を利用不可として通知する。
+9. 実行ノードの起動時に `listTools()` で必要な Desktop Commander ツールを確認し、必要なツールがない操作は利用できないと通知する。
 10. `file_*` と `process_*` の実行が Desktop Commander の `callTool()` を経由し、RemoteDesktopMCP 内の同等処理へ自動的に切り替わらない。
 11. RemoteDesktopMCP が拒否するパスや操作は Desktop Commander が許可していても実行されず、Desktop Commander のローカル設定が拒否する操作も実行されない。
 12. Desktop Commander の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
-13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版外の直接ファイル取得処理が Desktop Commander への委譲実装時に削除され、同等のローカル操作が二重実装されていない。
-14. 固定した Desktop Commander 版に対して、stdout と stderr の両方へ識別可能な文字列を出す検証用プロセスを実行し、`read_process_output` と RemoteDesktopMCP の `process_output` が両方を単一の統合出力として返し、終了状態と取得可能な終了コードを返し、stdout / stderr の出所を推測して付与しない。
-15. 世代 `G1` で起動した論理プロセス識別子を保持したまま Desktop Commander を再起動して世代 `G2` に変更し、`G2` で同じ PID のプロセスが存在する条件でも、旧論理プロセス識別子の `process_status`、`process_output`、`process_kill` が `stale` / 状態不明となり、`read_process_output` や `force_terminate` を呼び出さない。
-16. 終了確認済みプロセスは PID を必要とする実行中対応情報から退役し、`current_process_owner` 索引から外れ、確定済みの状態・統合出力・終了コードから状態取得と出力取得を返し、停止要求を終了済みとして拒否する。
-17. Desktop Commander を再起動せず同じ世代 `G1` のまま、検証用の委譲実装から2回の `process_start` に同じ PID `P` を順に返す。1回目の終了を RemoteDesktopMCP が未確認の状態で2回目を開始し、2回目の論理プロセス識別子を公開する前に1回目が `stale` / 状態不明へ遷移すること、`current_process_owner[{node_id,G1,P}]` が2回目だけを指すこと、1回目の `process_status`、`process_output`、`process_kill` が `read_process_output` や `force_terminate` を呼び出さないことを確認する。
-18. 同じ実行ノードの世代 `G1` で PID `P` の現在所有者を論理プロセス A とし、`process_status`、`process_output`、`process_kill` の各操作で並行実行を検証する。A の操作が先に排他区間へ入り、所有者を再確認した直後かつ Desktop Commander 呼び出し前の同期点で停止した場合は、並行して開始した `process_start` B が A の Desktop Commander 呼び出しと状態更新を終えて排他区間を抜けるまで `start_process` を呼び出せないことを確認する。逆に B が先に排他区間へ入り、同じ PID `P` の新しい所有者として登録された場合は、待機していた A が排他区間へ入った後の再確認で所有者不一致となり、`read_process_output` や `force_terminate` を呼び出さないことを確認する。
+13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版外の直接ファイル取得処理を Desktop Commander の MCP ツール呼び出しへ置き換え、同等のローカル操作を二重実装していない。
+14. 固定した Desktop Commander バージョンで、stdout と stderr の両方へ識別用の文字列を出す検証用プロセスを実行する。`read_process_output` と RemoteDesktopMCP の `process_output` が両方を1本の統合出力として返すこと、終了状態と取得可能な終了コードを返すこと、stdout / stderr の区分を推測して付けないことを確認する。
+15. 世代 `G1` で起動した論理プロセスIDを保持したまま Desktop Commander を再起動して世代 `G2` に変更する。`G2` で同じ PID のプロセスが存在しても、古い論理プロセスIDの `process_status`、`process_output`、`process_kill` は `stale`（無効）となり、`read_process_output` や `force_terminate` を呼び出さないことを確認する。
+16. 終了を確認したプロセスは実行中プロセスの対応表と `current_process_owner` から外す。その後の `process_status` と `process_output` は保存済みの状態・統合出力・終了コードから返し、`process_kill` は終了済みとして拒否する。
+17. Desktop Commander を再起動せず、同じ世代 `G1` のまま検証用実装から2回の `process_start` に同じ PID `P` を順に返す。1回目の終了を RemoteDesktopMCP がまだ確認していない状態で2回目を開始し、2回目の論理プロセスIDを返す前に1回目を `stale`（無効）にすること、`current_process_owner[{node_id,G1,P}]` が2回目のIDだけを指すこと、1回目のIDから `read_process_output` や `force_terminate` を呼び出さないことを確認する。
+18. 同じ実行ノードの世代 `G1` で、PID `P` に対応する現在有効な論理プロセスIDを A とする。`process_status`、`process_output`、`process_kill` の各操作について、A が先にロックを取得した場合と、並行する `process_start` B が先にロックを取得した場合の両方を検証する。A が先の場合は、A の Desktop Commander 呼び出しと状態更新が終わるまで B が `start_process` を呼べないことを確認する。B が先に同じ PID `P` の新しいIDを登録した場合は、待機していた A がロック取得後の再確認で無効と判定され、`read_process_output` や `force_terminate` を呼び出さないことを確認する。

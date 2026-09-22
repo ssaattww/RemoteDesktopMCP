@@ -65,6 +65,34 @@ entries:
     description: Tailscale 内の私設ネットワーク名称。
   - term: root
     description: 基準位置を表す技術用語。
+  - term: HMAC
+    description: メッセージ認証コード方式の名称。
+  - term: nonce
+    description: 認証ごとに生成する使い捨ての値。
+  - term: PSK
+    description: 事前共有鍵（Pre-Shared Key）の略称。
+  - term: エラー
+    description: 処理に失敗した状態。
+  - term: ディレクトリ
+    description: ファイルを格納する階層。
+  - term: テスト
+    description: 実装や仕様を検証する作業。
+  - term: バージョン
+    description: 製品やプロトコルの版。
+  - term: バイト
+    description: データ量を表す単位。
+  - term: ハッシュ
+    description: ハッシュ関数またはその計算結果。
+  - term: プロトコル
+    description: 通信手順を定めた規約。
+  - term: メッセージ
+    description: ノード間で送受信するデータ。
+  - term: リクエスト
+    description: 処理を依頼する通信メッセージ。
+  - term: リプレイ
+    description: 過去の通信内容を再送する攻撃を表す技術用語。
+  - term: ロック
+    description: 並行処理を直列化するための排他制御。
   - term: アカウント
     description: 認証主体。
   - term: アクセス
