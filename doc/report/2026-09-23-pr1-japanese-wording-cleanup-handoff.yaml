@@ -2,7 +2,7 @@ schema_version: 3
 producer:
   skill: chat-implementation-worker
   mode: documentation-cleanup
-  generated_at: 2026-09-23T05:46:17+09:00
+  generated_at: 2026-09-23T07:48:32+09:00
 
 repository: ssaattww/RemoteDesktopMCP
 issue_or_pr: "PR #1"
@@ -12,8 +12,9 @@ base_ref: main
 
 target:
   work_start_head: 7804426bb5af74610fe4d97a46f85d2f20456bb2
-  technical_head: 7ac921c9cf7a7b72a49cb1ff16668f71c64613ca
-  current_head: 7ac921c9cf7a7b72a49cb1ff16668f71c64613ca
+  first_pass_head: 7ac921c9cf7a7b72a49cb1ff16668f71c64613ca
+  technical_head: 5b84a9c23a9628a683e6f56199863ac6ba2b3275
+  current_head: 5b84a9c23a9628a683e6f56199863ac6ba2b3275
 
 execution_environment:
   kind: connected_computer
@@ -100,13 +101,14 @@ whitelist:
     - リクエスト
     - リプレイ
     - ロック
+    - アドレス
   unknown_terms_after_update: 0
 
 validation:
   lint:
     command: npm run lint
     result: passed
-    evidence: markdownlint 20 files, 0 issues; design terminology lint passed
+    evidence: markdownlint 21 files, 0 issues; design terminology lint passed
   check:
     command: npm run check
     result: passed

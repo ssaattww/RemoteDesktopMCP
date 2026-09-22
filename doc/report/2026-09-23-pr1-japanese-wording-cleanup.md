@@ -5,7 +5,8 @@
 - リポジトリ: `ssaattww/RemoteDesktopMCP`
 - PR: #1
 - 作業開始 HEAD: `7804426bb5af74610fe4d97a46f85d2f20456bb2`
-- 日本語表現整理 technical HEAD: `7ac921c9cf7a7b72a49cb1ff16668f71c64613ca`
+- 第1パス technical HEAD: `7ac921c9cf7a7b72a49cb1ff16668f71c64613ca`
+- 第2パス technical HEAD: `5b84a9c23a9628a683e6f56199863ac6ba2b3275`
 - ブランチ: `feat/tailscale-funnel-design-lint`
 - 実行環境: FA780
 - 作業ディレクトリ: `C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922`
@@ -51,9 +52,28 @@
 - 「対象未指定」は「`node_id` が指定されていない」と具体的に記述。
 - 「所有者」は、プロセス管理の説明では「現在有効な論理プロセスID」を中心に説明し、実装上の識別子 `current_process_owner` だけをコード名として残した。
 
+## 第2パスで追加した修正
+
+第1パス後に全文を読み直し、単語としては間違っていなくても、一般的な技術文書として硬い・不自然な表現を追加で修正した。
+
+主な例:
+
+- 1本の統合出力 → 1つの統合出力
+- プロセス出力契約 → プロセス出力仕様
+- RemoteDesktopMCP の契約として提供 → MCP ツールとして公開
+- 監査ログのひも付け → 監査ログの関連付け
+- Tailscale tailnet → tailnet
+- 接続を認証済みとする → 接続を許可する
+- 結果状態 → 実行結果
+- 候補提示 → ユーザーへの候補表示
+- 1操作の複数ノード同時実行 → 1回の操作を複数ノードで同時に実行する機能
+- Desktop Commander を経由しない実装を別途設計せずに追加しない → Desktop Commander を経由しない理由と安全性を別途設計してから追加する
+
+この第2パスでも、RDMCP-R1〜RDMCP-R8 の設計上の制約は変更していない。
+
 ## ホワイトリスト追加候補
 
-自然な文章を優先した結果、次の14語を追加候補として抽出した。
+自然な文章を優先した結果、第1パスで14語、第2パスで1語を追加候補として抽出した。
 いずれも設計書で通常どおり使う価値がある一般的な技術用語と判断し、ホワイトリストへ追加した。
 
 - HMAC
@@ -70,6 +90,7 @@
 - リクエスト
 - リプレイ
 - ロック
+- アドレス
 
 追加後、設計3文書に対して `--list-unknown` を実行し、未許可語が0件であることを確認した。
 
@@ -118,7 +139,7 @@ workflow は成功・失敗にかかわらず、次を artifact として保存�
 technical HEAD 相当の作業ツリーで次を実行した。
 
 - `npm run lint`: pass
-  - markdownlint: 20 files / 0 issues
+  - markdownlint: 21 files / 0 issues
   - design terminology lint: pass
 - `npm run check`: pass
 - `npm run build`: pass
