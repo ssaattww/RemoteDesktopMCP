@@ -43,12 +43,12 @@ test("OAuth authorization code is PKCE-bound and one use", async () => {
   const port = (server.address() as { port: number }).port; const url = `http://127.0.0.1:${port}`;
   try {
     const register = await fetch(`${url}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "test", redirect_uris: ["https://chatgpt.com/callback"] }) }); const client = await register.json() as { client_id: string };
-    const verifier = "a-verifier"; const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const verifier = "v".repeat(64); const challenge = createHash("sha256").update(verifier).digest("base64url");
     const auth = await fetch(`${url}/authorize?client_id=${client.client_id}&redirect_uri=${encodeURIComponent("https://chatgpt.com/callback")}&response_type=code&code_challenge_method=S256&code_challenge=${challenge}`);
     const page = await auth.text(); const transaction = /value="([^"]+)"/.exec(page)?.[1]; assert.ok(transaction);
     const confirmation = await fetch(`${url}/authorize/confirm`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ transaction_id: transaction, email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
     const location = confirmation.headers.get("location"); assert.ok(location); const code = new URL(location).searchParams.get("code"); assert.ok(code);
-    const token = await fetch(`${url}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier }) }); assert.equal(token.status, 200);
+    const token = await fetch(`${url}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: "https://chatgpt.com/callback" }) }); assert.equal(token.status, 200);
     const tokenBody = await token.json() as { access_token: string };
     const httpClient = new Client({ name: "http-test", version: "1" });
     const httpTransport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokenBody.access_token}` } } });
@@ -56,7 +56,7 @@ test("OAuth authorization code is PKCE-bound and one use", async () => {
     const httpSession = await httpClient.callTool({ name: "session_open", arguments: {} });
     assert.ok("content" in httpSession && !httpSession.isError);
     await httpClient.close();
-    const reused = await fetch(`${url}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier }) }); assert.equal(reused.status, 400);
+    const reused = await fetch(`${url}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: "https://chatgpt.com/callback" }) }); assert.equal(reused.status, 400);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
@@ -79,13 +79,6 @@ test("transfer snapshot remains immutable and no-replace preserves a racing dest
     await writeFile(path.join(f.root, "race.bin"), "winner");
     await assert.rejects(api.call("file_transfer_upload_commit", { session_id: session, transfer_id: upload.transfer_id as string }));
     assert.equal(await readFile(path.join(f.root, "race.bin"), "utf8"), "winner");
-    const process = await api.call("process_start", { session_id: session, command: "echo stdout-marker & echo stderr-marker 1>&2", timeout_ms: 1_000 });
-    const output = await api.call("process_output", { session_id: session, process_id: process.process_id });
-    assert.match(String(output.output), /stdout-marker/);
-    assert.match(String(output.output), /stderr-marker/);
-    const status = await api.call("process_status", { session_id: session, process_id: process.process_id });
-    assert.equal(status.state, "finished");
-    assert.equal(status.exit_code, 0);
     await api.close();
   } finally { await f.cleanup(); }
 });

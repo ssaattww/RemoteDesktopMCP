@@ -4,10 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Least-privilege MCP server for approved remote desktop actions",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file=.env dist/index.js",
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx --env-file=.env watch src/index.ts",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "user:hash": "tsx src/hash-password.ts",
