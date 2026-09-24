@@ -77,3 +77,7 @@ source 確定後の focused 3件は21.102秒で合格した。70版の履歴試�
 必要な fixture は serialized capture を明示的に行ってから保持 pin と別名を選び、間に別のサービス操作を挟まず bigint の一致・拒否を検証する。製品コードの追加変更はない。
 共通 helper は実体の bigint key が保護 map に存在することを確認し、別名を作った場合はその実体一致も確認する。従来の pin 先頭選択6箇所に適用し、focused 6件は21.679秒で合格した。
 helper 確定後の Node22.23.3 全体試験は終了コード0、24/24合格、失敗・キャンセル・スキップ0、79.391秒。lint は42ファイル・指摘0。
+
+候補 `2d5be223ea52af35a8c0f29c7ace74362ff9b1cd` の PR CI run `36047156609` は Ubuntu `107793413685`、Windows `107793413829` がともに24/24成功した。
+通常 reviewer は同じ候補を pass とし、MVP-IFR-001〜007を元の severity のまま閉じた。独立 reviewer は同一担当で、この完全性の表と直接影響・CI 差分だけを限定確認する。
+最終的な技術判定と reviewed implementation HEAD は予約済み独立レビュー報告に記録し、報告専用コミットと最終提出 HEAD の CI は PR #1 に記録する。

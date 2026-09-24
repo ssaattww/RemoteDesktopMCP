@@ -390,3 +390,29 @@ Independent actual Node 22.23.3 focused IFR-002 tests exited 0 with 2/2 passed, 
 `document-wording-review` was reapplied to changed README, repair/regression reports, task statuses and this passage separately from mechanical lint. Technical meaning, evidence attribution, approved usage and readability are `checked_no_finding` after the legacy-manifest wording correction. No terminology approval changed. Wording result: `pass`.
 
 **Bounded verdict: `fail` on `00e693923f7ce8709386b089707fb9eefda32d76`.** IFR-002 / High remains open because the exact-head Windows suite failed on the pin-directory fixture assumption, despite direct product behavior passing in both OS jobs. The other six MVP-IFR findings remain closed at their original severities; DR-003 product closure is not reopened by this fixture failure. Recheck only the explicit pin-capture fixture and matching two-OS CI on the next immutable head. No product fix, commit, push or merge was performed by this reviewer. `report_attestation_allowed: false`.
+
+## Bounded fixture closure on 2d5be22
+
+Mode: same normal reviewer; immutable target `2d5be223ea52af35a8c0f29c7ace74362ff9b1cd` against `00e693923f7ce8709386b089707fb9eefda32d76`. Scope is the Windows CI pin-directory fixture assumption and direct report wording only. Product, package and workflow bytes are unchanged. The other six MVP-IFR findings retain their original identities, severities and closed dispositions; IFR-002 / High retains its ID and severity and is closed by this matching two-OS gate.
+
+`test/fixture.ts` now calls serialized `rememberProtectedConfigIdentity()` before selecting a private pin, checks the pin's bigint device/inode key against the protected identity map, and, when an alias is requested, links and verifies that exact inode immediately. The six formerly bare first-entry selections in `test/independent-fixes.test.ts` and `test/regressions.test.ts` use this helper. Startup may legitimately prune every sole-link pin after Commander config updates, so the helper establishes the fixture precondition instead of assuming a post-start pin directory is nonempty. The existing alias rejection, 70-version, five-settle/endless-churn, exact identity, unsafe-manifest and swapped-temp assertions remain. Reports and task status accurately retain previous CI failure and distinguish the new local result from pending CI.
+
+Independent actual Node 22.23.3 focused IFR-002 cases passed 2/2, zero failed/cancelled/skipped/todo, in 21.178 seconds; focused DR003 cases passed 4/4 in 21.786 seconds. `npm.cmd run lint` passed with 42 Markdown files and zero issues; `git diff --check 00e6939 2d5be22` passed. The test owner reports a frozen full actual Node 22.23.3 suite of 24/24 passed, zero failed/cancelled/skipped, in 79.391 seconds. Matching [GitHub Actions run 36047156609](https://github.com/ssaattww/RemoteDesktopMCP/actions/runs/36047156609) passed Ubuntu job `107793413685` and Windows job `107793413829`, each 24/24 with zero failed/cancelled/skipped. The prior candidate's Windows failure remains historical and is not used as evidence for this head.
+
+| Required criterion | Disposition | Evidence |
+| --- | --- | --- |
+| Requirement/design conformance | `checked_no_finding` | Fixture captures a verified protected pin before testing aliases; product behavior unchanged and both OS jobs pass. |
+| Correctness and edge cases | `checked_no_finding` | Empty post-prune directory is handled by explicit capture; alias identity is checked with bigint values. |
+| Scope discipline | `checked_no_finding` | Seven-path fixture/report delta only; local MVP/P4 boundary unchanged. |
+| Changed files/direct dependencies | `checked_no_finding` | Full delta and serialized capture/map-backed pin dependency inspected. |
+| API/data/config/workflow compatibility | `checked_no_finding` | No product/API/config/workflow delta; exact-head two-OS tests pass. |
+| Error handling/diagnostics | `checked_no_finding` | Missing verified pin fails an explicit fixture assertion rather than creating an alias from an undefined path. |
+| Security/secret handling | `checked_no_finding` | Exact protected map key and alias inode are asserted; protection assertions remain intact. |
+| Tests/validation adequacy | `checked_no_finding` | All six former first-entry selections corrected; focused 6/6, full local 24/24, Ubuntu 24/24 and Windows 24/24 pass. |
+| Current-HEAD CI | `checked_no_finding` | Run 36047156609, Ubuntu job 107793413685 and Windows job 107793413829 both successful, 24/24 each. |
+| Reports/tracking/documentation | `checked_no_finding` | Changed reports preserve candidate-specific evidence and do not prematurely claim closure. |
+| Regression/maintainability | `checked_no_finding` | Shared capture helper removes repeated lifecycle assumption; both OS suites pass. |
+
+`document-wording-review` was reapplied to the repair/regression reports, task status and this passage separately from mechanical lint. Technical meaning, retained IDs/severities, candidate attribution, approved usage and readability are `checked_no_finding`; wording result: `pass`.
+
+**Bounded verdict: `pass` on `2d5be223ea52af35a8c0f29c7ace74362ff9b1cd`.** IFR-002 / High is closed; all seven MVP-IFR findings now retain their original identities and severities with closed dispositions. The direct DR-003 fixture correction passes both OS jobs without reopening that earlier product finding. This is a bounded normal-review closure, not the separately reserved independent attestation. No product fix, commit, push or merge was performed by this reviewer. `report_attestation_allowed: true` for this normal-review gate.
