@@ -15,11 +15,14 @@ type Root = { id: string; path: string };
 type OAuthClient = { client_id: string; client_name: string; redirect_uris: string[] };
 type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string; expires: number; scope: "mcp" };
 type Session = { id: string; user: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
-type FileIdentity = { dev: number; ino: number };
+// Node's default Stats numbers lose NTFS file-id precision above 2^53.  Keep
+// identity values as decimal strings derived from bigint stats so unrelated
+// files cannot collide with a protected config pin or an owned upload.
+type FileIdentity = { dev: string; ino: string };
 type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
-type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
+type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
 
 const SESSION_TTL = 24 * 60 * 60_000;
 const TRANSFER_TTL = 30 * 60_000;
@@ -210,20 +213,39 @@ export class RemoteDesktopService {
   private configIdentityManifestPath(): string { return path.join(this.cfg.dataDir, "transfers", "protected-config-identities.json"); }
   private configPinDirectory(): string { return path.join(this.cfg.dataDir, "transfers", "protected-config-pins"); }
   private identityKey(identity: FileIdentity): string { return `${identity.dev}:${identity.ino}`; }
+  private identityFromStats(info: { dev: bigint; ino: bigint }): FileIdentity { return { dev: info.dev.toString(), ino: info.ino.toString() }; }
+  private async identityForPath(value: string): Promise<FileIdentity> { return this.identityFromStats(await lstat(value, { bigint: true })); }
+  private validExactIdentity(value: unknown): value is FileIdentity {
+    return !!value && typeof value === "object" && typeof (value as FileIdentity).dev === "string" && typeof (value as FileIdentity).ino === "string" && /^(0|[1-9]\d*)$/.test((value as FileIdentity).dev) && /^(0|[1-9]\d*)$/.test((value as FileIdentity).ino);
+  }
+  private validLegacyIdentity(value: unknown): value is { dev: number; ino: number } {
+    return !!value && typeof value === "object" && Number.isSafeInteger((value as { dev: number }).dev) && Number.isSafeInteger((value as { ino: number }).ino) && (value as { dev: number }).dev >= 0 && (value as { ino: number }).ino >= 0;
+  }
   private async loadProtectedConfigIdentities(): Promise<void> {
     const text = await readFile(this.configIdentityManifestPath(), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "[]" : Promise.reject(error));
     let records: unknown;
     try { records = JSON.parse(text); } catch { throw new Error("Protected config identity history is invalid."); }
-    if (!Array.isArray(records) || records.length > 64 || records.some((value) => !value || typeof value !== "object" || !Number.isInteger((value as ProtectedConfigIdentity).dev) || !Number.isInteger((value as ProtectedConfigIdentity).ino))) throw new Error("Protected config identity history is invalid.");
+    if (!Array.isArray(records) || records.length > 64 || records.some((value) => !this.validExactIdentity(value) && !this.validLegacyIdentity(value))) throw new Error("Protected config identity history is invalid; inspect or recover local manifest state before restarting.");
     const pinDirectory = path.resolve(this.configPinDirectory());
-    for (const record of records as ProtectedConfigIdentity[]) {
-      if (typeof record.pin !== "string") continue;
+    let migrated = false;
+    for (const record of records as Array<ProtectedConfigIdentity | ({ dev: number; ino: number; pin?: unknown })>) {
+      if (typeof record.pin !== "string") throw new Error("Protected config identity history is invalid.");
       const pin = path.resolve(record.pin);
       const validPinName = /^config-(?:\d+-\d+|[A-Za-z0-9_-]{43})\.pin$/.test(path.basename(pin));
-      const info = await lstat(pin).catch(() => undefined);
-      if (!inside(pinDirectory, pin) || !validPinName || !info || info.isSymbolicLink() || info.dev !== record.dev || info.ino !== record.ino) throw new Error("Protected config identity history is invalid.");
-      this.protectedConfigIdentities.set(this.identityKey(record), { ...record, pin });
+      const info = await lstat(pin, { bigint: true }).catch(() => undefined);
+      if (!inside(pinDirectory, pin) || !validPinName || !info || info.isSymbolicLink() || !info.isFile()) throw new Error("Protected config identity history is invalid.");
+      const actual = this.identityFromStats(info);
+      if (this.validExactIdentity(record)) {
+        if (actual.dev !== record.dev || actual.ino !== record.ino) throw new Error("Protected config identity history is invalid.");
+      } else {
+        // A legacy number can be migrated only when it was lossless and still
+        // matches the retained private pin. Unsafe records are ambiguous.
+        if (!this.validLegacyIdentity(record) || actual.dev !== BigInt(record.dev).toString() || actual.ino !== BigInt(record.ino).toString()) throw new Error("Protected config identity history is invalid.");
+        migrated = true;
+      }
+      this.protectedConfigIdentities.set(this.identityKey(actual), { ...actual, pin });
     }
+    if (migrated) await this.persistProtectedConfigIdentities();
   }
   private async persistProtectedConfigIdentities(): Promise<void> {
     const manifest = this.configIdentityManifestPath();
@@ -250,24 +272,25 @@ export class RemoteDesktopService {
         if (transientLinkFailure(error)) continue;
         throw error;
       }
-      const pinInfo = await lstat(pin).catch(() => undefined);
+      const pinInfo = await lstat(pin, { bigint: true }).catch(() => undefined);
       if (!pinInfo || pinInfo.isSymbolicLink() || !pinInfo.isFile()) {
         await unlink(pin).catch(() => undefined);
         throw new Error("Protected config identity pin is invalid.");
       }
-      const key = this.identityKey(pinInfo);
+      const pinnedIdentity = this.identityFromStats(pinInfo);
+      const key = this.identityKey(pinnedIdentity);
       const existing = this.protectedConfigIdentities.get(key);
       if (existing) {
-        const existingInfo = await lstat(existing.pin).catch(() => undefined);
-        if (!existingInfo || existingInfo.isSymbolicLink() || !same(existingInfo, pinInfo)) throw new Error("Protected config identity pin is invalid.");
+        const existingInfo = await lstat(existing.pin, { bigint: true }).catch(() => undefined);
+        if (!existingInfo || existingInfo.isSymbolicLink() || !same(this.identityFromStats(existingInfo), pinnedIdentity)) throw new Error("Protected config identity pin is invalid.");
         await unlink(pin);
       } else {
         if (this.protectedConfigIdentities.size >= 64) { await unlink(pin).catch(() => undefined); throw new Error("Protected config identity history limit reached."); }
-        this.protectedConfigIdentities.set(key, { dev: pinInfo.dev, ino: pinInfo.ino, pin });
+        this.protectedConfigIdentities.set(key, { ...pinnedIdentity, pin });
         await this.persistProtectedConfigIdentities();
       }
-      const after = await lstat(config).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
-      if (!after || same(after, pinInfo)) return;
+      const after = await lstat(config, { bigint: true }).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
+      if (!after || same(this.identityFromStats(after), pinnedIdentity)) return;
     }
     throw new Error("Protected config identity changed while pinning.");
   }
@@ -275,9 +298,10 @@ export class RemoteDesktopService {
   private async pruneProtectedConfigIdentitiesLocked(): Promise<void> {
     let changed = false;
     for (const [key, record] of this.protectedConfigIdentities) {
-      const info = await lstat(record.pin).catch(() => undefined);
-      if (!info || info.isSymbolicLink() || info.dev !== record.dev || info.ino !== record.ino) throw new Error("Protected config identity pin is invalid.");
-      if (info.nlink === 1) {
+      const info = await lstat(record.pin, { bigint: true }).catch(() => undefined);
+      const actual = info && this.identityFromStats(info);
+      if (!info || info.isSymbolicLink() || !info.isFile() || !actual || actual.dev !== record.dev || actual.ino !== record.ino) throw new Error("Protected config identity pin is invalid.");
+      if (info.nlink === 1n) {
         await rm(record.pin, { force: true });
         this.protectedConfigIdentities.delete(key);
         changed = true;
@@ -294,7 +318,7 @@ export class RemoteDesktopService {
     await writeFile(pending, JSON.stringify(records), { mode: 0o600 });
     await rename(pending, manifest);
   }
-  private async isOwnedArtifactPath(entry: OwnedUploadArtifact): Promise<boolean> {
+  private async isOwnedArtifactPath(entry: Pick<OwnedUploadArtifact, "rootId" | "path">): Promise<boolean> {
     if (!/^\.__rdmcp_[A-Za-z0-9_-]+\.upload$/.test(path.basename(entry.path))) return false;
     let root: Root;
     try { root = this.root(entry.rootId); } catch { return false; }
@@ -310,12 +334,19 @@ export class RemoteDesktopService {
     const text = await readFile(manifest, "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "[]" : Promise.reject(error));
     let records: unknown;
     try { records = JSON.parse(text); } catch { throw new Error("Owned upload manifest is invalid."); }
-    if (!Array.isArray(records) || records.some((value) => !value || typeof value !== "object" || typeof (value as OwnedUploadArtifact).rootId !== "string" || typeof (value as OwnedUploadArtifact).path !== "string" || !Number.isInteger((value as OwnedUploadArtifact).dev) || !Number.isInteger((value as OwnedUploadArtifact).ino))) throw new Error("Owned upload manifest is invalid.");
+    if (!Array.isArray(records) || records.some((value) => !value || typeof value !== "object" || typeof (value as OwnedUploadArtifact).rootId !== "string" || typeof (value as OwnedUploadArtifact).path !== "string" || (!this.validExactIdentity(value) && !this.validLegacyIdentity(value)))) throw new Error("Owned upload manifest is invalid; inspect or recover local manifest state before restarting.");
     this.ownedUploads.clear();
-    for (const entry of records as OwnedUploadArtifact[]) {
+    for (const entry of records as Array<OwnedUploadArtifact | ({ rootId: string; path: string; dev: number; ino: number })>) {
       if (await this.isOwnedArtifactPath(entry)) {
-        const info = await lstat(entry.path).catch(() => undefined);
-        if (info && info.dev === entry.dev && info.ino === entry.ino) await rm(entry.path, { force: true }).catch(() => undefined);
+        const info = await lstat(entry.path, { bigint: true }).catch(() => undefined);
+        if (!info) continue;
+        const actual = this.identityFromStats(info);
+        // Unsafe legacy numbers cannot prove ownership, so preserve the file.
+        // A later exact upload manifest is the only authority to delete it.
+        const matches = this.validExactIdentity(entry)
+          ? actual.dev === entry.dev && actual.ino === entry.ino
+          : this.validLegacyIdentity(entry) && actual.dev === BigInt(entry.dev).toString() && actual.ino === BigInt(entry.ino).toString();
+        if (matches) await rm(entry.path, { force: true }).catch(() => undefined);
       }
     }
     await this.writeOwnershipManifest();
@@ -335,7 +366,7 @@ export class RemoteDesktopService {
         const candidate = path.join(folder, entry.name);
         if (entry.isSymbolicLink()) throw new Error("Search root contains a symbolic link.");
         if (/^\.__rdmcp_[A-Za-z0-9_-]+\.(upload|probe)$/.test(entry.name)) throw new Error("Protected transfer files cannot be searched.");
-        if (this.isProtectedConfigIdentity(await lstat(candidate))) throw new Error("Protected service files cannot be searched.");
+        if (this.isProtectedConfigIdentity(await this.identityForPath(candidate))) throw new Error("Protected service files cannot be searched.");
         if (entry.isDirectory()) await visit(candidate);
       }
     };
@@ -353,7 +384,7 @@ export class RemoteDesktopService {
     if (!absent) {
       await this.rememberProtectedConfigIdentity();
       try {
-        if (this.isProtectedConfigIdentity(await lstat(candidate))) throw new Error("Protected service files cannot be accessed.");
+        if (this.isProtectedConfigIdentity(await this.identityForPath(candidate))) throw new Error("Protected service files cannot be accessed.");
       } catch (error) { if (error instanceof Error && error.message.startsWith("Protected")) throw error; }
     }
     if (overlaps(candidate, this.cfg.dataDir)) throw new Error("Protected service files cannot be accessed.");
@@ -365,7 +396,7 @@ export class RemoteDesktopService {
     await item.tempHandle?.close().catch(() => undefined); item.tempHandle = undefined;
     if (item.snapshot) await rm(item.snapshot, { force: true }).catch(() => undefined);
     if (item.temp && item.tempIdentity) {
-      const info = await lstat(item.temp).catch(() => undefined);
+      const info = await this.identityForPath(item.temp).catch(() => undefined);
       if (info && info.dev === item.tempIdentity.dev && info.ino === item.tempIdentity.ino) await rm(item.temp, { force: true }).catch(() => undefined);
     }
     await this.untrackOwnedUpload(item.temp);
@@ -437,9 +468,9 @@ export class RemoteDesktopService {
     server.registerTool("file_patch", { description: "Apply an exact text replacement through Desktop Commander.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("edit_block", { file_path: await this.safePath(root_id, relative_path), old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
     server.registerTool("file_transfer_download_begin", { description: "Create an immutable private snapshot for chunk download.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
     server.registerTool("file_transfer_download_chunk", { description: "Read the next immutable chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); let handle: FileHandle | undefined; try { handle = await open(item.snapshot, "r"); const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed."); if (complete) { item.state = "complete"; await this.cleanup(item); this.rememberTerminal(item); } return { data: data.toString("base64"), next_offset: item.offset, complete }; } catch (error) { await this.fail(item, "snapshot_read_failed"); throw error; } finally { await handle?.close().catch(() => undefined); } })));
-    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { handle = await open(temp, "wx", 0o600); const info = await handle.stat(); const identity = { dev: info.dev, ino: info.ino }; await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
-    server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await lstat(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
-    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await lstat(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
+    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
+    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
     server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
       await this.sweepExpiredLocked();
       this.session(user, session_id);
@@ -468,8 +499,8 @@ export class RemoteDesktopService {
     const auditExit = async (item: Process) => { if (item.exitAudited) return; item.exitAudited = true; await this.audit("process.exit", { processId: item.id, result: item.terminationRequested ? "exit_after_termination_request" : "natural", exitCode: item.exitCode ?? null }); };
     const finishWhenRootIsGone = async (item: Process) => { if (item.state === "finished") return; requireCurrent(item); item.state = "finished"; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); await auditExit(item); };
     const activeInDesktopCommander = async (item: Process): Promise<boolean> => { requireCurrent(item); const output = await listProcessSessions(); return new RegExp(`PID:\\s*${item.pid}(?:\\D|$)`, "i").test(output); };
-    const observe = async (item: Process) => { const pages: string[] = []; let drained = false; for (let page = 0; page < 100; page += 1) { requireCurrent(item); const output = await readProcess(item); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); if (completion) { item.completionPending = true; item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]); } if (!remaining || Number(remaining[1]) === 0) { drained = true; break; } } item.observationFailures = 0; item.nextObservationAt = undefined; item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); if (drained && item.completionPending) { item.state = "finished"; item.completionPending = false; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); await auditExit(item); } return pages.join("\n"); };
-    const watchProcess = (processId: string) => { if (this.processWatchers.has(processId)) return; let checking = false; const watcher = setInterval(() => { if (checking) return; checking = true; void this.processLock.run(async () => { const item = this.processes.get(processId); if (!item || item.state === "finished" || item.state === "stale") { stopWatching(processId); return; } if (item.nextObservationAt && item.nextObservationAt > Date.now()) return; try { const active = await activeInDesktopCommander(item); await observe(item); if (!active) await finishWhenRootIsGone(item); } catch { if (this.processes.get(processId)?.state === "stale") { stopWatching(processId); return; } item.observationFailures = (item.observationFailures ?? 0) + 1; item.nextObservationAt = Date.now() + Math.min(5_000, 250 * 2 ** Math.min(item.observationFailures, 4)); if (item.observationFailures === 1) await this.audit("process.observe_failed", { processId }); return; } if (this.processes.get(processId)?.state === "finished") stopWatching(processId); }).finally(() => { checking = false; }); }, 250); watcher.unref(); this.processWatchers.set(processId, watcher); };
+    const observe = async (item: Process) => { const pages: string[] = []; let drained = false; item.outputDrained = false; for (let page = 0; page < 100; page += 1) { requireCurrent(item); const output = await readProcess(item); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); if (completion) { item.completionPending = true; item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]); } if (!remaining || Number(remaining[1]) === 0) { drained = true; break; } } item.outputDrained = drained; item.observationFailures = 0; item.nextObservationAt = undefined; item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); if (drained && item.completionPending) { item.state = "finished"; item.completionPending = false; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); await auditExit(item); } return pages.join("\n"); };
+    const watchProcess = (processId: string) => { if (this.processWatchers.has(processId)) return; let checking = false; const watcher = setInterval(() => { if (checking) return; checking = true; void this.processLock.run(async () => { const item = this.processes.get(processId); if (!item || item.state === "finished" || item.state === "stale") { stopWatching(processId); return; } if (item.nextObservationAt && item.nextObservationAt > Date.now()) return; try { const active = await activeInDesktopCommander(item); await observe(item); if (!active && item.outputDrained) await finishWhenRootIsGone(item); } catch { if (this.processes.get(processId)?.state === "stale") { stopWatching(processId); return; } item.observationFailures = (item.observationFailures ?? 0) + 1; item.nextObservationAt = Date.now() + Math.min(5_000, 250 * 2 ** Math.min(item.observationFailures, 4)); if (item.observationFailures === 1) await this.audit("process.observe_failed", { processId }); return; } if (this.processes.get(processId)?.state === "finished") stopWatching(processId); }).finally(() => { checking = false; }); }, 250); watcher.unref(); this.processWatchers.set(processId, watcher); };
     server.registerTool("process_start", { description: "Start an arbitrary command as the same OS user through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => this.processLock.run(async () => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await startProcess(command, timeout_ms); const match = output.match(/PID\s+(-?\d+)/i); if (!match) throw new Error("Desktop Commander did not return a process id."); const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); const item: Process = { id: makeId(), sessionId: session_id, user, generation: this.dc.currentGeneration(), pid: Number(match[1]), state: initialCompletion ? "finished" : "running", output, cursor: 0, exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]) }; const priorId = this.currentProcessOwners.get(processKey(item)); if (priorId) { const prior = this.processes.get(priorId); if (prior) markStale(prior); } this.processes.set(item.id, item); if (item.state === "running") { this.currentProcessOwners.set(processKey(item), item.id); watchProcess(item.id); } await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id, pid: item.pid, command: redactCommand(command) }); if (item.state === "finished") await auditExit(item); return { process_id: item.id, output }; })));
     const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.state === "stale") throw new Error("Process id is stale or finished."); if (item.state !== "finished") requireCurrent(item); return item; };
     const current = (sid: string, pid: string) => { const item = getProcess(sid, pid); if (item.state !== "running") throw new Error("Process id is stale or finished."); return item; };

@@ -191,6 +191,50 @@ test("RDMCP-MVP-IFR-004: a termination timeout becomes an observed single finish
   } finally { await api.close(); await service.close(); await f.cleanup(); }
 });
 
+test("RDMCP-MVP-IFR-004: completion with 100 remaining pages keeps ownership until the final tail drains", async () => {
+  let reads = 0;
+  let releaseTail: (() => void) | undefined;
+  let markTailEntered!: () => void;
+  const tailEntered = new Promise<void>((resolve) => { markTailEntered = resolve; });
+  const adapter: ProcessAdapter = {
+    start: async () => "Process started with PID 7070",
+    read: async (_pid, offset) => {
+      reads += 1;
+      if (reads <= 100) return `[Reading 1 new lines from line ${offset} (total: 101 lines, 1 remaining)]\npage-${reads}`;
+      markTailEntered();
+      await new Promise<void>((resolve) => { releaseTail = resolve; });
+      return `[Reading 1 new lines from line ${offset} (total: 101 lines, 0 remaining)]\nfinal-tail\nProcess completed with exit code 17`;
+    },
+    terminate: async () => "Successfully initiated termination of session",
+    sessions: async () => "No active sessions",
+  };
+  const { f, service, api } = await processService(adapter);
+  try {
+    const session = await openSession(api);
+    const started = await api.call("process_start", { session_id: session, command: "drain-pages", timeout_ms: 100 });
+    const processId = started.process_id as string;
+    let tailObserved = false;
+    await Promise.race([
+      tailEntered.then(() => { tailObserved = true; }),
+      new Promise((resolve) => setTimeout(resolve, 3_000)),
+    ]);
+    assert.equal(tailObserved, true, "the watcher must schedule a second bounded drain after its 100-page limit");
+    assert.equal(reads, 101);
+    assert.notEqual(service.processes.get(processId)?.state, "finished", "completion before the final page must not finish the logical process");
+    const owners = (service as unknown as { currentProcessOwners: Map<string, string> }).currentProcessOwners;
+    assert.ok([...owners.values()].includes(processId), "completion before the final page must retain current-process ownership");
+    assert.equal((await auditEvents(f.data)).filter((entry) => entry.event === "process.exit" && entry.processId === processId).length, 0);
+    releaseTail!();
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (service.processes.get(processId)?.state === "finished") break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(service.processes.get(processId)?.state, "finished");
+    assert.match(String(service.processes.get(processId)?.output), /final-tail/);
+    assert.equal((await auditEvents(f.data)).filter((entry) => entry.event === "process.exit" && entry.processId === processId).length, 1);
+  } finally { releaseTail?.(); await api.close(); await service.close(); await f.cleanup(); }
+});
+
 test("RDMCP-MVP-IFR-005: process start audit binds redacted command, PID, session, and logical id", async () => {
   const adapter: ProcessAdapter = {
     start: async () => "Process started with PID 6060",

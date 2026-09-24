@@ -21,11 +21,28 @@ const safeAuditDetail = (value: unknown): string | undefined => {
   const redacted = value.replace(/(?:[A-Za-z]:)?(?:[\\/][^\s"']+)+/g, "[path]").replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]");
   return redacted.replace(/[^\w .,:()[\]-]/g, "?").slice(0, 240);
 };
+async function safeIdentityTrace(candidate: string): Promise<string> {
+  try {
+    const [numeric, exact] = await Promise.all([stat(candidate), stat(candidate, { bigint: true })]);
+    return `number=${numeric.dev}:${numeric.ino};bigint=${exact.dev}:${exact.ino}`;
+  } catch { return "unavailable"; }
+}
 async function safeDcDiagnostics(data: string, service?: RemoteDesktopService, candidate?: string): Promise<string> {
-  const identity = await stat(configFile(data)).then((info) => `${info.dev}:${info.ino}`).catch(() => "unavailable");
-  const candidateIdentity = candidate ? await stat(candidate).then((info) => `${info.dev}:${info.ino}`).catch(() => "unavailable") : undefined;
+  const identity = await safeIdentityTrace(configFile(data));
+  const candidateIdentity = candidate ? await safeIdentityTrace(candidate) : undefined;
   const identities = (service as unknown as { protectedConfigIdentities?: Map<unknown, unknown> } | undefined)?.protectedConfigIdentities;
   const identityKeys = identities instanceof Map ? [...identities.keys()].filter((key): key is string => typeof key === "string" && /^\d+:\d+$/.test(key)).sort() : [];
+  const pinDirectory = path.join(data, "transfers", "protected-config-pins");
+  const pinIdentities = await readdir(pinDirectory).then(async (names) => Promise.all(names.map(async (name) => safeIdentityTrace(path.join(pinDirectory, name))))).catch(() => [] as string[]);
+  const manifestIdentities = await readFile(path.join(data, "transfers", "protected-config-identities.json"), "utf8").then((text) => {
+    const value: unknown = JSON.parse(text);
+    return Array.isArray(value) ? value.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const record = entry as { dev?: unknown; ino?: unknown };
+      const exact = typeof record.dev === "string" && /^\d+$/.test(record.dev) && typeof record.ino === "string" && /^\d+$/.test(record.ino);
+      return exact || (Number.isSafeInteger(record.dev) && Number.isSafeInteger(record.ino)) ? [`${record.dev}:${record.ino}`] : [];
+    }) : [];
+  }).catch(() => [] as string[]);
   const events = await readFile(path.join(data, "audit.jsonl"), "utf8").then((text) => text.split("\n").flatMap((line) => {
     try {
       const value = JSON.parse(line) as { event?: unknown; tool?: unknown; reason?: unknown; category?: unknown; detail?: unknown };
@@ -35,7 +52,7 @@ async function safeDcDiagnostics(data: string, service?: RemoteDesktopService, c
       return [`${value.event}${fields.length ? `:${fields.join(":")}` : ""}${detail ? `:detail=${detail}` : ""}`];
     } catch { return []; }
   }).slice(-8)).catch(() => [] as string[]);
-  return `config_identity=${identity};${candidateIdentity === undefined ? "" : ` candidate_identity=${candidateIdentity};`} protected_identity_count=${identityKeys.length}; protected_identity_keys=${identityKeys.join(",") || "none"}; recent_audit_events=${events.join(",") || "none"}`;
+  return `config_identity=${identity};${candidateIdentity === undefined ? "" : ` candidate_identity=${candidateIdentity};`} protected_identity_count=${identityKeys.length}; protected_identity_keys=${identityKeys.join(",") || "none"}; pin_identities=${pinIdentities.join("|") || "none"}; manifest_identity_keys=${manifestIdentities.join(",") || "none"}; recent_audit_events=${events.join(",") || "none"}`;
 }
 
 async function expectRejected(operation: Promise<unknown>, label: string, data: string, service: RemoteDesktopService, candidate?: string): Promise<void> {
@@ -136,15 +153,46 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     const protectedPath = configFile(f.data);
     const historicalAlias = path.join(f.root, "config-historical-alias.json");
     const replacement = `${protectedPath}.replacement`;
-    await link(protectedPath, historicalAlias);
-    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the known current config inode before replacement", f.data, service);
+    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
+    const initialPins = await readdir(pinDirectory);
+    assert.ok(initialPins.length > 0, "initialization must retain a private protected-config pin");
+    const retainedInitialPin = path.join(pinDirectory, initialPins[0]!);
+    await link(retainedInitialPin, historicalAlias);
+    const initialPinIdentity = await stat(retainedInitialPin);
+    const historicalIdentity = await stat(historicalAlias);
+    assert.equal(`${historicalIdentity.dev}:${historicalIdentity.ino}`, `${initialPinIdentity.dev}:${initialPinIdentity.ino}`, "A must be an alias of an actually retained private pin");
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the known protected A inode before replacement", f.data, service, historicalAlias);
+
+    // Stop Desktop Commander before manually replacing config.json.  Its asynchronous
+    // usage tracker may otherwise atomically replace the file between our rename and
+    // a direct alias link, which would test an unobserved inode rather than history B.
+    await api.close(); await service.close();
     await writeFile(replacement, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
     await replaceConfigWithRetry(replacement, protectedPath);
+
     const currentAlias = path.join(f.root, "config-current-alias.json");
-    await link(protectedPath, currentAlias);
-    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the retained config inode", f.data, service);
-    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-current-alias.json" }), "the replacement config inode", f.data, service);
-    await assert.rejects(api.call("content_search", { session_id: session, root_id: "files", query: "allowedDirectories" }));
+    let capturedReplacement = false;
+    service = new RemoteDesktopService({
+      ...f.service.cfg,
+      linkProtectedConfig: async (existingPath: string, pinPath: string) => {
+        await link(existingPath, pinPath);
+        if (!capturedReplacement) {
+          // The alias comes from the exact inode a verified private pin retained.
+          // It remains meaningful even if Commander later rewrites config.json.
+          await link(pinPath, currentAlias);
+          capturedReplacement = true;
+        }
+      },
+    });
+    await service.initialize(); api = await mcp(service);
+    assert.equal(capturedReplacement, true, "the replacement alias must be captured from a successful private pin");
+    const capturedIdentity = await stat(currentAlias);
+    const pinnedIdentities = await Promise.all((await readdir(pinDirectory)).map(async (name) => stat(path.join(pinDirectory, name))));
+    assert.ok(pinnedIdentities.some((info) => info.dev === capturedIdentity.dev && info.ino === capturedIdentity.ino), "the replacement alias must retain the exact dev:ino recorded by a private pin");
+    const replacementSession = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: replacementSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the retained config inode", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: replacementSession, root_id: "files", relative_path: "config-current-alias.json" }), "the replacement config inode captured by its private pin", f.data, service, currentAlias);
+    await assert.rejects(api.call("content_search", { session_id: replacementSession, root_id: "files", query: "allowedDirectories" }));
 
     for (let index = 0; index < 128; index++) {
       const churn = path.join(f.root, `inode-churn-${index}.txt`);
@@ -177,7 +225,12 @@ test("DR003: a config replacement during pin linking preserves known history and
   try {
     const protectedPath = configFile(f.data);
     const knownAlias = path.join(f.root, "config-known-before-race.json");
-    await link(protectedPath, knownAlias);
+    const existingPins = await readdir(path.join(f.data, "transfers", "protected-config-pins"));
+    assert.ok(existingPins.length > 0, "the pre-race A alias must derive from a retained private pin");
+    const retainedA = path.join(f.data, "transfers", "protected-config-pins", existingPins[0]!);
+    await link(retainedA, knownAlias);
+    const [retainedAIdentity, knownAliasIdentity] = await Promise.all([stat(retainedA), stat(knownAlias)]);
+    assert.equal(`${retainedAIdentity.dev}:${retainedAIdentity.ino}`, `${knownAliasIdentity.dev}:${knownAliasIdentity.ino}`, "the pre-race A alias must retain its exact pinned identity");
     api = await mcp(f.service);
     const knownSession = await openSession(api);
     await expectRejected(api.call("file_read", { session_id: knownSession, root_id: "files", relative_path: "config-known-before-race.json" }), "the known config inode before the pin-link race", f.data, f.service);
@@ -209,8 +262,71 @@ test("DR003: a config replacement during pin linking preserves known history and
     const session = await openSession(api);
     await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-known-before-race.json" }), "the known historical config inode after the pin-link race", f.data, service);
     await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-version-linked-during-pin.json" }), "the config inode actually linked during the pin-link race", f.data, service, pinnedVersionAlias);
-    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-after-pin-race.txt" })).output), /ordinary pin-race file/);
+    try {
+      assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-after-pin-race.txt" })).output), /ordinary pin-race file/);
+    } catch (error) {
+      throw new Error(`ordinary file after pin-link race was rejected: ${error instanceof Error ? error.message : "unknown"}; ${await safeDcDiagnostics(f.data, service, path.join(f.root, "ordinary-after-pin-race.txt"))}`);
+    }
   } finally { await api?.close(); await service?.close(); await f.cleanup(); }
+});
+
+test("DR003: exact bigint identity keys distinguish adjacent unsafe ids while preserving ordinary reads", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const identityService = f.service as unknown as {
+      identityFromStats: (info: { dev: bigint; ino: bigint }) => { dev: string; ino: string };
+      identityKey: (identity: { dev: string; ino: string }) => string;
+      protectedConfigIdentities: Map<string, unknown>;
+    };
+    const firstUnsafe = (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString();
+    const secondUnsafe = (BigInt(firstUnsafe) + 1n).toString();
+    assert.equal(Number(firstUnsafe), Number(secondUnsafe), "the deterministic pair must collide after lossy Number conversion");
+    const firstExact = identityService.identityFromStats({ dev: 1n, ino: BigInt(firstUnsafe) });
+    const secondExact = identityService.identityFromStats({ dev: 1n, ino: BigInt(secondUnsafe) });
+    assert.notEqual(identityService.identityKey(firstExact), identityService.identityKey(secondExact), "protected identity keys must retain bigint precision");
+
+    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
+    const pin = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
+    const protectedAlias = path.join(f.root, "config-exact-identity-alias.json");
+    const ordinary = path.join(f.root, "ordinary-exact-identity.txt");
+    await Promise.all([link(pin, protectedAlias), writeFile(ordinary, "ordinary bigint identity file")]);
+    const [pinInfo, ordinaryInfo] = await Promise.all([stat(pin, { bigint: true }), stat(ordinary, { bigint: true })]);
+    const pinIdentity = identityService.identityFromStats(pinInfo);
+    const ordinaryIdentity = identityService.identityFromStats(ordinaryInfo);
+    assert.notEqual(identityService.identityKey(pinIdentity), identityService.identityKey(ordinaryIdentity), "the real ordinary file must not share the protected pin's exact identity");
+    assert.ok(identityService.protectedConfigIdentities.has(identityService.identityKey(pinIdentity)), "the real pin must be stored under its exact identity key");
+    const identityManifest = JSON.parse(await readFile(path.join(f.data, "transfers", "protected-config-identities.json"), "utf8")) as Array<{ dev?: unknown; ino?: unknown }>;
+    assert.ok(identityManifest.length > 0 && identityManifest.every((entry) => typeof entry.dev === "string" && /^\d+$/.test(entry.dev) && typeof entry.ino === "string" && /^\d+$/.test(entry.ino)), "new protected-config manifests must persist exact decimal bigint identities");
+
+    const session = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-exact-identity-alias.json" }), "the exact pinned alias", f.data, f.service, protectedAlias);
+    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-exact-identity.txt" })).output), /ordinary bigint identity file/);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("DR003: protected identity manifests accept safe legacy values and fail closed on unsafe numeric values", async () => {
+  const f = await fixture(); let rejected: RemoteDesktopService | undefined;
+  try {
+    const identityService = f.service as unknown as {
+      validExactIdentity: (value: unknown) => boolean;
+      validLegacyIdentity: (value: unknown) => boolean;
+    };
+    assert.equal(identityService.validExactIdentity({ dev: "1", ino: "2" }), true);
+    assert.equal(identityService.validExactIdentity({ dev: 1, ino: 2 }), false, "numeric values must never be mistaken for exact persisted identities");
+    assert.equal(identityService.validLegacyIdentity({ dev: 1, ino: 2 }), true, "safe integer records retain a migration path");
+    assert.equal(identityService.validLegacyIdentity({ dev: Number.MAX_SAFE_INTEGER + 1, ino: 2 }), false, "unsafe numeric records are ambiguous and must fail closed");
+
+    await f.service.close();
+    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
+    const pin = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
+    const manifest = path.join(f.data, "transfers", "protected-config-identities.json");
+    const unsafeManifest = JSON.stringify([{ dev: Number.MAX_SAFE_INTEGER + 1, ino: 2, pin }]);
+    await writeFile(manifest, unsafeManifest);
+    rejected = new RemoteDesktopService(f.service.cfg);
+    await assert.rejects(rejected.initialize(), /Protected config identity history is invalid/);
+    assert.equal(await readFile(manifest, "utf8"), unsafeManifest, "an unsafe legacy manifest must remain available for operator diagnosis");
+    await stat(pin);
+  } finally { await rejected?.close(); await f.cleanup(); }
 });
 
 test("NR009: canonical allowed roots work through a symlink or Windows junction", async (t) => {
@@ -281,8 +397,8 @@ test("NR008: startup preserves unowned lookalikes and removes only manifest-owne
     const manifest = path.join(f.data, "transfers", "owned-uploads.json");
     await mkdir(path.dirname(snapshot), { recursive: true });
     await Promise.all([writeFile(snapshot, "orphan"), writeFile(legitimate, "keep me"), writeFile(owned, "remove me")]);
-    const identity = await stat(owned);
-    await writeFile(manifest, JSON.stringify([{ rootId: "files", path: owned, dev: identity.dev, ino: identity.ino }]));
+    const identity = await stat(owned, { bigint: true });
+    await writeFile(manifest, JSON.stringify([{ rootId: "files", path: owned, dev: identity.dev.toString(), ino: identity.ino.toString() }]));
     restarted = new RemoteDesktopService(f.service.cfg); await restarted.initialize();
     await Promise.all([absent(snapshot), absent(owned)]);
     assert.equal(await readFile(legitimate, "utf8"), "keep me");
