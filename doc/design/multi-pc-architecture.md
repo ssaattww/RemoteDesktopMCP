@@ -42,8 +42,7 @@ roles:
 flowchart LR
     ChatGPT[ChatGPT] -->|HTTPS| Funnel[Tailscale Funnel]
     Funnel -->|loopback| C[統括ノード]
-    C --> CA[統括 PC の実行ワーカー]
-    CA -->|stdio MCP| CD[Desktop Commander]
+    C -->|stdio MCP| CD[統括 PC Desktop Commander]
 
     subgraph Tailnet[tailnet]
         C <--> P1[実行ノード PC 1]
@@ -51,9 +50,9 @@ flowchart LR
         C <--> PN[実行ノード PC N]
     end
 
-    P1 --> P1A[実行ワーカー] -->|stdio MCP| P1D[Desktop Commander]
-    P2 --> P2A[実行ワーカー] -->|stdio MCP| P2D[Desktop Commander]
-    PN --> PNA[実行ワーカー] -->|stdio MCP| PND[Desktop Commander]
+    P1 -->|stdio MCP| P1D[Desktop Commander]
+    P2 -->|stdio MCP| P2D[Desktop Commander]
+    PN -->|stdio MCP| PND[Desktop Commander]
 ```
 
 ChatGPT から見える MCP 接続先は統括ノードだけとする。
@@ -234,71 +233,32 @@ HMACと鍵生成の用語・計算方法は、[HMACの仕様](https://www.rfc-ed
 ## Desktop Commander の利用
 
 実行ノードはファイル操作とプロセス操作の実行機能を独自実装しない。
-ローカルの実行ワーカーが `@wonderwhy-er/desktop-commander` を `stdio` MCP サーバーとして起動し、MCP クライアントとして利用する。
-RemoteDesktopMCP の管理側プロセスは Desktop Commander を直接起動せず、認証・認可と操作制限の確認が済んだリクエストを実行ワーカーへ渡す。
+ローカルの `@wonderwhy-er/desktop-commander` を `stdio` MCP サーバーとして起動または接続し、RemoteDesktopMCP が MCP クライアントとして利用する。
 
 この構成は Desktop Commander の Remote Device と同様に、ローカル MCP を起動して `listTools()` と `callTool()` で操作する。
 RemoteDesktopMCP から Desktop Commander の内部実装を直接 `import` せず、Desktop Commander との連携は MCP インターフェースだけに依存する。
 
-### ローカル実行の権限境界
+### プロセス実行の権限モデル
 
-各実行ノードでは、秘密設定を持つ RemoteDesktopMCP 本体と、Desktop Commander を動かす実行側を OS の権限で分離する。
-初期版は、次の2つの実行主体を必須とする。
+初期版では、RemoteDesktopMCP、Desktop Commander、`process_start` から起動するプロセスを
+同じ OS ユーザーで動かしてよい。
+`process_start` で起動したコマンドは、その OS ユーザーが持つ権限をそのまま使う。
 
-| 実行主体 | 役割 | 権限 |
-| --- | --- | --- |
-| 管理側 | OAuth/OIDC、許可ユーザー、ノード登録、PSK、監査ログ、ノード間通信を管理する | 保護対象を読み書きできる。リモートから指定された任意のコマンドは実行しない |
-| 実行側 | Desktop Commander を起動し、ファイル操作と `process_start` のコマンドを実行する | 管理者権限を持たない。作業用ディレクトリと専用の一時領域だけを読み書きできる |
+認証済みの許可ユーザーは、`process_start` を通して
+RemoteDesktopMCP を起動した OS ユーザーと同等の権限を行使できるものとして扱う。
+その OS ユーザーが読み書きできるファイル、設定、環境変数などは、
+任意コマンドからも到達できる可能性がある。
 
-実行側は、管理側とは別の OS ユーザーで動かす。
-Windows では専用の標準ユーザーを使い、Administrators グループへ追加せず、バックアップ、復元、所有権取得、デバッグなど、OS のアクセス権を迂回できる特権を付与しない。
-実行ワーカーは Windows サービスとしてこの専用ユーザーで起動し、サービスの実行ユーザー、実行ファイルの場所、起動引数は OS 管理者だけが変更できるようにする。
-他の OS へ対応する場合も、別ユーザーまたは同等以上の強制力を持つ仕組みで分離する。
+`file_search`、`content_search`、`file_read`、`file_patch` の
+許可ディレクトリはファイル操作ツールの範囲を制限するためのものであり、
+`process_start` から起動する任意コマンドの実行範囲を制限する仕組みではない。
 
-管理側が使用する次の領域は、OS のアクセス権で実行側から読み書きできないようにする。
+この権限を許可ユーザーへ与えられないPCでは、
+運用者が RemoteDesktopMCP 自体を必要な範囲まで権限を下げた OS ユーザーで起動する。
 
-- 許可ユーザー設定と OAuth/OIDC の秘密情報
-- 保存済みのアクセストークン、リフレッシュトークン、その他の認証情報
-- ノード登録情報、PSK、ノード認証設定
-- 監査ログと `DATA_DIR`
-- 管理側の実行ファイルと設定
-- 実行ユーザー、許可ディレクトリ、起動方法、サービス設定など、権限境界を変更できるファイル
-
-作業用ディレクトリはこれらの保護領域と分離し、実行側ユーザーに必要な権限だけを付与する。
-作業用ディレクトリから保護領域へのシンボリックリンクやジャンクションを作っても、リンク先の OS アクセス権で拒否されることを前提とする。
-
-### Desktop Commander の起動経路
-
-管理側プロセスから Desktop Commander を同じ OS ユーザーの子プロセスとして起動しない。
-実行ワーカーを専用ユーザーで起動し、そのワーカーが `stdio` MCP で Desktop Commander を起動する。
-管理側は、認証・認可と操作制限の確認が済んだリクエストだけを実行ワーカーへ渡す。
-
-管理側と実行ワーカーの通信は同一PC内だけで完結させる。
-この通信で許可するのは Desktop Commander に渡す操作とその結果だけとし、管理側の設定ファイルを読み書きする機能や秘密情報を返す機能は設けない。
-通信方式やサービス設定は管理側またはOS管理者だけが変更できるようにし、実行側ユーザーから書き換えられない場所に置く。
-
-実行ワーカーと Desktop Commander に渡す環境変数は、安全な値だけから新しく構成する。
-管理側プロセスの環境変数は継承せず、OAuth/OIDC の秘密情報、トークン、PSK などを含めない。
-これらの秘密情報を、実行側ユーザーから参照できるPC全体で共有される環境変数や共有設定にも保存しない。
-`HOME` や `USERPROFILE`、一時ディレクトリも実行側専用の場所を使用し、管理側の設定保存先を参照させない。
-管理側との通信用ハンドルやその他の管理用ハンドルは、Desktop Commander や `process_start` で起動した子孫プロセスへ継承させない。
-
-Desktop Commander の `allowedDirectories` は、この OS 権限分離に追加する制限として使用する。
-`allowedDirectories`、禁止コマンド、作業ディレクトリの指定だけで権限境界を代替してはならない。
-
-### 起動時の確認と失敗時の扱い
-
-実行ノードの起動時に、少なくとも次を確認する。
-
-1. 管理側と実行側の OS ユーザーが異なる。
-2. 実行側ユーザーが管理者権限や、保護領域のアクセス権を迂回できる特権を持たない。
-3. 実行側ユーザーから、設定した作業用ディレクトリには必要な操作ができる。
-4. 実行側ユーザーから、保護領域のダミーファイルを読み書きできない。
-5. 実行側の環境変数に、管理側だけが保持するダミー秘密情報が存在しない。
-
-これらを確認できない場合は `process_start` を利用不可として統括ノードへ通知し、Desktop Commander の `start_process` を呼び出さない。
-同じ OS ユーザーで Desktop Commander を起動する方式や、RemoteDesktopMCP 内の直接実装へ自動的に切り替えてはならない。
-統括ノード自身を実行ノードとして使う場合も同じ確認を必須とする。
+別 OS ユーザーや OS のアクセス権を使った追加隔離を導入してもよいが、
+初期版の必須構成にはしない。
+追加隔離を導入していないことだけを理由に `process_start` を利用不可にはしない。
 
 起動時は次を行う。
 
@@ -398,27 +358,21 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 sequenceDiagram
     participant U as ChatGPT
     participant C as 統括ノード
-    participant LA as 統括 PC 実行ワーカー
     participant LD as 統括 PC Desktop Commander
     participant R as 遠隔実行ノード
-    participant RA as 遠隔 PC 実行ワーカー
     participant RD as 遠隔 PC Desktop Commander
 
     U->>C: ツール呼び出し + node_id
     C->>C: ユーザー認可と対象ノード決定
     alt 統括ノード自身が対象
-        C->>LA: 操作制限確認済みのリクエスト
-        LA->>LD: MCP callTool
-        LD-->>LA: 結果
-        LA-->>C: RemoteDesktopMCP の形式に変換した結果
+        C->>LD: MCP callTool
+        LD-->>C: 結果
     else 遠隔 PC が対象
         C->>R: 認証・認可済みのリクエスト
         R->>R: ローカルの操作制限を確認
-        R->>RA: 操作制限確認済みのリクエスト
-        RA->>RD: MCP callTool
-        RD-->>RA: 結果
-        RA-->>R: RemoteDesktopMCP の形式に変換した結果
-        R-->>C: 結果
+        R->>RD: MCP callTool
+        RD-->>R: 結果
+        R-->>C: RemoteDesktopMCP の形式に変換した結果
     end
     C-->>U: MCP 応答
 ```
@@ -564,11 +518,10 @@ PC 間ファイル転送は初期版の対象外とする。
 
 ## 統括ノード自身を操作する場合
 
-統括ノード自身が操作対象の場合は、外部の実行ノードへ送らず、同じPC上の実行ワーカーへリクエストを渡す。
-管理側プロセスが Desktop Commander を直接起動したり、ファイル操作やプロセス操作を本体内で直接実行したりしない。
-同じPC上でも管理側ユーザーと実行側ユーザーを分離し、実行ワーカーから `stdio` MCP で Desktop Commander を利用する。
+統括ノード自身が操作対象の場合は、外部の実行ノードへ送らず、同じPC上の Desktop Commander を `stdio` MCP で呼び出す。
+ファイル操作やプロセス操作を RemoteDesktopMCP 本体へ重複実装しない。
 認証、認可、対象ノードの決定、ローカルの操作制限確認、監査ログ記録は遠隔ノードと同じ手順で行う。
-統括ノード自身を操作する場合でも、権限分離、起動時の確認、Desktop Commander の呼び出しを省略しない。
+統括ノード自身を操作する場合も、RemoteDesktopMCP、Desktop Commander、`process_start` のプロセスを同じ OS ユーザーで動かしてよい。
 
 ## 障害発生時
 
@@ -612,33 +565,16 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 12. Desktop Commander の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
 13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版対象外の直接ファイル取得処理を Desktop Commander の MCP ツール呼び出しへ置き換え、同じローカル操作を RemoteDesktopMCP 側にも重複実装していないことを確認する。
 
-### 権限境界の配備試験
+### プロセス実行の権限モデル確認
 
-実際の配備で使用する管理側ユーザーと実行側ユーザーを使って検証する。
-テスト専用の保護領域とダミー秘密情報を用意し、実際の認証情報や監査ログは検証対象に使わない。
+初期版の基本構成として、RemoteDesktopMCP と Desktop Commander を同じ OS ユーザーで起動し、`process_start` が利用できることを確認する。
 
-まず、実行側ユーザーから許可した作業用ディレクトリで、ファイルの読み書きと `process_start` が成功することを確認する。
+テスト用に、ファイル操作ツールの許可ディレクトリ外に、同じ OS ユーザーから読み取れる検証用ファイルを置く。
+`file_read` ではそのファイルを拒否し、`process_start` から起動したコマンドでは同じファイルへアクセスできることを確認する。
+これにより、ファイル操作ツールの許可ディレクトリが任意コマンドの実行範囲を制限するものではないことを確認する。
 
-次に、`process_start` から次の方法で保護領域のダミーファイルを読み取り、書き換えようとし、すべて OS のアクセス権で拒否されることを確認する。
-
-- 通常のシェルコマンド
-- PowerShell などのシェル
-- Node.js などのインタープリター
-- 出力リダイレクト
-- 起動したコマンドからさらに生成した子孫プロセス
-- 作業用ディレクトリから保護領域を指すシンボリックリンクまたはジャンクション
-
-拒否後に保護領域のダミーファイルのハッシュ値を比較し、内容が変わっていないことを確認する。
-
-管理側だけにダミーの秘密環境変数を設定し、Desktop Commander のプロセス、`process_start` のコマンド、その子孫プロセスのいずれからも取得できないことを確認する。
-コマンドの stdout / stderr にもダミー秘密情報が出力されないことを確認する。
-
-実行側ユーザーから、管理側の実行ファイル、サービス設定、実行ユーザーを決める設定、権限境界を構成する起動スクリプトを変更できないことも確認する。
-
-起動時の確認で、管理側と実行側が同じ OS ユーザーだった場合、実行側が管理者権限を持つ場合、または保護領域のダミーファイルへアクセスできた場合は、`process_start` が利用不可になることを確認する。
-この状態では Desktop Commander の `start_process` が呼ばれず、同一ユーザー実行や RemoteDesktopMCP の直接実装へ切り替わらないことを確認する。
-
-統括ノード自身を実行ノードとして使う構成でも、同じ許可試験と拒否試験を実施する。
+別 OS ユーザーや OS のアクセス権による追加隔離を導入した環境では、その隔離に固有の試験を別途行ってよい。
+ただし、その追加隔離は初期版の合格条件には含めない。
 
 ### プロセス出力の確認
 

@@ -51,42 +51,10 @@ entries:
     description: プログラム間インターフェースの略称。
   - term: アドレス
     description: ネットワークやサービスの接続先を表す一般的な技術用語。
-  - term: Windows
-    description: 初期配備で利用する OS 名。
-  - term: Administrators
-    description: Windows の管理者グループ名。
-  - term: PowerShell
-    description: Windows のシェル名。
-  - term: Node.js
-    description: JavaScript 実行環境の名称。
-  - term: インタープリター
-    description: スクリプトなどを実行するプログラム。
-  - term: グループ
-    description: OS のユーザー権限をまとめる単位。
-  - term: シェル
-    description: コマンドを実行する対話環境。
-  - term: シェルコマンド
-    description: シェルから実行するコマンド。
-  - term: ジャンクション
-    description: Windows のディレクトリ参照機能。
-  - term: シンボリックリンク
-    description: 別のファイルやディレクトリを参照するリンク。
-  - term: スクリプト
-    description: 実行手順を記述したプログラム。
-  - term: ダミー
-    description: 検証専用に用意した実データではない値。
-  - term: ダミーファイル
-    description: 検証専用に用意したファイル。
-  - term: デバッグ
-    description: プログラムの調査・解析に関する一般的な技術用語。
-  - term: バックアップ
-    description: データ保護や OS 権限名で使う一般的な技術用語。
-  - term: ハンドル
-    description: OS が管理するリソース参照。
-  - term: リンク
-    description: 別の対象への参照。
-  - term: ワーカー
-    description: 実際の処理を担当する補助プロセス。
+  - term: モデル
+    description: システムや権限の考え方を整理して表す一般的な技術用語。
+  - term: ファイルアクセス
+    description: ファイルへの読み書きや参照を表す一般的な技術用語。
   - term: OS
     description: 基本処理系の略称。
   - term: PID
