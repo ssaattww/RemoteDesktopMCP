@@ -32,4 +32,9 @@ npm.cmd run lint
 子プロセス用の設定は `DATA_DIR` 内に隔離し、既存ユーザーの Desktop
 Commander 設定を変更しません。`process_start` はこのサーバーと同じ OS
 ユーザーの任意コマンドを起動できるため、その OS アカウントの信頼境界内で
-だけ使用してください。
+だけ使用してください。`process_kill` は Desktop Commander が返したルート
+PID に委譲します。Desktop Commander 0.2.51 はその子孫プロセスを安全に特定
+する情報を返さないため、子孫を含むプロセスツリーの停止は保証しません。
+停止要求の結果を 2 秒以内に確認できない場合は、接続を再起動せず
+`terminating` と `termination_unconfirmed` を返します。この状態では重複した
+操作を行わず、実際に確認できた終了だけを監査へ記録します。

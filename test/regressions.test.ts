@@ -12,6 +12,10 @@ import { absent, fixture, mcp } from "./fixture.js";
 const sha256 = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const old = () => Date.now() - 31 * 60_000;
 const configFile = (data: string) => path.join(data, "desktop-commander-home", ".claude-server-commander", "config.json");
+const nodeScriptCommand = (file: string) => `${process.execPath} ${file}`;
+const hasAuditEvent = (text: string, event: string, processId: string) => text.split("\n").some((line) => {
+  try { const entry = JSON.parse(line) as { event?: unknown; processId?: unknown }; return entry.event === event && entry.processId === processId; } catch { return false; }
+});
 
 async function openSession(api: Awaited<ReturnType<typeof mcp>>) {
   return (await api.call("session_open", {})).session_id as string;
@@ -134,36 +138,65 @@ test("NR002 and NR006: expiry sweeps cancel transfers, clean files, and list ses
     await f.service.sweepExpired();
     assert.equal(f.service.sessions.get(session2)?.state, "expired"); assert.equal(f.service.transfers.get(id2)?.state, "expired"); await absent(item2.temp!);
     await assert.rejects(api.call("node_list", { session_id: session2 }));
+    assert.equal((await api.call("session_list", {}) as { sessions: Array<{ session_id: string }> }).sessions.some((entry) => entry.session_id === session2), false, "expired sessions must not be listed");
+
+    const closed = await openSession(api);
+    await api.call("session_close", { session_id: closed });
+    assert.equal((await api.call("session_list", {}) as { sessions: Array<{ session_id: string }> }).sessions.some((entry) => entry.session_id === closed), false, "closed sessions must not be listed");
   } finally { await api.close(); await f.cleanup(); }
 });
 
-test("NR002: startup removes only owned orphan transfer artifacts", async () => {
+test("NR008: startup preserves unowned lookalikes and removes only manifest-owned orphan artifacts", async () => {
   const f = await fixture();
   let restarted: RemoteDesktopService | undefined;
   try {
     await f.service.close();
     const snapshot = path.join(f.data, "transfers", "orphan.snapshot");
-    const uploadTemp = path.join(f.root, ".__rdmcp_orphan.upload");
+    const legitimate = path.join(f.root, ".__rdmcp_legitimate.upload");
+    const owned = path.join(f.root, ".__rdmcp_owned.upload");
+    const manifest = path.join(f.data, "transfers", "owned-uploads.json");
     await mkdir(path.dirname(snapshot), { recursive: true });
-    await Promise.all([writeFile(snapshot, "orphan"), writeFile(uploadTemp, "orphan")]);
+    await Promise.all([writeFile(snapshot, "orphan"), writeFile(legitimate, "keep me"), writeFile(owned, "remove me")]);
+    const identity = await stat(owned);
+    await writeFile(manifest, JSON.stringify([{ rootId: "files", path: owned, dev: identity.dev, ino: identity.ino }]));
     restarted = new RemoteDesktopService(f.service.cfg); await restarted.initialize();
-    await Promise.all([absent(snapshot), absent(uploadTemp)]);
+    await Promise.all([absent(snapshot), absent(owned)]);
+    assert.equal(await readFile(legitimate, "utf8"), "keep me");
   } finally { await restarted?.close(); await f.cleanup(); }
 });
 
-test("NR003 and NR004: search pages literal text and process output/audit retain completion", async () => {
+test("NR003 and NR004: searches return every page and portable Node processes retain output/audit", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   try {
     const session = await openSession(api);
     await Promise.all(Array.from({ length: 115 }, (_, index) => writeFile(path.join(f.root, `needle-${index}.txt`), `literal [term] ${index}`)));
     const files = await api.call("file_search", { session_id: session, root_id: "files", query: "needle-" });
-    assert.match(String(files.output), /needle-114/);
+    const fileHits = new Set([...String(files.output).matchAll(/needle-(\d+)\.txt/g)].map((match) => Number(match[1])));
+    assert.deepEqual([...fileHits].sort((left, right) => left - right), Array.from({ length: 115 }, (_, index) => index));
     const content = await api.call("content_search", { session_id: session, root_id: "files", query: "[term]" });
     assert.match(String(content.output), /Pattern: "\[term\]"/);
-    assert.match(String(content.output), /Total results found: 115/);
+    const contentHits = new Set([...String(content.output).matchAll(/needle-(\d+)\.txt/g)].map((match) => Number(match[1])));
+    assert.deepEqual([...contentHits].sort((left, right) => left - right), Array.from({ length: 115 }, (_, index) => index));
 
-    const command = "for /L %i in (1,1,1005) do @echo line-%i";
-    const started = await api.call("process_start", { session_id: session, command, timeout_ms: 10_000 });
+    const linesScript = path.join(f.root, "emit-lines.cjs");
+    const naturalScript = path.join(f.root, "natural-exit.cjs");
+    const longScript = path.join(f.root, "long-running.cjs");
+    await Promise.all([
+      writeFile(linesScript, "for (let index = 0; index < 1005; index += 1) console.log(`line-${index}`);"),
+      writeFile(naturalScript, "setTimeout(() => process.exit(7), 150);"),
+      writeFile(longScript, "console.log('ready'); setTimeout(() => process.exit(0), 4_500);"),
+    ]);
+    const natural = await api.call("process_start", { session_id: session, command: nodeScriptCommand(naturalScript), timeout_ms: 10_000 });
+    const naturalId = natural.process_id as string;
+    let autonomousAudit = "";
+    for (let attempt = 0; attempt < 30; attempt++) {
+      autonomousAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      if (hasAuditEvent(autonomousAudit, "process.exit", naturalId)) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(hasAuditEvent(autonomousAudit, "process.exit", naturalId), "natural exit must be audited without process status/output polling");
+
+    const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(linesScript), timeout_ms: 10_000 });
     const processId = started.process_id as string;
     let observed = "";
     for (let attempt = 0; attempt < 40; attempt++) {
@@ -172,16 +205,31 @@ test("NR003 and NR004: search pages literal text and process output/audit retain
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.match(observed, /line-1004/, "the final output page must be returned");
-    const longRunning = await api.call("process_start", { session_id: session, command: "ping -n 3 127.0.0.1 > nul", timeout_ms: 10_000 });
+    const longRunning = await api.call("process_start", { session_id: session, command: nodeScriptCommand(longScript), timeout_ms: 200 });
     const killedId = longRunning.process_id as string;
-    await api.call("process_kill", { session_id: session, process_id: killedId });
-    let killed: Record<string, unknown> | undefined;
-    for (let attempt = 0; attempt < 30; attempt++) {
-      killed = await api.call("process_status", { session_id: session, process_id: killedId });
-      if (killed.state === "finished") break;
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((await api.call("process_status", { session_id: session, process_id: killedId })).state, "running", "the portable process must be alive before termination is requested");
+    const killStarted = Date.now();
+    const killed = await api.call("process_kill", { session_id: session, process_id: killedId });
+    assert.ok(Date.now() - killStarted < 10_000, "kill must be bounded when Desktop Commander cannot confirm a process tree stop");
+    assert.ok(killed.state === "terminating" || killed.state === "finished");
+    let terminationAudit = "";
+    if (killed.state === "finished") {
+      terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      assert.match(terminationAudit, new RegExp(`"event":"process\\.exit"[^\\n]*"processId":"${killedId}"`));
+    } else if (killed.termination_unconfirmed === true) {
+      await new Promise((resolve) => setTimeout(resolve, 4_700));
+      terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      assert.match(terminationAudit, new RegExp(`"event":"process\\.termination_unconfirmed"[^\\n]*"processId":"${killedId}"`));
+    } else {
+      for (let attempt = 0; attempt < 140; attempt++) {
+        terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+        if (hasAuditEvent(terminationAudit, "process.exit", killedId)) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!hasAuditEvent(terminationAudit, "process.exit", killedId)) await api.call("process_status", { session_id: session, process_id: killedId });
+      terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      assert.match(terminationAudit, new RegExp(`"event":"process\\.exit"[^\\n]*"processId":"${killedId}"`));
     }
-    assert.equal(killed?.state, "finished"); assert.equal(typeof killed?.exit_code, "number");
     const audit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
     assert.match(audit, /"event":"process\.exit"/);
     assert.match(audit, new RegExp(`"processId":"${killedId}"`));

@@ -16,8 +16,9 @@ type OAuthClient = { client_id: string; client_name: string; redirect_uris: stri
 type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string; expires: number; scope: "mcp" };
 type Session = { id: string; user: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
 type FileIdentity = { dev: number; ino: number };
+type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
-type Process = { id: string; sessionId: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; terminationRequested?: boolean };
+type Process = { id: string; sessionId: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean };
 
 const SESSION_TTL = 24 * 60 * 60_000;
 const TRANSFER_TTL = 30 * 60_000;
@@ -104,9 +105,9 @@ class DesktopCommander {
     if (timeout) clearTimeout(timeout);
     if (!closed) await this.audit("desktop_commander.shutdown_timeout", {});
   }
-  async call(name: string, args: Record<string, unknown>): Promise<string> {
+  async call(name: string, args: Record<string, unknown>, timeout?: number): Promise<string> {
     if (!this.client || !this.tools.has(name)) throw new Error("Desktop Commander is unavailable for this operation.");
-    const value = await this.client.callTool({ name, arguments: args });
+    const value = await this.client.callTool({ name, arguments: args }, undefined, timeout ? { timeout } : undefined);
     if ("isError" in value && value.isError) throw new Error("Desktop Commander rejected the operation.");
     if (!("content" in value)) throw new Error("Desktop Commander returned an unsupported response.");
     const content = value.content as Array<{ type: string; text?: string }>;
@@ -126,6 +127,8 @@ export class RemoteDesktopService {
   private readonly dc: DesktopCommander;
   private readonly linkNoReplace: (existingPath: string, newPath: string) => Promise<void>;
   private readonly terminalTransfers: string[] = [];
+  private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
+  private readonly processWatchers = new Map<string, NodeJS.Timeout>();
   private expiryTimer?: NodeJS.Timeout;
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this)); this.linkNoReplace = cfg.linkNoReplace ?? link; }
   async initialize(): Promise<void> {
@@ -138,14 +141,13 @@ export class RemoteDesktopService {
     }
     const transferDirectory = path.join(this.cfg.dataDir, "transfers");
     await mkdir(transferDirectory, { recursive: true, mode: 0o700 });
-    for (const entry of await readdir(transferDirectory, { withFileTypes: true })) if (entry.isFile() && (entry.name.endsWith(".snapshot") || entry.name.endsWith(".upload"))) await rm(path.join(transferDirectory, entry.name), { force: true });
-    const removeOrphans = async (folder: string): Promise<void> => { for (const entry of await readdir(folder, { withFileTypes: true })) { const candidate = path.join(folder, entry.name); if (entry.isDirectory()) await removeOrphans(candidate); else if (/^\.__rdmcp_[A-Za-z0-9_-]+\.upload$/.test(entry.name) && !(await this.sameFile(candidate, this.configPath()))) await rm(candidate, { force: true }); } };
-    for (const root of this.cfg.roots) await removeOrphans(root.path);
+    for (const entry of await readdir(transferDirectory, { withFileTypes: true })) if (entry.isFile() && entry.name.endsWith(".snapshot")) await rm(path.join(transferDirectory, entry.name), { force: true });
+    await this.cleanupOwnedUploadArtifacts();
     await this.dc.start();
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
     this.expiryTimer.unref();
   }
-  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
+  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
   async audit(event: string, fields: Record<string, unknown>): Promise<void> { await mkdir(this.cfg.dataDir, { recursive: true, mode: 0o700 }); await appendFile(path.join(this.cfg.dataDir, "audit.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), event, ...fields })}\n`, { mode: 0o600 }); }
   sign(body: object): string { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
   validRedirect(uri: string): boolean { try { return this.cfg.allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; } }
@@ -170,6 +172,48 @@ export class RemoteDesktopService {
   node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
   private configPath(): string { return path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json"); }
+  private ownershipManifestPath(): string { return path.join(this.cfg.dataDir, "transfers", "owned-uploads.json"); }
+  private async writeOwnershipManifest(): Promise<void> {
+    const manifest = this.ownershipManifestPath();
+    const pending = `${manifest}.next`;
+    const records = [...this.ownedUploads.values()];
+    await writeFile(pending, JSON.stringify(records), { mode: 0o600 });
+    await rename(pending, manifest);
+  }
+  private async isOwnedArtifactPath(entry: OwnedUploadArtifact): Promise<boolean> {
+    if (!/^\.__rdmcp_[A-Za-z0-9_-]+\.upload$/.test(path.basename(entry.path))) return false;
+    let root: Root;
+    try { root = this.root(entry.rootId); } catch { return false; }
+    const candidate = path.resolve(entry.path);
+    if (!inside(path.resolve(root.path), candidate)) return false;
+    try {
+      const [actualRoot, actualParent] = await Promise.all([realpath(root.path), realpath(path.dirname(candidate))]);
+      return inside(actualRoot, actualParent);
+    } catch { return false; }
+  }
+  private async cleanupOwnedUploadArtifacts(): Promise<void> {
+    const manifest = this.ownershipManifestPath();
+    const text = await readFile(manifest, "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "[]" : Promise.reject(error));
+    let records: unknown;
+    try { records = JSON.parse(text); } catch { throw new Error("Owned upload manifest is invalid."); }
+    if (!Array.isArray(records) || records.some((value) => !value || typeof value !== "object" || typeof (value as OwnedUploadArtifact).rootId !== "string" || typeof (value as OwnedUploadArtifact).path !== "string" || !Number.isInteger((value as OwnedUploadArtifact).dev) || !Number.isInteger((value as OwnedUploadArtifact).ino))) throw new Error("Owned upload manifest is invalid.");
+    this.ownedUploads.clear();
+    for (const entry of records as OwnedUploadArtifact[]) {
+      if (await this.isOwnedArtifactPath(entry)) {
+        const info = await lstat(entry.path).catch(() => undefined);
+        if (info && info.dev === entry.dev && info.ino === entry.ino) await rm(entry.path, { force: true }).catch(() => undefined);
+      }
+    }
+    await this.writeOwnershipManifest();
+  }
+  private async trackOwnedUpload(rootId: string, uploadPath: string, identity: FileIdentity): Promise<void> {
+    this.ownedUploads.set(uploadPath, { rootId, path: uploadPath, ...identity });
+    await this.writeOwnershipManifest();
+  }
+  private async untrackOwnedUpload(uploadPath?: string): Promise<void> {
+    if (!uploadPath || !this.ownedUploads.delete(uploadPath)) return;
+    await this.writeOwnershipManifest();
+  }
   private async sameFile(left: string, right: string): Promise<boolean> { try { const [a, b] = await Promise.all([lstat(left), lstat(right)]); return a.dev === b.dev && a.ino === b.ino; } catch { return false; } }
   private async guardSearchRoot(root: Root): Promise<void> {
     const config = this.configPath();
@@ -212,6 +256,7 @@ export class RemoteDesktopService {
       const info = await lstat(item.temp).catch(() => undefined);
       if (info && info.dev === item.tempIdentity.dev && info.ino === item.tempIdentity.ino) await rm(item.temp, { force: true }).catch(() => undefined);
     }
+    await this.untrackOwnedUpload(item.temp);
   }
   private async fail(item: Transfer, reason: string): Promise<void> { item.state = reason === "expired" || reason === "session_expired" ? "expired" : "failed"; await this.cleanup(item); this.rememberTerminal(item); await this.audit("transfer.failed", { transferId: item.id, direction: item.direction, reason }); }
   private async privateSnapshot(source: string, destination: string) { await copyFile(source, destination); const bytes = await readFile(destination); return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") }; }
@@ -238,6 +283,7 @@ export class RemoteDesktopService {
     const deadline = Date.now() + 5_500;
     let offset = 0;
     let page = 0;
+    let incomplete = false;
     try {
       while (page < 5 && Date.now() < deadline) {
         const output = await this.dc.call("get_more_search_results", { sessionId: session, offset, length: 100 });
@@ -245,16 +291,22 @@ export class RemoteDesktopService {
         const complete = /Status:\s*COMPLETED/i.test(output);
         const next = Number(/offset:\s*(\d+)/i.exec(output)?.[1] ?? "");
         const shown = /Showing results (\d+)-(\d+)/i.exec(output);
+        let advanced = false;
         if (next > offset) {
           offset = next;
           page += 1;
-        } else if (shown && Number(shown[2]) >= offset) {
+          advanced = true;
+        } else if (!complete && shown && Number(shown[2]) >= offset) {
           offset = Number(shown[2]) + 1;
           page += 1;
+          advanced = true;
         }
-        if (complete || page >= 5) break;
+        if (complete && !advanced) break;
+        if (page >= 5) { incomplete = true; break; }
         await new Promise<void>((resolve) => setTimeout(resolve, 25));
       }
+      if (Date.now() >= deadline) incomplete = true;
+      if (incomplete) pages.push("Search result collection reached the local service limit; results may be incomplete.");
       return pages.join("\n");
     } finally { await this.dc.call("stop_search", { sessionId: session }).catch(() => undefined); }
   }
@@ -263,7 +315,7 @@ export class RemoteDesktopService {
     const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" });
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
     server.registerTool("session_open", { description: "Open a local operation session.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); const now = Date.now(); const session: Session = { id: makeId(), user, created: now, touched: now, expires: now + SESSION_TTL, state: "active" }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id }); return { session_id: session.id, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state }; }));
-    server.registerTool("session_list", { description: "List the caller's active sessions.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user).map((entry) => ({ session_id: entry.id, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
+    server.registerTool("session_list", { description: "List the caller's active sessions.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
     server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
     server.registerTool("node_list", { description: "List the single supported local node.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
     server.registerTool("file_search", { description: "Search permitted file names through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
@@ -273,9 +325,9 @@ export class RemoteDesktopService {
     server.registerTool("file_patch", { description: "Apply an exact text replacement through Desktop Commander.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("edit_block", { file_path: await this.safePath(root_id, relative_path), old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
     server.registerTool("file_transfer_download_begin", { description: "Create an immutable private snapshot for chunk download.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
     server.registerTool("file_transfer_download_chunk", { description: "Read the next immutable chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); let handle: FileHandle | undefined; try { handle = await open(item.snapshot, "r"); const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed."); if (complete) { item.state = "complete"; await this.cleanup(item); this.rememberTerminal(item); } return { data: data.toString("base64"), next_offset: item.offset, complete }; } catch (error) { await this.fail(item, "snapshot_read_failed"); throw error; } finally { await handle?.close().catch(() => undefined); } })));
-    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); const target = await this.safePath(root_id, relative_path, true); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { handle = await open(temp, "wx", 0o600); const info = await handle.stat(); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: { dev: info.dev, ino: info.ino }, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); const target = await this.safePath(root_id, relative_path, true); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { handle = await open(temp, "wx", 0o600); const info = await handle.stat(); const identity = { dev: info.dev, ino: info.ino }; await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
     server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await lstat(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
-    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await lstat(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
+    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await lstat(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
     server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
       await this.sweepExpiredLocked();
       this.session(user, session_id);
@@ -292,25 +344,69 @@ export class RemoteDesktopService {
       await this.audit("transfer.cancel", { transferId: item.id, sessionId });
       return { cancelled: true };
     })));
-    server.registerTool("process_start", { description: "Start an arbitrary command as the same OS user through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => this.processLock.run(async () => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("start_process", { command, timeout_ms }); const match = output.match(/PID\s+(-?\d+)/i); if (!match) throw new Error("Desktop Commander did not return a process id."); const item: Process = { id: makeId(), sessionId: session_id, pid: Number(match[1]), state: "running", output, cursor: 0 }; this.processes.set(item.id, item); await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id }); return { process_id: item.id, output }; })));
+    const auditExit = async (item: Process) => {
+      if (item.exitAudited) return;
+      item.exitAudited = true;
+      await this.audit("process.exit", { processId: item.id, result: item.terminationRequested ? "exit_after_termination_request" : "natural", exitCode: item.exitCode ?? null });
+    };
+    const finishWhenRootIsGone = async (item: Process) => {
+      if (item.state === "finished") return;
+      item.state = "finished";
+      await auditExit(item);
+    };
+    const activeInDesktopCommander = async (item: Process): Promise<boolean> => {
+      const output = await this.dc.call("list_sessions", {}, 1_000);
+      return new RegExp(`PID:\\s*${item.pid}(?:\\D|$)`, "i").test(output);
+    };
+    const watchProcess = (processId: string) => {
+      let checking = false;
+      const watcher = setInterval(() => { if (checking) return; checking = true; void this.processLock.run(async () => {
+        const item = this.processes.get(processId);
+        if (!item || item.state === "finished" || item.state === "stale") { clearInterval(watcher); this.processWatchers.delete(processId); return; }
+        try {
+          const active = await activeInDesktopCommander(item);
+          await observe(item).catch(async () => { await this.audit("process.output_unavailable", { processId }); });
+          if (!active) await finishWhenRootIsGone(item);
+        } catch { await this.audit("process.observe_failed", { processId }); clearInterval(watcher); this.processWatchers.delete(processId); return; }
+        if (this.processes.get(processId)?.state === "finished") { clearInterval(watcher); this.processWatchers.delete(processId); }
+      }).finally(() => { checking = false; }); }, 250);
+      watcher.unref();
+      this.processWatchers.set(processId, watcher);
+    };
+    server.registerTool("process_start", { description: "Start an arbitrary command as the same OS user through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => this.processLock.run(async () => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("start_process", { command, timeout_ms }); const match = output.match(/PID\s+(-?\d+)/i); if (!match) throw new Error("Desktop Commander did not return a process id."); const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); const item: Process = { id: makeId(), sessionId: session_id, pid: Number(match[1]), state: initialCompletion ? "finished" : "running", output, cursor: 0, exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]) }; this.processes.set(item.id, item); if (item.state === "running") watchProcess(item.id); await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id }); if (item.state === "finished") await auditExit(item); return { process_id: item.id, output }; })));
     const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.state === "stale") throw new Error("Process id is stale or finished."); return item; };
     const current = (sid: string, pid: string) => { const item = getProcess(sid, pid); if (item.state !== "running") throw new Error("Process id is stale or finished."); return item; };
-    const observe = async (item: Process) => { const pages: string[] = []; for (let page = 0; page < 100; page += 1) { const output = await this.dc.call("read_process_output", { pid: item.pid, offset: item.cursor, length: 1000, timeout_ms: 100 }); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const exit = /exit code\s+(-?\d+)/i.exec(output); if (exit) { item.state = "finished"; item.exitCode = Number(exit[1]); } if (!remaining || Number(remaining[1]) === 0) break; } item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); if (item.state === "finished" && !item.exitAudited) { item.exitAudited = true; await this.audit("process.exit", { processId: item.id, result: item.terminationRequested ? "killed" : "natural", exitCode: item.exitCode }); } return pages.join("\n"); };
-    server.registerTool("process_output", { description: "Read combined process output through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, output }; })));
-    server.registerTool("process_status", { description: "Get process status through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, output }; })));
+    const observe = async (item: Process) => { const pages: string[] = []; for (let page = 0; page < 100; page += 1) { const output = await this.dc.call("read_process_output", { pid: item.pid, offset: item.cursor, length: 1000, timeout_ms: 100 }, 1_000); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); if (completion) { item.state = "finished"; item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]); } if (!remaining || Number(remaining[1]) === 0) break; } item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); if (item.state === "finished") await auditExit(item); return pages.join("\n"); };
+    server.registerTool("process_output", { description: "Read combined process output through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.terminationUnconfirmed) return { state: item.state, termination_unconfirmed: true, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, output }; })));
+    server.registerTool("process_status", { description: "Get process status through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.terminationUnconfirmed) return { state: item.state, termination_unconfirmed: true, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, output }; })));
     server.registerTool("process_kill", { description: "Terminate a current process through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => {
       this.node(node_id);
       const item = current(session_id, process_id);
-      const output = await this.dc.call("force_terminate", { pid: item.pid });
+      const watcher = this.processWatchers.get(item.id);
+      if (watcher) clearInterval(watcher);
+      this.processWatchers.delete(item.id);
+      let outcome: "acknowledged" | "rejected" | "timed_out";
+      try {
+        const output = await this.dc.call("force_terminate", { pid: item.pid }, 2_000);
+        outcome = /Successfully initiated termination of session/i.test(output) ? "acknowledged" : "rejected";
+      } catch (error) {
+        outcome = typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === -32001 ? "timed_out" : "rejected";
+      }
+      if (outcome === "rejected") {
+        await this.audit("process.kill_rejected", { processId: item.id });
+        watchProcess(item.id);
+        return { state: item.state, rejected: true };
+      }
       item.state = "terminating";
       item.terminationRequested = true;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        await observe(item);
-        if (this.processes.get(item.id)?.state === "finished") break;
-        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      if (outcome === "timed_out") {
+        item.terminationUnconfirmed = true;
+        await this.audit("process.termination_unconfirmed", { processId: item.id });
+        return { state: item.state, termination_unconfirmed: true };
       }
-      const currentState = this.processes.get(item.id)?.state ?? item.state;
-      return { state: currentState, exit_code: item.exitCode, output };
+      await this.audit("process.kill_requested", { processId: item.id });
+      watchProcess(item.id);
+      return { state: item.state };
     })));
     return server;
   }

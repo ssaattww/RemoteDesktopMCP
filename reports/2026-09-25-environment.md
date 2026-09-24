@@ -53,3 +53,11 @@ Read-only dependency check on 2026-09-25 in PowerShell at `C:\Users\donabe\Proje
 - Reported package paths from `npm.cmd explain`: direct `@wonderwhy-er/desktop-commander@0.2.51`; `exceljs@4.4.0` and `sharp@0.34.5` are dependencies of Desktop Commander; `uuid@8.3.2` is a dependency of `exceljs@4.4.0`, which is pulled by Desktop Commander.
 - The audit names the affected packages as `@wonderwhy-er/desktop-commander` (high, direct, range `>=0.2.24`, via `exceljs` and `sharp`), `exceljs` (moderate, indirect, range `>=3.5.0`, via `uuid`), `sharp` (high, indirect, range `<=0.35.4-rc.0`; two libvips/libheif advisory entries), and `uuid` (moderate, indirect, range `<11.1.1`). npm’s JSON reports `@wonderwhy-er/desktop-commander@0.2.23` as the available fix for these advisories, marked `isSemVerMajor: true`.
 - `npm.cmd explain` completed for all four named packages and returned the paths above. No build or test was run while implementation work was active. Advisory disposition is left to the parent.
+
+## Built-module route smoke
+
+Bounded smoke on 2026-09-25 at clean HEAD `23bd1363d2b027c7d1233f41e8c8ee9ae0120423` in PowerShell/Windows, using Node `v22.23.3`. The smoke artifacts are ignored workspace-local files under `reference/validation/`.
+
+- Build prerequisite: Node 22 ran `node_modules/typescript/bin/tsc -p tsconfig.json` — exit 0, stdout/stderr empty.
+- `reference/validation/built-module-smoke.mjs` imported the compiled `dist/index.js` exports, created an isolated root/data fixture under ignored `reference/validation/`, bound `createApp` to loopback port 0, and checked `GET /health` = 200 and unauthenticated `POST /mcp` = 401 (`Authentication required.`). Smoke script exit 0, stdout contains the response evidence, stderr empty. Result JSON: `reference/validation/built-module-smoke.json`; command logs: `reference/validation/built-module-smoke.stdout.log` and `.stderr.log`.
+- The fixture used a unique workspace-local path and dummy test credentials. `RemoteDesktopService.close()` and the HTTP server close callback completed normally. The service was deliberately not initialized, so Desktop Commander did not start; this verifies the compiled module’s HTTP route behavior without a child process. It does not replace the full suite or CLI-process startup test. The full suite was not rerun after reviewer findings.
