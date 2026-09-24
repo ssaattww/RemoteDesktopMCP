@@ -55,6 +55,34 @@ entries:
     description: システムや権限の考え方を整理して表す一般的な技術用語。
   - term: ファイルアクセス
     description: ファイルへの読み書きや参照を表す一般的な技術用語。
+  - term: OpenAI
+    description: ChatGPT を提供する組織名。
+  - term: Connector
+    description: ChatGPT 側で外部サービスや MCP サーバーへの接続を扱う構成要素名。
+  - term: バイナリ
+    description: バイト列として扱うデータ形式を表す一般的な技術用語。
+  - term: バイナリファイル
+    description: テキストとしてではなくバイト列として扱うファイル。
+  - term: サイズ
+    description: ファイルやデータの大きさを表す一般的な技術用語。
+  - term: ファイルサイズ
+    description: ファイルの大きさを表す一般的な技術用語。
+  - term: チャンク
+    description: 大きなデータを分割して扱う単位。
+  - term: チャンクサイズ
+    description: 1回に転送するチャンクの大きさ。
+  - term: ダウンロード
+    description: 遠隔側からファイルを取得する操作。
+  - term: アップロード
+    description: 遠隔側へファイルを送る操作。
+  - term: KiB
+    description: 1024バイトを単位とするデータ量表記。
+  - term: テキスト
+    description: 文字列として扱うデータを表す一般的な技術用語。
+  - term: データ
+    description: 処理や転送の対象となる情報を表す一般的な技術用語。
+  - term: シンボリックリンク
+    description: 別のファイルやディレクトリを参照するファイルシステム機能。
   - term: OS
     description: 基本処理系の略称。
   - term: PID

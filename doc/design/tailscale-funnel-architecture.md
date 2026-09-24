@@ -130,6 +130,7 @@ Google から得たIDトークンでは、署名、`iss`、`aud`、`nonce`、有
 ## OAuth/MCP エンドポイント
 
 公開する HTTP エンドポイントは MCP と OAuth/OIDC に必要なものへ限定する。
+ファイル転送も既存の MCP 接続上の `file_transfer_*` で行い、転送専用のアップロード／ダウンロード用 HTTP エンドポイントは初期版では追加しない。
 
 - `POST /mcp`
 - `GET /.well-known/oauth-protected-resource`
@@ -267,7 +268,7 @@ Funnel の動作状況は Tailscale 側のログで確認し、RemoteDesktopMCP 
 - 現在のリダイレクト URI 検証はオリジン単位なので、登録済み URI との完全一致へ変更する必要がある。
 - リフレッシュトークンの発行・更新処理がないため追加が必要である。
 - 現在のファイル探索は `readdir` / `stat`、プロセス起動は直接 `spawn` を使用しているが、これらは暫定実装とする。実装時に `@wonderwhy-er/desktop-commander` の MCP ツール呼び出しへ置き換え、直接実装は削除する。
-- `create_file_download` と `/downloads/:token` は初期版の機能要件に含まれないため、現在の直接ファイル読み出し実装は初期版から削除する。将来必要になった場合は別途設計する。
+- 現在の `create_file_download` と `/downloads/:token` による単発ダウンロードは、初期版の正式な転送方式にはしない。`file_transfer_*` に置き換え、既存の `/mcp` 接続上でチャンク転送する。
 
 この文書では設計のみを定め、上記コード変更は実施しない。
 

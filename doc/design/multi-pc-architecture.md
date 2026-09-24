@@ -39,21 +39,33 @@ roles:
 ## 全体構成図
 
 ```mermaid
-flowchart LR
-    ChatGPT[ChatGPT] -->|HTTPS| Funnel[Tailscale Funnel]
-    Funnel -->|loopback| C[統括ノード]
-    C -->|stdio MCP| CD[統括 PC Desktop Commander]
+flowchart TB
+    subgraph OpenAI["ChatGPT / OpenAI 側"]
+        ChatGPT[ChatGPT]
+        Connector["MCP Connector<br/>接続先・認証を管理"]
+        ChatGPT --> Connector
+    end
+
+    Connector -->|HTTPS / MCP| Funnel[Tailscale Funnel]
+
+    subgraph CoordinatorPC["統括ノード PC"]
+        Funnel -->|loopback| C["RemoteDesktopMCP<br/>統括ノード"]
+        C -->|stdio MCP| CD[Desktop Commander]
+    end
 
     subgraph Tailnet[tailnet]
-        C <--> P1[実行ノード PC 1]
-        C <--> P2[実行ノード PC 2]
-        C <--> PN[実行ノード PC N]
+        C <--> P1["RemoteDesktopMCP<br/>実行ノード PC 1"]
+        C <--> P2["RemoteDesktopMCP<br/>実行ノード PC 2"]
+        C <--> PN["RemoteDesktopMCP<br/>実行ノード PC N"]
     end
 
     P1 -->|stdio MCP| P1D[Desktop Commander]
     P2 -->|stdio MCP| P2D[Desktop Commander]
     PN -->|stdio MCP| PND[Desktop Commander]
 ```
+
+MCP Connector は ChatGPT / OpenAI 側にあり、RemoteDesktopMCP の接続先と認証を扱う。
+RemoteDesktopMCP の MCP サーバー本体は統括ノード PC 上で動作する。
 
 ChatGPT から見える MCP 接続先は統括ノードだけとする。
 各実行ノードを ChatGPT へ個別登録する構成は初期版では採用しない。
@@ -304,6 +316,11 @@ Desktop Commander の `allowedDirectories` などローカル設定は対象 PC 
 RemoteDesktopMCP 側の許可ディレクトリと書き込み制限は、Desktop Commander と同じか、より厳しい範囲に設定できる。
 どちらかの制限に違反するリクエストは拒否する。また、RemoteDesktopMCP から `set_config_value` など Desktop Commander の設定変更ツールは公開しない。
 
+Desktop Commander のサーバー設定ファイルは、可能な限り Desktop Commander と RemoteDesktopMCP の許可ディレクトリ外に置く。
+さらに各実行ノードは設定ファイルの実体パスをローカル設定で保持し、`file_search`、`content_search`、`file_read`、`file_patch`、`file_transfer_*` の対象から必ず除外する。
+検索範囲に設定ファイルを含める構成は許可しないため、内容検索が設定ファイルを走査してから結果だけ除外する実装にはしない。
+この保護対象パスは外部APIや監査ログへ出力しない。
+
 RemoteDesktopMCP が担当する機能は、Desktop Commander が提供しない次のものに限定する。
 
 - 外部ユーザーの OAuth/OIDC 認証と認可
@@ -312,10 +329,125 @@ RemoteDesktopMCP が担当する機能は、Desktop Commander が提供しない
 - `request_id` を使った統括ノードと実行ノードの監査ログの関連付け
 - 外部公開するツールと引数の制限
 - 複数PC間で一意な論理プロセスIDと、各PC上の PID との対応管理
+- ChatGPT と対象PCの間で行うバイナリファイル転送
 - Tailscale Funnel を使った外部公開
 
-初期版では、Desktop Commander で提供されないファイル操作やプロセス操作を RemoteDesktopMCP 側で独自実装しない。
-将来どうしても独自実装が必要になった場合は、対象機能、Desktop Commander で代替できない理由、必要な権限、監査方法、検証項目を設計書へ明記してから実装する。
+通常の検索、読取、部分編集、プロセス操作は Desktop Commander へ委譲し、
+RemoteDesktopMCP 側で同等機能を重複実装しない。
+
+ファイル転送だけは例外とする。
+Desktop Commander の現在の公開ツールには、任意のバイナリファイルを
+MCP越しに分割送受信する専用の転送機能がないため、
+RemoteDesktopMCP が転送に必要なバイト列の読込み・一時ファイルへの書込みだけを担当する。
+この例外から検索、テキスト編集、一般的なファイル管理機能へ範囲を広げない。
+
+## ファイル転送
+
+### 基本方式
+
+初期版のファイル転送は、ChatGPT と RemoteDesktopMCP の間で既に確立している
+MCP 接続上で完結させる。
+追加の公開ポート、転送専用サーバー、一時的な外部URLは必須にしない。
+
+転送開始時に暗号学的に安全な乱数から `transfer_id` を生成する。
+転送状態には少なくとも次を保持する。
+
+- `transfer_id`
+- 転送方向
+- `session_id`
+- `node_id`
+- 対象パス
+- ファイル名
+- ファイルサイズ
+- SHA-256
+- 作成時刻
+- 最終操作時刻
+- 次に受け付ける位置
+- 状態
+
+`transfer_id` は作成元の `session_id` と `node_id` に固定する。
+後続の転送ツールでも有効な `session_id` を要求し、
+別セッションや別ノードへ転送先を差し替えられないようにする。
+元のセッションが終了または期限切れになった転送は継続しない。
+
+初期版の転送ツールは次のとおり。
+
+| ツール | 主な入力 | 主な結果 |
+| --- | --- | --- |
+| `file_transfer_download_begin` | `session_id`, `node_id`, パス | `transfer_id`, ファイル名, サイズ, SHA-256, チャンクサイズ |
+| `file_transfer_download_chunk` | `session_id`, `transfer_id`, 位置 | base64データ, 次の位置, 完了有無 |
+| `file_transfer_upload_begin` | `session_id`, `node_id`, 転送先, サイズ, SHA-256, 上書き可否 | `transfer_id`, チャンクサイズ |
+| `file_transfer_upload_chunk` | `session_id`, `transfer_id`, 位置, base64データ | 次の位置 |
+| `file_transfer_upload_commit` | `session_id`, `transfer_id` | 確定サイズ, SHA-256 |
+| `file_transfer_status` | `session_id`, `transfer_id` | 状態, 次の位置, 転送済みサイズ |
+| `file_transfer_cancel` | `session_id`, `transfer_id` | 中断結果 |
+
+ファイル本体はチャンクに分割し、MCP ツールの引数または結果では base64 で表現する。
+チャンクサイズはサーバーが返し、初期値は256 KiBを目安とする。
+実装時にMCPクライアント側のメッセージ上限を確認し、設定で小さくできるようにする。
+
+### ダウンロード
+
+`file_transfer_download_begin` は対象ファイルを検証し、
+ファイル名、サイズ、SHA-256、チャンクサイズと `transfer_id` を返す。
+
+`file_transfer_download_chunk` は `transfer_id` と位置を受け取り、
+その位置からのバイト列と次の位置を返す。
+転送開始時のサイズまたは更新時刻が変化した場合は、同じファイルの転送を継続せず失敗とする。
+
+### アップロード
+
+`file_transfer_upload_begin` は転送先、期待サイズ、期待SHA-256、
+上書き可否を受け取り、`transfer_id` とチャンクサイズを返す。
+
+受信データは転送先と同じディレクトリの一時ファイルへ順番に書き込む。
+`file_transfer_upload_chunk` は次に受け付ける位置と一致するチャンクだけを受け付ける。
+初期版では並列チャンク書込みを行わない。
+
+`file_transfer_upload_commit` で受信サイズとSHA-256を検証する。
+一致した場合だけ一時ファイルを転送先へ置き換える。
+既存ファイルの上書きは、転送開始時に明示的に許可された場合だけ行う。
+検証に失敗した場合は転送先を変更せず、一時ファイルを破棄する。
+
+### 中断と期限
+
+`file_transfer_status` は現在の状態と次の位置を返す。
+同じ RemoteDesktopMCP プロセスが動作している間は、
+クライアントが `file_transfer_status` で位置を確認して転送を再開できるようにする。
+
+一定時間操作されていない転送は期限切れにする。
+`file_transfer_cancel` または期限切れになったアップロードは一時ファイルを削除する。
+RemoteDesktopMCP 再起動前の `transfer_id` は再利用しない。
+
+### 複数PCでの転送経路
+
+統括ノード自身が対象の場合は、そのPC上で直接チャンクを処理する。
+遠隔実行ノードが対象の場合は、統括ノードが `transfer_id` と各チャンクを
+既存のノード間接続で対象実行ノードへ中継する。
+
+遠隔実行ノードを外部公開したり、ChatGPT から遠隔実行ノードへ
+直接接続したりしない。
+外部から見える接続先は、通常のツール呼び出しと同じく統括ノード1台だけとする。
+
+### パス制限
+
+ファイル転送には、その実行ノードのファイル操作と同じ許可ディレクトリを適用する。
+パスを正規化し、シンボリックリンク等を解決した実体パスで許可範囲を確認する。
+
+Desktop Commander のサーバー設定ファイルは、
+通常の `file_*` とファイル転送の両方から明示的に除外する。
+設定ファイルの実体パスは各実行ノードのローカル設定で保持し、
+許可ディレクトリ内に見える場合でも除外を優先する。
+
+この除外は RemoteDesktopMCP のファイル操作と転送APIに適用する。
+同じ OS ユーザー権限で動く `process_start` の任意コマンドからのアクセスまで
+隔離するものではない。
+
+### 監査
+
+転送開始、完了、失敗、中断を監査ログへ記録する。
+ログには `transfer_id`、転送方向、`session_id`、`node_id`、
+対象パス、サイズ、SHA-256、結果を記録し、ファイル本体は記録しない。
 
 ### 現在の `src/index.ts` の扱い
 
@@ -324,24 +456,28 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 
 - `searchFiles()` と `readdir` / `stat` による探索は削除し、`file_search` / `content_search` から Desktop Commander の検索ツールを呼び出す。
 - `launch_configured_process` 内の直接 `spawn` は削除する。固定起動設定を残す場合も、RemoteDesktopMCP 側で起動を許可してよい設定か確認した後に `start_process` を呼び出す。
-- `create_file_download` と `/downloads/:token` は初期版の機能要件に含まれないため、現在の直接ファイル読み出し実装を初期版から削除する。将来必要になった場合は、Desktop Commander を経由しない理由と安全性を別途設計してから追加する。
-- `getRoot()` やパスの正規化処理は、RemoteDesktopMCP 側のアクセス制限を確認するために必要な範囲だけ残してよい。ただし、これらの処理から対象PCのファイルを直接読み書きしない。
+- 現在の `create_file_download` と `/downloads/:token` による単発ダウンロードは、初期版の正式な転送方式にはしない。上記の `file_transfer_*` に置き換え、追加の一時HTTPエンドポイントを必要としないMCPチャンク転送へ統一する。
+- `getRoot()` やパスの正規化処理は、RemoteDesktopMCP 側のアクセス制限を確認するために必要な範囲だけ残してよい。通常のファイル操作は直接実行しないが、`file_transfer_*` のバイナリ転送に必要な範囲では対象ファイルのバイト列を直接読み書きしてよい。
 - OAuth/OIDC、RemoteDesktopMCP セッション、ノード振り分け、監査など RemoteDesktopMCP 固有の機能は引き続き本体で実装する。
 
 ## リクエストの振り分け
 
 ファイル操作とプロセス操作には対象ノードを指定できるようにする。
 
-既存ツールには `node_id` を追加する。
+既存のファイル操作、プロセス操作、ファイル転送には `node_id` を追加する。
 
 - `file_search`
 - `content_search`
 - `file_read`
 - `file_patch`
+- `file_transfer_download_begin`
+- `file_transfer_upload_begin`
 - `process_start`
 - `process_status`
 - `process_output`
 - `process_kill`
+
+`file_transfer_download_chunk`、`file_transfer_upload_chunk`、`file_transfer_upload_commit`、`file_transfer_status`、`file_transfer_cancel` は、`transfer_id` に記録された `node_id` を使用し、呼び出し時に実行先を変更できないようにする。
 
 構成に登録された実行ノードが1台だけの場合に限り `node_id` を省略できる。
 この台数判定には統括ノード自身が兼任する実行ノードも含め、現在の接続状態は使わない。
@@ -498,7 +634,8 @@ RemoteDesktopMCP のセッションが終了または期限切れになっても
 同じパスが複数PCに存在しても、同じファイルとは扱わない。
 ファイルは `node_id` とローカルパスの組で識別する。
 
-PC 間ファイル転送は初期版の対象外とする。
+ファイル転送も同じパス制限を使用する。
+Desktop Commander のサーバー設定ファイルは、通常のファイル操作とファイル転送の対象外とする。
 
 ## ログ
 
@@ -544,7 +681,6 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 - 統括ノードの自動切り替え
 - 複数統括ノードの同時稼働
 - 1回の操作を複数ノードで同時に実行する機能
-- PC 間ファイル転送
 - ChatGPT からのノード登録・削除
 
 ## 検証項目
@@ -563,7 +699,7 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 10. `file_*` と `process_*` の実行が Desktop Commander の `callTool()` を経由し、RemoteDesktopMCP 内の同等処理へ自動的に切り替わらない。
 11. RemoteDesktopMCP が拒否するパスや操作は Desktop Commander が許可していても実行されず、Desktop Commander のローカル設定が拒否する操作も実行されない。
 12. Desktop Commander の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
-13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版対象外の直接ファイル取得処理を Desktop Commander の MCP ツール呼び出しへ置き換え、同じローカル操作を RemoteDesktopMCP 側にも重複実装していないことを確認する。
+13. 現在の `src/index.ts` にある直接探索と直接 `spawn` を Desktop Commander の MCP ツール呼び出しへ置き換え、既存の単発ダウンロードを `file_transfer_*` へ置き換えることを確認する。通常の検索、編集、プロセス操作を RemoteDesktopMCP 側へ重複実装しない。
 
 ### プロセス実行の権限モデル確認
 
@@ -575,6 +711,31 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 
 別 OS ユーザーや OS のアクセス権による追加隔離を導入した環境では、その隔離に固有の試験を別途行ってよい。
 ただし、その追加隔離は初期版の合格条件には含めない。
+
+### ファイル転送の確認
+
+統括ノード自身と遠隔実行ノードの両方を対象に、ダウンロードとアップロードを確認する。
+
+ダウンロードでは、テキストファイルとバイナリファイルについて、
+開始時に返したサイズとSHA-256が転送後のファイルと一致することを確認する。
+転送中に元ファイルを変更した場合は、同じ転送を成功として完了しないことを確認する。
+
+アップロードでは、複数チャンクに分割したファイルを転送し、
+`file_transfer_upload_commit` 後のサイズとSHA-256が送信元と一致することを確認する。
+途中で中断した場合、転送先の完成ファイルが変更されず、一時ファイルが削除されることを確認する。
+上書き許可なしで既存ファイルを指定した場合は拒否する。
+
+転送を中断して `file_transfer_status` を取得し、
+同じ RemoteDesktopMCP プロセス内では返された次の位置から再開できることを確認する。
+別セッション、別ノード、期限切れの `transfer_id` は拒否する。
+
+Desktop Commander のサーバー設定ファイルについて、
+`file_search`、`content_search`、`file_read`、`file_patch` と
+すべての `file_transfer_*` が対象にできないことを確認する。
+設定ファイルを含むディレクトリを検索範囲として構成できないことも確認する。
+
+外部公開される HTTP エンドポイントに転送専用のアップロード／ダウンロード用エンドポイントが追加されず、
+ファイル本体が既存のMCP接続上だけで転送されることを確認する。
 
 ### プロセス出力の確認
 
