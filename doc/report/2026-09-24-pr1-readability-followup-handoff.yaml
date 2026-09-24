@@ -1,0 +1,1028 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: initial implementation
+  generated_at: 2026-09-24T10:06:05+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: node-auth-readability
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  current_head: 02675cd7081188a08f8424f9705e333f69e78836
+  reviewed_head: null
+  commit_range: b55f57e528b7405c2428ba07ed24101c14280099..02675cd7081188a08f8424f9705e333f69e78836
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+  source_state: dirty
+  source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+  ownership: current_task
+  writable_paths:
+    - doc/design/functional-requirements.md
+    - doc/design/multi-pc-architecture.md
+    - doc/design/tailscale-funnel-architecture.md
+    - doc/report/2026-09-24-pr1-readability-followup.md
+    - doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+    - C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+  dependencies:
+    - name: Node.js
+      status: available
+      evidence: v24.20.0
+    - name: npm
+      status: available
+      evidence: 11.19.0
+  evidence:
+    - Started from clean exact PR HEAD b55f57e528b7405c2428ba07ed24101c14280099
+    - Existing unrelated terminal session was not modified.
+    - Current dirty files are report/handoff publication content only.
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - RDC runs npm lint/check/build on FA780; successful source-bound results saved.
+  technical_head: 02675cd7081188a08f8424f9705e333f69e78836
+  administrative_parent: 02675cd7081188a08f8424f9705e333f69e78836
+  commit:
+    state: commit_pending
+    review_target_sha: 02675cd7081188a08f8424f9705e333f69e78836
+  push:
+    state: push_pending
+    head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+  ci_wait:
+    state: ci_wait_pending
+    required_for: route_verification
+  full_local_equivalence_gate:
+    state: not_started
+    candidate_head: 02675cd7081188a08f8424f9705e333f69e78836
+    note: This packet is a pre-publication snapshot; final gate and exact final SHA are recorded in the PR after
+      publication.
+  final_publication:
+    sequence: final_push_then_authorized_pr_create_or_update_then_exact_head_pull_request_ci_wait
+    pr_action: update
+    note: Repository has a push lint workflow only; inspect matching HEAD, not a run from another SHA.
+authoritative_requirements:
+  - source: user_instruction
+    reference: current chat
+    summary: ノード認証の部分が読みにくい。他にも読みにくい箇所を修正する。
+  - source: user_instruction
+    reference: earlier explicit instructions
+    summary: 読みやすさ優先、検査回避のための引用禁止、用語候補の提示、lint通過。
+  - source: project_instruction
+    reference: RemoteDesktopMCP project
+    summary: RDC git; GitHub connector PR/comment; exact-HEAD CI; repository report; no merge.
+development_policy:
+  method: validation-only documentation change
+  testing_order: baseline and focused Markdown checks, then final publication gate
+  governing_source: uploaded worker skills and documentation-only scope
+validation_plan:
+  commands:
+    - npm run lint
+    - npm run check
+    - npm run build
+    - npm audit --audit-level=low
+    - git diff --check
+    - design term candidate scan
+    - handoff YAML parse
+  required_failure_diagnostics:
+    - Result, stdout, stderr and manifest for both success and failure in
+      C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+    - Existing workflow always uploads install/lint result/stdout/stderr/environment.
+blocked: []
+authorized_actions:
+  - read_repository
+  - edit_documentation
+  - write_report
+  - write_handoff
+  - commit
+  - push
+  - update_pr
+  - comment_pr
+write_boundary:
+  allowed:
+    - doc/design/functional-requirements.md
+    - doc/design/multi-pc-architecture.md
+    - doc/design/tailscale-funnel-architecture.md
+    - doc/report/2026-09-24-pr1-readability-followup.md
+    - doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+    - C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+    - commit/push on existing PR branch
+    - PR body/comment update
+  forbidden:
+    - src/
+    - package.json
+    - package-lock.json
+    - .github/workflows/
+    - tools/lint/markdown-whitelist.yaml
+    - historical reports
+    - merge
+scope:
+  - Reorganize node authentication explanation without changing the authentication scheme.
+  - Clarify sessions, process identity/lifecycle/concurrency validation, and OAuth flow in the three design
+    documents.
+  - Preserve technical terms and existing whitelist; save report/handoff; update the existing PR.
+non_goals:
+  - Runtime implementation or authentication redesign
+  - Independent review or closure of RDMCP-R8
+  - Changes to source, dependencies, workflow, whitelist, or old reports
+  - Merge
+files:
+  changed:
+    - path: doc/design/functional-requirements.md
+      purpose: Explanation structure and readable steps
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Explanation structure and readable steps
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: Explanation structure and readable steps
+    - path: doc/report/2026-09-24-pr1-readability-followup.md
+      purpose: Detailed report
+    - path: doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+      purpose: Handoff
+  inspected:
+    - .github/workflows/lint.yml
+    - package.json
+    - scripts/check-markdown-whitelist.mjs
+    - tools/lint/markdown-whitelist.yaml
+  intentionally_untouched:
+    - src/
+    - package.json
+    - package-lock.json
+    - .github/workflows/
+    - tools/lint/markdown-whitelist.yaml
+    - historical reports
+    - merge
+commands:
+  - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+    purpose: auth-markdown-fixed
+    exit_code: 0
+    result: passed
+    head_sha: b55f57e528b7405c2428ba07ed24101c14280099
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\auth-markdown-fixed.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: fd7a0482f79ca515a498a5ec19528991dee076abd4743a58f4e0ec80f0a19ed3
+  - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+    purpose: auth-markdown
+    exit_code: 1
+    result: failed
+    head_sha: b55f57e528b7405c2428ba07ed24101c14280099
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\auth-markdown.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: 8347ed8a96a4ce43c6a67a547e0b65b2164e4a17158c7ab0704aad241d22b959
+  - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+    purpose: baseline-markdown
+    exit_code: 0
+    result: passed
+    head_sha: b55f57e528b7405c2428ba07ed24101c14280099
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\baseline-markdown.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: c0943f0d39508d0981e906545ce3b419063e6fa08f62b3f216191839f5127e63
+  - command: node scripts/check-markdown-whitelist.mjs --list-unknown --files
+      doc/design/functional-requirements.md doc/design/multi-pc-architecture.md
+      doc/design/tailscale-funnel-architecture.md
+    purpose: candidate-terms-final
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\candidate-terms-final.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: 971d48734ee91485e1764f4de13dafb049788052163b4e778023f893b14d56b3
+  - command: node scripts/check-markdown-whitelist.mjs --list-unknown --files
+      doc/design/functional-requirements.md doc/design/multi-pc-architecture.md
+      doc/design/tailscale-funnel-architecture.md
+    purpose: candidate-terms
+    exit_code: 1
+    result: failed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\candidate-terms.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: 26a672fa24ac9c5c6d520ca93493d6a8b10c4139b08c3d223d531a32ad1be463
+  - command: cmd.exe /d /s /c npm.cmd audit --audit-level=low
+    purpose: design-audit
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-audit.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+  - command: cmd.exe /d /s /c npm.cmd run build
+    purpose: design-build
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-build.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+  - command: cmd.exe /d /s /c npm.cmd run check
+    purpose: design-check
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-check.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+  - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design && git diff --check
+    purpose: design-final-focused
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-final-focused.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: 7215e566de85cebe184d4e62eea6ece240e1cb35216b9348d2b3d2553d5690b0
+  - command: cmd.exe /d /s /c npm.cmd run lint
+    purpose: design-lint
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-lint.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+  - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design && git diff --check
+    purpose: final-focused-before-commit
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\final-focused-before-commit.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+  - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+    purpose: readability-focused-fixed
+    exit_code: 0
+    result: passed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\readability-focused-fixed.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: 971d48734ee91485e1764f4de13dafb049788052163b4e778023f893b14d56b3
+  - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+    purpose: readability-focused
+    exit_code: 1
+    result: failed
+    head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\readability-focused.result.json
+    execution_environment:
+      machine: FA780
+      node: v24.20.0
+      working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+    source_fingerprint: 26a672fa24ac9c5c6d520ca93493d6a8b10c4139b08c3d223d531a32ad1be463
+tests:
+  - name: Preserved formula/key/identifier values
+    phase: verification
+    result: passed
+    head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+    evidence: C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944/preserved-values.json
+  - name: Author reading of before/after text
+    phase: verification
+    result: passed
+    head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+    evidence: C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944/self-check.json; not
+      independent review
+ci:
+  required: true
+  workflow: lint
+  run_id: null
+  head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+  conclusion: unknown
+  artifacts: []
+implementation:
+  outcome: completed
+  final_head: 02675cd7081188a08f8424f9705e333f69e78836
+  commits:
+    - sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+      purpose: Explain node authentication in stages
+    - sha: 02675cd7081188a08f8424f9705e333f69e78836
+      purpose: Separate session process and OAuth explanations
+  addressed_findings: []
+  failure_diagnostics:
+    - type: log
+      location: C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+      summary: All npm/Markdown executions retain stdout/stderr/result and source manifests; intermediate formatting
+        failures are retained.
+  blocked_items: []
+  summary:
+    - Documentation request implemented; formal review findings were not closed.
+review:
+  mode: not_applicable
+  reviewed_head: 02675cd7081188a08f8424f9705e333f69e78836
+  reviewer:
+    identity: current implementation chat
+    role: not_applicable
+    independence:
+      implemented_change: true
+      implemented_review_fix: false
+      served_as_normal_reviewer: false
+      inherited_conversation: true
+      evidence:
+        - Author self-check only
+  verdict: not_applicable
+  summary:
+    - RDMCP-R8 review status is unchanged.
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-24-pr1-readability-followup.md
+  reviewed_head: null
+  attestation_head: null
+  pr_comments: []
+  summary:
+    - Final publication and CI evidence will be posted after this packet is committed.
+findings: []
+held: []
+unexplored:
+  - area: Runtime authentication and process concurrency
+    blocker: Documentation-only scope
+    remaining_risk: Requires future implementation and runtime validation
+    verdict_impact: No runtime correctness verdict
+unknown:
+  - field_or_fact: publication state
+    reason: Final publication SHA and exact-HEAD CI are not available until report/handoff commit is pushed.
+not_applicable:
+  - field_or_area: task ledger
+    reason: tasks/tasks-status.md is absent
+  - field_or_area: merge
+    reason: Reserved for user
+remaining_risks:
+  - Local Node v24.20.0 differs from workflow Node 22.
+  - No runtime protocol or concurrency test is claimed.
+  - RDMCP-R8 normal-review verification remains outside this task.
+source_payloads:
+  - source_skill: work-context-manager
+    output_contract_version: "3"
+    content_type: application/yaml
+    payload:
+      repository: ssaattww/RemoteDesktopMCP
+      issue_or_pr: "PR #1"
+      task_id: node-auth-readability
+      mode: implementation
+      branch: feat/tailscale-funnel-design-lint
+      base_ref: main
+      current_head: 02675cd7081188a08f8424f9705e333f69e78836
+      reviewed_head: null
+      verification_capability: local_execution_available
+      verification_capability_evidence:
+        - RDC runs npm lint/check/build on FA780; successful source-bound results saved.
+      execution_environment:
+        kind: connected_computer
+        tool: Remote Desktop Commander
+        machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+        connection: available
+        os: Windows
+        shell: powershell.exe
+        working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+        repository: ssaattww/RemoteDesktopMCP
+        branch: feat/tailscale-funnel-design-lint
+        head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+        source_state: dirty
+        source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        ownership: current_task
+        writable_paths:
+          - doc/design/functional-requirements.md
+          - doc/design/multi-pc-architecture.md
+          - doc/design/tailscale-funnel-architecture.md
+          - doc/report/2026-09-24-pr1-readability-followup.md
+          - doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+          - C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+        dependencies:
+          - name: Node.js
+            status: available
+            evidence: v24.20.0
+          - name: npm
+            status: available
+            evidence: 11.19.0
+        evidence:
+          - Started from clean exact PR HEAD b55f57e528b7405c2428ba07ed24101c14280099
+          - Existing unrelated terminal session was not modified.
+          - Current dirty files are report/handoff publication content only.
+      scope:
+        - Reorganize node authentication explanation without changing the authentication scheme.
+        - Clarify sessions, process identity/lifecycle/concurrency validation, and OAuth flow in the three
+          design documents.
+        - Preserve technical terms and existing whitelist; save report/handoff; update the existing PR.
+      non_goals:
+        - Runtime implementation or authentication redesign
+        - Independent review or closure of RDMCP-R8
+        - Changes to source, dependencies, workflow, whitelist, or old reports
+        - Merge
+      authoritative_requirements:
+        - source: user_instruction
+          reference: current chat
+          summary: ノード認証の部分が読みにくい。他にも読みにくい箇所を修正する。
+        - source: user_instruction
+          reference: earlier explicit instructions
+          summary: 読みやすさ優先、検査回避のための引用禁止、用語候補の提示、lint通過。
+        - source: project_instruction
+          reference: RemoteDesktopMCP project
+          summary: RDC git; GitHub connector PR/comment; exact-HEAD CI; repository report; no merge.
+      write_boundary:
+        allowed:
+          - doc/design/functional-requirements.md
+          - doc/design/multi-pc-architecture.md
+          - doc/design/tailscale-funnel-architecture.md
+          - doc/report/2026-09-24-pr1-readability-followup.md
+          - doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+          - C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+          - commit/push on existing PR branch
+          - PR body/comment update
+        forbidden:
+          - src/
+          - package.json
+          - package-lock.json
+          - .github/workflows/
+          - tools/lint/markdown-whitelist.yaml
+          - historical reports
+          - merge
+      development_policy:
+        method: validation-only documentation change
+        testing_order: baseline and focused Markdown checks, then final publication gate
+        governing_source: uploaded worker skills and documentation-only scope
+      validation:
+        commands:
+          - npm run lint
+          - npm run check
+          - npm run build
+          - npm audit --audit-level=low
+          - git diff --check
+          - design term candidate scan
+          - handoff YAML parse
+        required_failure_diagnostics:
+          - Result, stdout, stderr and manifest for both success and failure in
+            C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+          - Existing workflow always uploads install/lint result/stdout/stderr/environment.
+      unknown:
+        - Final publication SHA and exact-HEAD CI are not available until report/handoff commit is pushed.
+      blocked: []
+      remaining_risks:
+        - Local Node v24.20.0 differs from workflow Node 22.
+        - No runtime protocol or concurrency test is claimed.
+        - RDMCP-R8 normal-review verification remains outside this task.
+  - source_skill: implementation-worker
+    output_contract_version: "3"
+    content_type: application/yaml
+    payload:
+      mode: initial implementation
+      accepted_scope:
+        - Reorganize node authentication explanation without changing the authentication scheme.
+        - Clarify sessions, process identity/lifecycle/concurrency validation, and OAuth flow in the three
+          design documents.
+        - Preserve technical terms and existing whitelist; save report/handoff; update the existing PR.
+      non_goals:
+        - Runtime implementation or authentication redesign
+        - Independent review or closure of RDMCP-R8
+        - Changes to source, dependencies, workflow, whitelist, or old reports
+        - Merge
+      requirements:
+        - source: user_instruction
+          reference: current chat
+          summary: ノード認証の部分が読みにくい。他にも読みにくい箇所を修正する。
+        - source: user_instruction
+          reference: earlier explicit instructions
+          summary: 読みやすさ優先、検査回避のための引用禁止、用語候補の提示、lint通過。
+        - source: project_instruction
+          reference: RemoteDesktopMCP project
+          summary: RDC git; GitHub connector PR/comment; exact-HEAD CI; repository report; no merge.
+      changed_files:
+        - path: doc/design/functional-requirements.md
+          purpose: Explanation structure and readable steps
+        - path: doc/design/multi-pc-architecture.md
+          purpose: Explanation structure and readable steps
+        - path: doc/design/tailscale-funnel-architecture.md
+          purpose: Explanation structure and readable steps
+      intentionally_untouched:
+        - src/
+        - package.json
+        - package-lock.json
+        - .github/workflows/
+        - tools/lint/markdown-whitelist.yaml
+        - historical reports
+        - merge
+      commands:
+        - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+          purpose: auth-markdown-fixed
+          exit_code: 0
+          result: passed
+          head_sha: b55f57e528b7405c2428ba07ed24101c14280099
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\auth-markdown-fixed.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: fd7a0482f79ca515a498a5ec19528991dee076abd4743a58f4e0ec80f0a19ed3
+        - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+          purpose: auth-markdown
+          exit_code: 1
+          result: failed
+          head_sha: b55f57e528b7405c2428ba07ed24101c14280099
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\auth-markdown.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: 8347ed8a96a4ce43c6a67a547e0b65b2164e4a17158c7ab0704aad241d22b959
+        - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+          purpose: baseline-markdown
+          exit_code: 0
+          result: passed
+          head_sha: b55f57e528b7405c2428ba07ed24101c14280099
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\baseline-markdown.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: c0943f0d39508d0981e906545ce3b419063e6fa08f62b3f216191839f5127e63
+        - command: node scripts/check-markdown-whitelist.mjs --list-unknown --files
+            doc/design/functional-requirements.md doc/design/multi-pc-architecture.md
+            doc/design/tailscale-funnel-architecture.md
+          purpose: candidate-terms-final
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\candidate-terms-final.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: 971d48734ee91485e1764f4de13dafb049788052163b4e778023f893b14d56b3
+        - command: node scripts/check-markdown-whitelist.mjs --list-unknown --files
+            doc/design/functional-requirements.md doc/design/multi-pc-architecture.md
+            doc/design/tailscale-funnel-architecture.md
+          purpose: candidate-terms
+          exit_code: 1
+          result: failed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\candidate-terms.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: 26a672fa24ac9c5c6d520ca93493d6a8b10c4139b08c3d223d531a32ad1be463
+        - command: cmd.exe /d /s /c npm.cmd audit --audit-level=low
+          purpose: design-audit
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-audit.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        - command: cmd.exe /d /s /c npm.cmd run build
+          purpose: design-build
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-build.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        - command: cmd.exe /d /s /c npm.cmd run check
+          purpose: design-check
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-check.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design && git diff --check
+          purpose: design-final-focused
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-final-focused.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: 7215e566de85cebe184d4e62eea6ece240e1cb35216b9348d2b3d2553d5690b0
+        - command: cmd.exe /d /s /c npm.cmd run lint
+          purpose: design-lint
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\design-lint.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design && git diff --check
+          purpose: final-focused-before-commit
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\final-focused-before-commit.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+          purpose: readability-focused-fixed
+          exit_code: 0
+          result: passed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\readability-focused-fixed.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: 971d48734ee91485e1764f4de13dafb049788052163b4e778023f893b14d56b3
+        - command: cmd.exe /d /s /c npm.cmd run lint:md && npm.cmd run lint:md:terms:design
+          purpose: readability-focused
+          exit_code: 1
+          result: failed
+          head_sha: 7c758b69d00abf0d4614b32c190401cd0bf2ed8a
+          evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-readability-20260924-0944\readability-focused.result.json
+          execution_environment:
+            machine: FA780
+            node: v24.20.0
+            working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+          source_fingerprint: 26a672fa24ac9c5c6d520ca93493d6a8b10c4139b08c3d223d531a32ad1be463
+      verification_capability: local_execution_available
+      execution_environment:
+        kind: connected_computer
+        tool: Remote Desktop Commander
+        machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+        connection: available
+        os: Windows
+        shell: powershell.exe
+        working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+        repository: ssaattww/RemoteDesktopMCP
+        branch: feat/tailscale-funnel-design-lint
+        head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+        source_state: dirty
+        source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        ownership: current_task
+        writable_paths:
+          - doc/design/functional-requirements.md
+          - doc/design/multi-pc-architecture.md
+          - doc/design/tailscale-funnel-architecture.md
+          - doc/report/2026-09-24-pr1-readability-followup.md
+          - doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+          - C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+        dependencies:
+          - name: Node.js
+            status: available
+            evidence: v24.20.0
+          - name: npm
+            status: available
+            evidence: 11.19.0
+        evidence:
+          - Started from clean exact PR HEAD b55f57e528b7405c2428ba07ed24101c14280099
+          - Existing unrelated terminal session was not modified.
+          - Current dirty files are report/handoff publication content only.
+      review_target_commit: 02675cd7081188a08f8424f9705e333f69e78836
+      push_state: pushed
+      technical_head: 02675cd7081188a08f8424f9705e333f69e78836
+      administrative_parent: 02675cd7081188a08f8424f9705e333f69e78836
+      matching_ci: null
+      blocked: []
+      unknown:
+        - Final publication SHA and exact-HEAD CI are not available until report/handoff commit is pushed.
+      remaining_risks:
+        - Local Node v24.20.0 differs from workflow Node 22.
+        - No runtime protocol or concurrency test is claimed.
+        - RDMCP-R8 normal-review verification remains outside this task.
+      next_action: Normal reviewer confirms wording preserved design; no merge.
+  - source_skill: report-writer
+    output_contract_version: "3"
+    content_type: application/yaml
+    payload:
+      report_type: implementation_report
+      complete_body: >
+        # PR #1 ノード認証と関連説明の再構成
+
+
+        ## 対象と作業範囲
+
+
+        - リポジトリ: ssaattww/RemoteDesktopMCP
+
+        - PR: #1
+
+        - ブランチ: feat/tailscale-funnel-design-lint
+
+        - ベース: main
+
+        - 作業開始HEAD: b55f57e528b7405c2428ba07ed24101c14280099
+
+        - 設計変更後HEAD: 02675cd7081188a08f8424f9705e333f69e78836
+
+        - 作業場所: FA780 / C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+
+        - 記録時刻: 2026-09-24T10:04:43+09:00（チャット実行環境で取得）
+
+
+        利用者の「ノード認証の部分が読みにくい。他にも読みにくい箇所を修正してほしい」という依頼に対応した。
+
+        対象は設計3文書の説明順序、段落、見出し、表である。
+
+        製品コード、認証方式、依存関係、既存ホワイトリスト、過去のレビュー報告は変更していない。
+
+
+        ## ノード認証の変更
+
+
+        以前の説明は、鍵や値の役割を十分に説明する前に、長い計算式と接続手順が続いていた。
+
+        次の順序で読めるようにした。
+
+
+        1. ノード認証で確認する相手と、ユーザー認証との違い。
+
+        2. PSK、nonce、HMAC値、セッション鍵の役割。
+
+        3. 接続前に管理者が設定する内容。
+
+        4. 実行ノードと統括ノードの間で送る値と、双方の照合手順。
+
+        5. 認証後のメッセージ検証。
+
+        6. 鍵の保管・更新・ノード登録解除と監査ログ。
+
+
+        計算式は手順の文章から分け、独立したコードブロックと入力表に移した。
+
+        PSKを送信するのではなく、その鍵から計算したHMAC値を照合することを本文で説明した。
+
+        接続専用のセッション鍵と、ユーザー操作をまとめる session_id は別のものと明記した。
+
+
+        ## その他の変更
+
+
+        | 文書 | 整理した箇所 |
+
+        | --- | --- |
+
+        | functional-requirements.md | セッションの開始・継続・終了とプロセスとの関係。Desktop Commander との分担、呼び出し手順、公開制限 |
+
+        | multi-pc-architecture.md | 論理プロセスID、ノードID、世代ID、PIDの役割。PID再利用、排他制御、接続切断、終了済み処理を別の節に分離 |
+
+        | tailscale-funnel-architecture.md | Googleでの本人確認と RemoteDesktopMCP
+        の利用許可を区別。ツール呼び出しまでの手順、トークンの検証・無効化・保管を分離 |
+
+
+        長いプロセス検証項目は、出力、再起動、終了済み処理、同一世代のPID再利用、並行操作の5項目に分けた。
+
+        元の検証条件と期待結果を残し、条件を設定する操作と確認する結果を別の文にした。
+
+
+        ## 仕様の照合
+
+
+        作業担当として変更前後を読み比べ、次の制約が残っていることを確認した。
+
+        これは自己確認であり、独立レビューや RDMCP-R8 の修正確認を代替しない。
+
+
+        - ノードの組ごとに異なるPSKを使い、認証前の操作を拒否する。
+
+        - HMACの入力順序、役割名、鍵生成の入力、接続IDと本文ハッシュの式を維持する。
+
+        - PSKは32バイト、プロセスの世代IDは16バイト、セッションの無操作期限は24時間のままとする。
+
+        - ノード登録と鍵の設定はローカル操作に限定し、秘密の値をログに出力しない。
+
+        - 同じユーザーによるセッション継続と、セッション終了時にプロセスを自動停止しない規則を維持する。
+
+        - PID再利用時の古いIDの無効化、世代の確認、ロック取得後の再確認、呼び出しと状態更新までのロック保持を維持する。
+
+        - 終了済みプロセスは保存済みの結果を返し、無効なIDから Desktop Commander へPIDを渡さない。
+
+        - OAuthの署名・発行者・有効期限・aud・nonceの検証と、許可ユーザー変更後の旧トークン拒否を維持する。
+
+
+        数式・識別子・鍵長など12項目については、変更後にも対応する値が存在することを機械的に確認した。
+
+        この検査は値の保持確認であり、認証プロトコルや並行制御の実行試験ではない。
+
+
+        ## 用語とホワイトリスト
+
+
+        今回の新しい追加候補はない。PSK、nonce、HMAC、ロックなど必要な用語は既に登録されていた。
+
+        ホワイトリストは変更せず、設計3文書の未許可語は0件だった。
+
+        一般語を検査対象から外すためのコード表記は追加していない。
+
+        コードブロックは、認証の入力文字列と計算式を読みやすく独立表示するために使用した。
+
+
+        ## 検証結果
+
+
+        設計変更後HEADと同じ内容の作業ツリーで、次を実行した。
+
+        実行時の基準HEADは 7c758b69d00abf0d4614b32c190401cd0bf2ed8a、内容のSHA-256は
+        ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf である。
+
+
+        | 検査 | 結果 |
+
+        | --- | --- |
+
+        | npm run lint | 成功 |
+
+        | npm run check | 成功 |
+
+        | npm run build | 成功 |
+
+        | npm audit --audit-level=low | 成功 |
+
+        | git diff --check | 成功 |
+
+        | 設計3文書の未許可語抽出 | 0件 |
+
+        | 指定した数式・識別子・鍵長の保持 | 12項目を確認 |
+
+
+        ローカル検証は Windows / Node.js v24.20.0 で行った。
+
+        既存CIは Ubuntu / Node.js 22 のため、同一環境での検証とは扱わない。
+
+
+        途中の文書検査では、表中の連結記号による列数エラー、見出し前の空行不足、中黒を含めた語の抽出を検出した。
+
+        表の記号をMarkdownとして適切に表示し、空行と句読点を修正してから再検査した。検査ルールの無効化やホワイトリストの拡張は行っていない。
+
+
+        診断ファイルは C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944 に保存した。
+
+        各実行の標準出力、標準エラー、終了コード、検証対象ファイルのハッシュ一覧を保存している。
+
+        このパスは接続先PC上の保存先であり、チャットへの添付ファイルではない。
+
+
+        ## 診断workflowとCI
+
+
+        既存の .github/workflows/lint.yml は、成功・失敗の両方で診断artifactを保存する。
+
+        保存対象はインストールとlintの結果、標準出力、標準エラー、対象SHA、Node.jsとnpmの情報である。
+
+        今回、workflowの変更は不要だった。
+
+
+        この報告と引き継ぎファイルを含む最終候補でも全体検証を行う。
+
+        最終コミットのSHAと、そのSHAに一致するCIの結果は、コミット作成後にPR本文とコメントへ記録する。
+
+        別SHAの実行結果は代用しない。
+
+
+        ## コミット
+
+
+        - 7c758b69d00abf0d4614b32c190401cd0bf2ed8a: ノード認証の説明を段階別に再構成。
+
+        - 02675cd7081188a08f8424f9705e333f69e78836: セッション、プロセス、OAuthと検証項目を再構成。
+
+
+        ## 残る確認事項
+
+
+        今回は文書の修正であり、ノード間認証やプロセス制御の実装・実接続試験は行っていない。
+
+        RDMCP-R8のレビュー状態は変更していない。
+
+        通常レビュアーは、説明順序の変更で既存仕様が欠落していないことも確認する。
+
+
+        タスク台帳 tasks/tasks-status.md は存在せず、更新対象はなかった。
+
+        マージは行わない。
+      evidence_sources:
+        - b55f57e528b7405c2428ba07ed24101c14280099
+        - 02675cd7081188a08f8424f9705e333f69e78836
+        - C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+        - uploaded worker skills
+      target_identity:
+        branch: feat/tailscale-funnel-design-lint
+        base_ref: main
+        current_head: 02675cd7081188a08f8424f9705e333f69e78836
+        reviewed_implementation_head: null
+      verification:
+        capability: local_execution_available
+        technical_head: 02675cd7081188a08f8424f9705e333f69e78836
+        administrative_parent: 02675cd7081188a08f8424f9705e333f69e78836
+        commit_state: commit_pending
+        push_state: push_pending
+        ci_wait_state: ci_wait_pending
+      execution_environment:
+        kind: connected_computer
+        tool: Remote Desktop Commander
+        machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+        connection: available
+        os: Windows
+        shell: powershell.exe
+        working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+        repository: ssaattww/RemoteDesktopMCP
+        branch: feat/tailscale-funnel-design-lint
+        head_sha: 02675cd7081188a08f8424f9705e333f69e78836
+        source_state: dirty
+        source_fingerprint: ff35b6fdccaba7c561845f5b811d633c93d049b760138e5bef1f9a79631c8daf
+        ownership: current_task
+        writable_paths:
+          - doc/design/functional-requirements.md
+          - doc/design/multi-pc-architecture.md
+          - doc/design/tailscale-funnel-architecture.md
+          - doc/report/2026-09-24-pr1-readability-followup.md
+          - doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+          - C:/Users/donabe/Project/RemoteDesktopMCP-pr1-readability-20260924-0944
+        dependencies:
+          - name: Node.js
+            status: available
+            evidence: v24.20.0
+          - name: npm
+            status: available
+            evidence: 11.19.0
+        evidence:
+          - Started from clean exact PR HEAD b55f57e528b7405c2428ba07ed24101c14280099
+          - Existing unrelated terminal session was not modified.
+          - Current dirty files are report/handoff publication content only.
+      persistence:
+        mode: repository_file
+        reserved_paths:
+          - doc/report/2026-09-24-pr1-readability-followup.md
+        report_attestation_head: null
+      concise_pr_comment_body: null
+      unresolved_discrepancies: []
+extensions:
+  - namespace: terminology
+    payload:
+      new_candidates: []
+      whitelist_changed: false
+  - namespace: snapshot
+    payload: Pre-publication snapshot; PR comment is authoritative for final SHA, full gate, and exact-HEAD CI.
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Verify document reorganization preserves the design and is readable.
+  instructions:
+    - Resolve current PR HEAD afresh.
+    - Check preserved conditions and explanations, not only lint.
+    - Use CI matching the current PR HEAD only.
+    - Do not merge.
+  required_attachments_or_references:
+    - doc/report/2026-09-24-pr1-readability-followup.md
+    - doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+  requested_authorized_actions:
+    - read_repository
+    - write_report
+    - comment_pr
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-24-pr1-readability-followup-handoff.yaml
+  packet_url: null
+  transport_note: Final SHA and CI are recorded outside this pre-publication packet.
