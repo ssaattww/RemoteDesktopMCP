@@ -1,263 +1,244 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { appendFile, copyFile, link, lstat, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import express, { type Request, type Response } from "express";
+import { fileURLToPath } from "node:url";
+import express, { type Express, type Request, type Response } from "express";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
 
 type User = { email: string; passwordHash: string };
-type LaunchPreset = { id: string; label: string; command: string; args: string[]; cwd?: string };
-type FileRoot = { id: string; path: string };
+type Root = { id: string; path: string };
 type OAuthClient = { client_id: string; client_name: string; redirect_uris: string[] };
-type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string };
+type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string; expires: number };
+type Session = { id: string; user: string; created: number; touched: number };
+type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
+type Process = { id: string; sessionId: string; pid: number; state: "running" | "stale" | "finished"; output: string; exitCode?: number };
 
-const MAX_RESULTS = 100;
-const MAX_DEPTH = 8;
-const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
-const CODE_TTL_MS = 5 * 60_000;
-const TOKEN_TTL_SECONDS = 60 * 60;
-const DOWNLOAD_TTL_SECONDS = 60;
-const dataDir = path.resolve(process.env.DATA_DIR ?? "data");
+const SESSION_TTL = 24 * 60 * 60_000;
+const TRANSFER_TTL = 30 * 60_000;
+const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_TRANSFERS = 20;
+const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"];
 
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is required. See .env.example.`);
-  return value;
+export type RuntimeConfig = { baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; allowedRedirectOrigins: Set<string> };
+const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
+const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
+const makeId = () => randomBytes(32).toString("base64url");
+const inside = (parent: string, candidate: string) => { const relative = path.relative(parent, candidate); return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)); };
+const overlaps = (a: string, b: string) => inside(a, b) || inside(b, a);
+const result = (body: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(body, null, 2) }] });
+const failure = (message: string) => ({ isError: true as const, content: [{ type: "text" as const, text: message }] });
+const equal = (left: string, right: string) => { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); };
+
+export function configFromEnv(env = process.env): RuntimeConfig {
+  const baseUrl = get(env, "BASE_URL").replace(/\/$/, "");
+  const url = new URL(baseUrl);
+  if (url.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(url.hostname)) throw new Error("BASE_URL must use HTTPS except for loopback local development.");
+  const tokenSecret = get(env, "TOKEN_SECRET");
+  if (tokenSecret.length < 32) throw new Error("TOKEN_SECRET must contain at least 32 characters.");
+  const users = parse<User[]>(env, "AUTHORIZED_USERS_JSON");
+  const roots = parse<Root[]>(env, "FILE_ROOTS_JSON").map((root) => ({ ...root, path: path.resolve(root.path) }));
+  if (users.length !== 1 || !users[0]?.email || !users[0]?.passwordHash) throw new Error("AUTHORIZED_USERS_JSON must contain exactly one complete local-development user.");
+  if (!roots.length || roots.some((root) => !root.id || !root.path) || new Set(roots.map((root) => root.id)).size !== roots.length) throw new Error("FILE_ROOTS_JSON must contain unique complete roots.");
+  if (env.REMOTE_NODES_JSON || env.NODE_ROLE && env.NODE_ROLE !== "local") throw new Error("This MVP supports one local node only; remote roles are rejected.");
+  const chunkBytes = Number(env.TRANSFER_CHUNK_BYTES ?? 128 * 1024);
+  if (!Number.isInteger(chunkBytes) || chunkBytes < 1024 || chunkBytes > 512 * 1024) throw new Error("TRANSFER_CHUNK_BYTES must be between 1024 and 524288.");
+  const bundled = fileURLToPath(new URL("../node_modules/@wonderwhy-er/desktop-commander/dist/index.js", import.meta.url));
+  const allowedRedirectOrigins = new Set((env.ALLOWED_REDIRECT_ORIGINS ?? "https://chatgpt.com").split(",").map((value) => value.trim()).filter(Boolean));
+  return { baseUrl, tokenSecret, users, roots, dataDir: path.resolve(env.DATA_DIR ?? "data"), port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: env.DESKTOP_COMMANDER_COMMAND ?? process.execPath, dcArgs: env.DESKTOP_COMMANDER_COMMAND ? (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean) : [bundled, "--no-onboarding"], allowedRedirectOrigins };
 }
 
-function jsonEnv<T>(name: string): T {
-  try { return JSON.parse(requireEnv(name)) as T; }
-  catch { throw new Error(`${name} must contain valid JSON.`); }
+class Mutex {
+  private tail = Promise.resolve();
+  async run<T>(work: () => Promise<T>): Promise<T> { let release!: () => void; const next = new Promise<void>((resolve) => { release = resolve; }); const previous = this.tail; this.tail = next; await previous; try { return await work(); } finally { release(); } }
 }
 
-const baseUrl = requireEnv("BASE_URL").replace(/\/$/, "");
-const baseUrlObject = new URL(baseUrl);
-if (baseUrlObject.protocol !== "https:" && baseUrlObject.hostname !== "localhost") {
-  throw new Error("BASE_URL must use HTTPS (HTTP is allowed only for localhost development).");
-}
-const tokenSecret = requireEnv("TOKEN_SECRET");
-if (tokenSecret.length < 32) throw new Error("TOKEN_SECRET must contain at least 32 characters.");
-const users = jsonEnv<User[]>("AUTHORIZED_USERS_JSON");
-const presets = jsonEnv<LaunchPreset[]>("LAUNCH_PRESETS_JSON");
-const roots = jsonEnv<FileRoot[]>("FILE_ROOTS_JSON").map((root) => ({ ...root, path: path.resolve(root.path) }));
-const allowedRedirectOrigins = new Set((process.env.ALLOWED_REDIRECT_ORIGINS ?? "https://chatgpt.com").split(",").map((x) => x.trim()).filter(Boolean));
-
-if (!users.length || !presets.length || !roots.length) throw new Error("At least one user, launch preset, and file root are required.");
-if (users.some((item) => !item.email || !item.passwordHash) || presets.some((item) => !item.id || !item.command) || roots.some((item) => !item.id || !item.path)) throw new Error("Configured users, presets, and roots must be complete.");
-if (new Set(presets.map((item) => item.id)).size !== presets.length) throw new Error("Launch preset ids must be unique.");
-if (new Set(roots.map((item) => item.id)).size !== roots.length) throw new Error("File root ids must be unique.");
-
-const clientsPath = path.join(dataDir, "oauth-clients.json");
-let clients = new Map<string, OAuthClient>();
-const authorizations = new Map<string, Authorization>();
-const codes = new Map<string, Authorization & { expiresAt: number }>();
-
-function base64url(value: Buffer | string): string { return Buffer.from(value).toString("base64url"); }
-function randomId(): string { return randomBytes(32).toString("base64url"); }
-function sign(value: string): string { return createHmac("sha256", tokenSecret).update(value).digest("base64url"); }
-function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a); const right = Buffer.from(b);
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-function encodeToken(payload: object): string {
-  const encoded = base64url(JSON.stringify(payload));
-  return `${encoded}.${sign(encoded)}`;
-}
-function decodeToken(token: string): Record<string, unknown> | undefined {
-  const [encoded, signature] = token.split(".");
-  if (!encoded || !signature || !safeEqual(sign(encoded), signature)) return undefined;
-  try {
-    const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
-    return typeof payload.exp === "number" && payload.exp > Math.floor(Date.now() / 1000) ? payload : undefined;
-  } catch { return undefined; }
-}
-function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!); }
-function getRoot(rootId: string): FileRoot { const root = roots.find((item) => item.id === rootId); if (!root) throw new Error("Unknown file root."); return root; }
-function resolveInRoot(root: FileRoot, relativePath: string): string {
-  if (!relativePath || path.isAbsolute(relativePath) || relativePath.includes("\0")) throw new Error("A relative path is required.");
-  const candidate = path.resolve(root.path, relativePath);
-  const relative = path.relative(root.path, candidate);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Path is outside the allowed root.");
-  return candidate;
-}
-async function audit(event: string, details: Record<string, unknown>): Promise<void> {
-  await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  await appendFile(path.join(dataDir, "audit.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), event, ...details })}\n`, { mode: 0o600 });
-}
-async function loadClients(): Promise<void> {
-  try {
-    const stored = JSON.parse(await readFile(clientsPath, "utf8")) as OAuthClient[];
-    clients = new Map(stored.map((client) => [client.client_id, client]));
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+class DesktopCommander {
+  private client?: Client;
+  private transport?: StdioClientTransport;
+  private tools = new Set<string>();
+  constructor(private readonly cfg: RuntimeConfig, private readonly audit: (name: string, data: Record<string, unknown>) => Promise<void>) {}
+  async start(): Promise<void> {
+    const home = path.join(this.cfg.dataDir, "desktop-commander-home");
+    const config = path.join(home, ".claude-server-commander", "config.json");
+    const expected = path.resolve(home, ".claude-server-commander", "config.json");
+    if (path.resolve(config) !== expected || !inside(this.cfg.dataDir, expected)) throw new Error("Desktop Commander config path did not resolve inside DATA_DIR.");
+    await mkdir(path.dirname(config), { recursive: true, mode: 0o700 });
+    await writeFile(config, JSON.stringify({ allowedDirectories: this.cfg.roots.map((root) => root.path), telemetryEnabled: false }), { mode: 0o600 });
+    const drive = path.parse(home).root;
+    const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"), LOCALAPPDATA: path.join(home, "AppData", "Local"), HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) } as Record<string, string>;
+    this.transport = new StdioClientTransport({ command: this.cfg.dcCommand, args: this.cfg.dcArgs, env, stderr: "pipe", cwd: process.cwd() });
+    this.client = new Client({ name: "remote-desktop-mcp", version: "0.1.0" });
+    await this.client.connect(this.transport);
+    const available = await this.client.listTools(); this.tools = new Set(available.tools.map((tool) => tool.name));
+    const missing = REQUIRED_TOOLS.filter((tool) => !this.tools.has(tool));
+    if (missing.length) { await this.close(); throw new Error(`Desktop Commander is missing required tools: ${missing.join(", ")}`); }
+    const reported = await this.call("get_config", {});
+    const normalizeSlashes = (value: string) => value.replaceAll("\\", "/").replace(/\/+/g, "/");
+    const normalizedReport = normalizeSlashes(reported);
+    if (!this.cfg.roots.every((root) => normalizedReport.includes(normalizeSlashes(root.path)))) { await this.close(); throw new Error("Desktop Commander did not load the isolated allowedDirectories configuration."); }
+    await this.audit("desktop_commander.ready", { configPath: expected, toolCount: this.tools.size });
+  }
+  async close(): Promise<void> { await this.client?.close(); await this.transport?.close(); this.client = undefined; this.transport = undefined; }
+  async call(name: string, args: Record<string, unknown>): Promise<string> {
+    if (!this.client || !this.tools.has(name)) throw new Error("Desktop Commander is unavailable for this operation.");
+    const value = await this.client.callTool({ name, arguments: args });
+    if ("isError" in value && value.isError) throw new Error("Desktop Commander rejected the operation.");
+    if (!("content" in value)) throw new Error("Desktop Commander returned an unsupported response.");
+    const content = value.content as Array<{ type: string; text?: string }>;
+    return content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
   }
 }
-async function saveClients(): Promise<void> {
-  await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  await writeFile(clientsPath, JSON.stringify([...clients.values()], null, 2), { mode: 0o600 });
-}
-function validateRedirectUri(uri: string): boolean {
-  try { return allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; }
-}
-function errorResult(message: string) { return { isError: true as const, content: [{ type: "text" as const, text: message }] }; }
 
-async function searchFiles(root: FileRoot, query: string): Promise<Array<{ path: string; size: number; modified: string }>> {
-  const results: Array<{ path: string; size: number; modified: string }> = [];
-  const normalizedQuery = query.toLocaleLowerCase();
-  async function walk(folder: string, depth: number): Promise<void> {
-    if (depth > MAX_DEPTH || results.length >= MAX_RESULTS) return;
-    let entries;
-    try { entries = await readdir(folder, { withFileTypes: true }); } catch { return; }
-    for (const entry of entries) {
-      if (results.length >= MAX_RESULTS || entry.isSymbolicLink()) continue;
-      const fullPath = path.join(folder, entry.name);
-      if (entry.isDirectory()) { await walk(fullPath, depth + 1); continue; }
-      if (!entry.isFile() || !entry.name.toLocaleLowerCase().includes(normalizedQuery)) continue;
-      const info = await stat(fullPath);
-      results.push({ path: path.relative(root.path, fullPath), size: info.size, modified: info.mtime.toISOString() });
+export class RemoteDesktopService {
+  readonly sessions = new Map<string, Session>();
+  readonly transfers = new Map<string, Transfer>();
+  readonly processes = new Map<string, Process>();
+  readonly clients = new Map<string, OAuthClient>();
+  readonly authorizations = new Map<string, Authorization>();
+  readonly codes = new Map<string, Authorization>();
+  private readonly processLock = new Mutex();
+  private readonly transferLock = new Mutex();
+  private readonly dc: DesktopCommander;
+  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this)); }
+  async initialize(): Promise<void> {
+    await mkdir(this.cfg.dataDir, { recursive: true, mode: 0o700 });
+    const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
+    const actualData = await realpath(this.cfg.dataDir);
+    for (const root of this.cfg.roots) {
+      const actualRoot = await realpath(root.path);
+      if (overlaps(actualRoot, actualData) || overlaps(actualRoot, protectedParent)) throw new Error("FILE_ROOTS_JSON must not overlap DATA_DIR or Desktop Commander config parent.");
     }
+    await this.dc.start();
   }
-  await walk(root.path, 0);
-  return results;
-}
-
-function makeServer(email: string): McpServer {
-  const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" });
-  server.registerTool("launch_configured_process", {
-    title: "Launch configured process",
-    description: "Starts one administrator-configured desktop application. It cannot run arbitrary commands or arguments.",
-    inputSchema: { preset_id: z.string().describe("Configured launch preset id") },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
-  }, async ({ preset_id }) => {
-    const preset = presets.find((item) => item.id === preset_id);
-    if (!preset) return errorResult("Unknown launch preset.");
-    try {
-      const child = spawn(preset.command, preset.args, { cwd: preset.cwd, detached: false, stdio: "ignore", windowsHide: true });
-      child.unref();
-      await audit("process.launch", { user: email, presetId: preset.id, pid: child.pid });
-      return { content: [{ type: "text" as const, text: `Started ${preset.label} (PID ${child.pid ?? "unknown"}).` }] };
-    } catch (error) {
-      await audit("process.launch_failed", { user: email, presetId: preset.id, reason: error instanceof Error ? error.message : "unknown" });
-      return errorResult("The configured process could not be started. Check the server audit log.");
+  async close(): Promise<void> { for (const item of this.transfers.values()) await this.cleanup(item); await this.dc.close(); }
+  async audit(event: string, fields: Record<string, unknown>): Promise<void> { await mkdir(this.cfg.dataDir, { recursive: true, mode: 0o700 }); await appendFile(path.join(this.cfg.dataDir, "audit.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), event, ...fields })}\n`, { mode: 0o600 }); }
+  sign(body: object): string { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
+  validRedirect(uri: string): boolean { try { return this.cfg.allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; } }
+  authenticate(header?: string): string | undefined {
+    if (!header?.startsWith("Bearer ")) return undefined;
+    const [encoded, signature] = header.slice(7).split(".");
+    if (!encoded || !signature || !equal(createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url"), signature)) return undefined;
+    try { const body = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>; const user = this.cfg.users[0]; return body.type === "access" && body.sub === user.email && body.aud === `${this.cfg.baseUrl}/mcp` && body.scope === "mcp" && typeof body.exp === "number" && body.exp > Math.floor(Date.now() / 1000) ? user.email : undefined; } catch { return undefined; }
+  }
+  private expire(): void {
+    const now = Date.now();
+    for (const [key, session] of this.sessions) if (now - session.touched > SESSION_TTL) this.sessions.delete(key);
+    for (const item of this.transfers.values()) if (item.state === "active" && now - item.touched > TRANSFER_TTL) void this.transferLock.run(async () => { if (item.state === "active" && Date.now() - item.touched > TRANSFER_TTL) await this.fail(item, "expired"); });
+  }
+  session(user: string, sessionId: string): Session { this.expire(); const value = this.sessions.get(sessionId); if (!value || value.user !== user) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); return value; }
+  node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
+  private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
+  private async safePath(rootId: string, relative: string, absent = false): Promise<string> {
+    const root = this.root(rootId);
+    if (!relative || path.isAbsolute(relative) || relative.includes("\0")) throw new Error("A relative path is required.");
+    const candidate = path.resolve(root.path, relative);
+    if (!inside(root.path, candidate)) throw new Error("Path is outside the allowed root.");
+    const actualRoot = await realpath(root.path);
+    const resolved = absent ? await realpath(path.dirname(candidate)) : await realpath(candidate);
+    if (!inside(actualRoot, resolved)) throw new Error("Path resolves outside the allowed root.");
+    if (!absent) {
+      const protectedConfig = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json");
+      try {
+        const [candidateInfo, configInfo] = await Promise.all([lstat(candidate), lstat(protectedConfig)]);
+        if (candidateInfo.ino === configInfo.ino && candidateInfo.dev === configInfo.dev) throw new Error("Protected service files cannot be accessed.");
+      } catch (error) { if (error instanceof Error && error.message.startsWith("Protected")) throw error; }
     }
-  });
-  server.registerTool("search_files", {
-    title: "Search allowed files",
-    description: "Searches file names inside an administrator-configured folder. Symbolic links and paths outside that folder are excluded.",
-    inputSchema: { root_id: z.string().describe("Configured file-root id"), query: z.string().min(1).max(120).describe("Part of a filename") },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
-  }, async ({ root_id, query }) => {
-    try {
-      const root = getRoot(root_id); const matches = await searchFiles(root, query);
-      await audit("file.search", { user: email, rootId: root.id, query, count: matches.length });
-      return { content: [{ type: "text" as const, text: JSON.stringify({ root_id, matches, capped: matches.length === MAX_RESULTS }, null, 2) }] };
-    } catch { return errorResult("The requested file root could not be searched."); }
-  });
-  server.registerTool("create_file_download", {
-    title: "Create a temporary file download",
-    description: "Creates a one-minute download link for a regular file below an administrator-configured folder. Maximum file size is 25 MB.",
-    inputSchema: { root_id: z.string().describe("Configured file-root id"), relative_path: z.string().min(1).max(500).describe("Path returned by search_files") },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
-  }, async ({ root_id, relative_path }) => {
-    try {
-      const root = getRoot(root_id); const filePath = resolveInRoot(root, relative_path); const info = await lstat(filePath);
-      if (!info.isFile() || info.isSymbolicLink()) return errorResult("Only regular files can be downloaded.");
-      if (info.size > MAX_DOWNLOAD_BYTES) return errorResult("This file exceeds the 25 MB download limit.");
-      const exp = Math.floor(Date.now() / 1000) + DOWNLOAD_TTL_SECONDS;
-      const token = encodeToken({ type: "download", sub: email, rootId: root.id, relativePath: relative_path, exp });
-      const url = `${baseUrl}/downloads/${encodeURIComponent(token)}`;
-      await audit("file.download_link", { user: email, rootId: root.id, relativePath: relative_path, size: info.size });
-      return { content: [{ type: "text" as const, text: `Temporary download link (expires in ${DOWNLOAD_TTL_SECONDS} seconds): ${url}` }] };
-    } catch { return errorResult("The requested file is unavailable or outside the allowed root."); }
-  });
-  return server;
+    if (overlaps(candidate, this.cfg.dataDir)) throw new Error("Protected service files cannot be accessed.");
+    return candidate;
+  }
+  private transfer(user: string, sessionId: string, transferId: string): Transfer { this.session(user, sessionId); const item = this.transfers.get(transferId); if (!item || item.sessionId !== sessionId || item.state !== "active") throw new Error("Transfer is unavailable."); item.touched = Date.now(); return item; }
+  private async cleanup(item: Transfer): Promise<void> { await Promise.all([item.snapshot, item.temp].filter((value): value is string => Boolean(value)).map((file) => rm(file, { force: true }).catch(() => undefined))); }
+  private async fail(item: Transfer, reason: string): Promise<void> { item.state = "failed"; await this.cleanup(item); await this.audit("transfer.failed", { transferId: item.id, direction: item.direction, reason }); }
+  private async privateSnapshot(source: string, destination: string) { await copyFile(source, destination); const bytes = await readFile(destination); return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") }; }
+  private async search(root: string, pattern: string, searchType: "files" | "content"): Promise<string> {
+    const started = await this.dc.call("start_search", { path: root, pattern, searchType, maxResults: 100, timeout_ms: 5_000 });
+    const session = started.match(/session:\s*([^\s]+)/i)?.[1];
+    if (!session) throw new Error("Desktop Commander did not return a search session.");
+    try { return await this.dc.call("get_more_search_results", { sessionId: session, offset: 0, length: 100 }); } finally { await this.dc.call("stop_search", { sessionId: session }).catch(() => undefined); }
+  }
+  private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>) => Promise<unknown>) { return async (args: z.infer<z.ZodObject<T>>) => { try { return result(await fn(args)); } catch (error) { const message = error instanceof Error ? error.message : "Operation failed."; await this.audit("operation.rejected", { user, reason: message }); const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot)/.test(message) ? message : "Operation failed."; return failure(publicMessage); } }; }
+  server(user: string): McpServer {
+    const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" });
+    const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
+    server.registerTool("session_open", { description: "Open a local operation session.", inputSchema: {} }, this.tool(user, async () => { const session: Session = { id: makeId(), user, created: Date.now(), touched: Date.now() }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id }); return { session_id: session.id, idle_ttl_seconds: SESSION_TTL / 1000 }; }));
+    server.registerTool("session_list", { description: "List the caller's active sessions.", inputSchema: {} }, this.tool(user, async () => { this.expire(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user).map((entry) => ({ session_id: entry.id, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString() })) }; }));
+    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { this.session(user, session_id); this.sessions.delete(session_id); for (const item of this.transfers.values()) if (item.sessionId === session_id) { item.state = "cancelled"; await this.cleanup(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
+    server.registerTool("node_list", { description: "List the single supported local node.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
+    server.registerTool("file_search", { description: "Search permitted file names through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id).path, query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
+    server.registerTool("content_search", { description: "Search permitted file content through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id).path, query, "content"); await this.audit("file.content_search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
+    const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500) };
+    server.registerTool("file_read", { description: "Read a permitted text file through Desktop Commander.", inputSchema: { ...fileInput, offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().max(1000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, offset, length }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("read_file", { path: await this.safePath(root_id, relative_path), offset, length }); await this.audit("file.read", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
+    server.registerTool("file_patch", { description: "Apply an exact text replacement through Desktop Commander.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("edit_block", { file_path: await this.safePath(root_id, relative_path), old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
+    server.registerTool("file_transfer_download_begin", { description: "Create an immutable private snapshot for chunk download.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; })));
+    server.registerTool("file_transfer_download_chunk", { description: "Read the next immutable chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); const handle = await open(item.snapshot, "r"); try { const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) { await this.fail(item, "snapshot_hash_mismatch"); throw new Error("Snapshot integrity check failed."); } if (complete) { item.state = "complete"; await this.cleanup(item); } return { data: data.toString("base64"), next_offset: item.offset, complete }; } finally { await handle.close(); } })));
+    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { this.session(user, session_id); const node = this.node(node_id); const target = await this.safePath(root_id, relative_path, true); const temp = path.join(path.dirname(target), `.${path.basename(target)}.${makeId()}.upload`); const handle = await open(temp, "wx", 0o600); await handle.close(); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; })));
+    server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp) throw new Error("Chunk offset or direction is invalid."); if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); await writeFile(item.temp, bytes, { flag: "a", mode: 0o600 }); item.offset += bytes.length; return { next_offset: item.offset }; })));
+    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || item.offset !== item.size) throw new Error("Upload is incomplete."); const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); try { if (item.overwrite) await rename(item.temp, item.target); else { await link(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } item.state = "complete"; await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
+    server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => { const item = this.transfer(user, session_id, transfer_id); return { state: item.state, next_offset: item.offset, transferred_bytes: item.offset }; }));
+    server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { const item = this.transfer(user, session_id, transfer_id); item.state = "cancelled"; await this.cleanup(item); await this.audit("transfer.cancel", { transferId: item.id, sessionId }); return { cancelled: true }; })));
+    server.registerTool("process_start", { description: "Start an arbitrary command as the same OS user through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => this.processLock.run(async () => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("start_process", { command, timeout_ms }); const match = output.match(/PID\s+(-?\d+)/i); if (!match) throw new Error("Desktop Commander did not return a process id."); const item: Process = { id: makeId(), sessionId: session_id, pid: Number(match[1]), state: "running", output }; this.processes.set(item.id, item); await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id }); return { process_id: item.id, output }; })));
+    const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.state === "stale") throw new Error("Process id is stale or finished."); return item; };
+    const current = (sid: string, pid: string) => { const item = getProcess(sid, pid); if (item.state !== "running") throw new Error("Process id is stale or finished."); return item; };
+    const observe = async (item: Process) => { const output = await this.dc.call("read_process_output", { pid: item.pid, offset: 0, length: 1000 }); item.output = `${item.output}\n${output}`; const exit = /exit code\s+(-?\d+)/i.exec(output); if (exit) { item.state = "finished"; item.exitCode = Number(exit[1]); } return output; };
+    server.registerTool("process_output", { description: "Read combined process output through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, output }; })));
+    server.registerTool("process_status", { description: "Get process status through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, output }; })));
+    server.registerTool("process_kill", { description: "Terminate a current process through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = current(session_id, process_id); const output = await this.dc.call("force_terminate", { pid: item.pid }); item.state = "finished"; return { state: item.state, output }; })));
+    return server;
+  }
 }
 
-const app = express();
-app.disable("x-powered-by");
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json({ limit: "1mb" }));
-app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp" }));
-app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json({ resource: `${baseUrl}/mcp`, authorization_servers: [baseUrl], scopes_supported: ["mcp"] }));
-app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({
-  issuer: baseUrl, authorization_endpoint: `${baseUrl}/authorize`, token_endpoint: `${baseUrl}/token`, registration_endpoint: `${baseUrl}/register`,
-  response_types_supported: ["code"], grant_types_supported: ["authorization_code"], token_endpoint_auth_methods_supported: ["none"],
-  code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp", "offline_access"]
-}));
-app.post("/register", async (req, res) => {
-  const redirectUris = Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris.filter((uri: unknown): uri is string => typeof uri === "string") : [];
-  if (!redirectUris.length || !redirectUris.every(validateRedirectUri)) return res.status(400).json({ error: "invalid_redirect_uri" });
-  const client: OAuthClient = { client_id: randomId(), client_name: typeof req.body?.client_name === "string" ? req.body.client_name.slice(0, 100) : "MCP client", redirect_uris: redirectUris };
-  clients.set(client.client_id, client); await saveClients(); await audit("oauth.client_registered", { clientId: client.client_id, name: client.client_name });
-  res.status(201).json({ ...client, token_endpoint_auth_method: "none", grant_types: ["authorization_code"], response_types: ["code"] });
-});
-app.get("/authorize", (req, res) => {
-  const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
-  const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
-  const challenge = typeof req.query.code_challenge === "string" ? req.query.code_challenge : "";
-  const state = typeof req.query.state === "string" ? req.query.state : undefined;
-  const client = clients.get(clientId);
-  if (!client || !client.redirect_uris.includes(redirectUri) || req.query.response_type !== "code" || req.query.code_challenge_method !== "S256" || !challenge) return res.status(400).send("Invalid OAuth authorization request.");
-  const transactionId = randomId(); authorizations.set(transactionId, { clientId, redirectUri, state, challenge });
-  res.type("html").send(`<!doctype html><meta charset="utf-8"><title>Authorize Remote Desktop MCP</title><main><h1>Remote Desktop MCP</h1><p>${escapeHtml(client.client_name)} requests access to the approved remote desktop tools.</p><form method="post" action="/authorize/confirm"><input type="hidden" name="transaction_id" value="${escapeHtml(transactionId)}"><label>Email <input name="email" type="email" required autocomplete="username"></label><br><label>Password <input name="password" type="password" required autocomplete="current-password"></label><br><button type="submit">Authorize</button></form></main>`);
-});
-app.post("/authorize/confirm", async (req, res) => {
-  const transactionId = typeof req.body?.transaction_id === "string" ? req.body.transaction_id : "";
-  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLocaleLowerCase() : "";
-  const password = typeof req.body?.password === "string" ? req.body.password : "";
-  const authorization = authorizations.get(transactionId); authorizations.delete(transactionId);
-  const user = users.find((item) => item.email.toLocaleLowerCase() === email);
-  if (!authorization || !user || !(await verifyPassword(password, user.passwordHash))) { await audit("oauth.authorization_denied", { email: email || "unknown" }); return res.status(403).send("Access denied."); }
-  const code = randomId(); codes.set(code, { ...authorization, email: user.email, expiresAt: Date.now() + CODE_TTL_MS });
-  await audit("oauth.authorization_granted", { user: user.email, clientId: authorization.clientId });
-  const redirect = new URL(authorization.redirectUri); redirect.searchParams.set("code", code); if (authorization.state) redirect.searchParams.set("state", authorization.state);
-  res.redirect(303, redirect.toString());
-});
-app.post("/token", async (req, res) => {
-  const code = typeof req.body?.code === "string" ? req.body.code : "";
-  const clientId = typeof req.body?.client_id === "string" ? req.body.client_id : "";
-  const verifier = typeof req.body?.code_verifier === "string" ? req.body.code_verifier : "";
-  const grantType = req.body?.grant_type;
-  const authorization = codes.get(code); codes.delete(code);
-  if (grantType !== "authorization_code" || !authorization || authorization.expiresAt < Date.now() || authorization.clientId !== clientId || !authorization.email) return res.status(400).json({ error: "invalid_grant" });
-  // PKCE uses an unkeyed SHA-256. Dynamic import keeps the crypto imports above focused on token signing.
-  const { createHash } = await import("node:crypto");
-  if (!verifier || !safeEqual(createHash("sha256").update(verifier).digest("base64url"), authorization.challenge)) return res.status(400).json({ error: "invalid_grant" });
-  const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
-  const accessToken = encodeToken({ type: "access", sub: authorization.email, aud: `${baseUrl}/mcp`, scope: "mcp", exp });
-  await audit("oauth.token_issued", { user: authorization.email, clientId });
-  res.json({ access_token: accessToken, token_type: "Bearer", expires_in: TOKEN_TTL_SECONDS, scope: "mcp" });
-});
-app.get("/downloads/:token", async (req, res) => {
-  const payload = decodeToken(req.params.token);
-  if (payload?.type !== "download" || typeof payload.rootId !== "string" || typeof payload.relativePath !== "string" || typeof payload.sub !== "string") return res.status(401).send("Invalid or expired download link.");
-  try {
-    const root = getRoot(payload.rootId); const filePath = resolveInRoot(root, payload.relativePath); const info = await lstat(filePath);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_DOWNLOAD_BYTES) return res.status(404).send("File unavailable.");
-    await audit("file.downloaded", { user: payload.sub, rootId: root.id, relativePath: payload.relativePath, size: info.size });
-    res.download(filePath, path.basename(filePath));
-  } catch { res.status(404).send("File unavailable."); }
-});
-app.all("/mcp", async (req: Request, res: Response) => {
-  if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
-  const auth = req.header("authorization"); const payload = auth?.startsWith("Bearer ") ? decodeToken(auth.slice(7)) : undefined;
-  if (payload?.type !== "access" || typeof payload.sub !== "string" || payload.aud !== `${baseUrl}/mcp`) {
-    res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
-    return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null });
-  }
-  const server = makeServer(payload.sub);
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  try {
-    await server.connect(transport); await transport.handleRequest(req, res, req.body);
-    res.on("close", () => { void transport.close(); void server.close(); });
-  } catch (error) {
-    console.error("MCP request failed", error);
-    if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null });
-  }
-});
-
-await loadClients();
-app.listen(Number(process.env.PORT ?? 3000), "0.0.0.0", () => console.log(`Remote Desktop MCP listening at ${baseUrl}/mcp`));
+class RateLimit { private hits = new Map<string, number[]>(); allow(key: string): boolean { const now = Date.now(); const values = (this.hits.get(key) ?? []).filter((value) => now - value < 60_000); values.push(now); this.hits.set(key, values); return values.length <= 10; } }
+export function createApp(service: RemoteDesktopService): Express {
+  const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use(express.urlencoded({ extended: false })); app.use(express.json({ limit: "1mb" }));
+  app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: "local-development" }));
+  app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json({ resource: `${service.cfg.baseUrl}/mcp`, authorization_servers: [service.cfg.baseUrl], scopes_supported: ["mcp"] }));
+  app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, registration_endpoint: `${service.cfg.baseUrl}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp"] }));
+  app.post("/register", async (req, res) => {
+    if (!rate.allow("register")) return res.status(429).json({ error: "rate_limited" });
+    const redirect_uris = Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris.filter((item: unknown): item is string => typeof item === "string") : [];
+    if (!redirect_uris.length || !redirect_uris.every((uri: string) => service.validRedirect(uri))) return res.status(400).json({ error: "invalid_redirect_uri" });
+    const client: OAuthClient = { client_id: makeId(), client_name: typeof req.body?.client_name === "string" ? req.body.client_name.slice(0, 100) : "MCP client", redirect_uris };
+    service.clients.set(client.client_id, client); await service.audit("oauth.client_registered", { clientId: client.client_id }); return res.status(201).json({ ...client, token_endpoint_auth_method: "none", grant_types: ["authorization_code"], response_types: ["code"] });
+  });
+  app.get("/authorize", async (req, res) => {
+    if (!rate.allow("authorize")) return res.status(429).send("Too many requests.");
+    const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
+    const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
+    const challenge = typeof req.query.code_challenge === "string" ? req.query.code_challenge : "";
+    const state = typeof req.query.state === "string" ? req.query.state : undefined;
+    const client = service.clients.get(clientId);
+    if (!client || !client.redirect_uris.includes(redirectUri) || req.query.response_type !== "code" || req.query.code_challenge_method !== "S256" || !challenge) { await service.audit("oauth.rejected", { reason: "authorize" }); return res.status(400).send("Invalid OAuth authorization request."); }
+    const transaction = makeId(); service.authorizations.set(transaction, { clientId, redirectUri, state, challenge, expires: Date.now() + 5 * 60_000 });
+    return res.type("html").send(`<!doctype html><meta charset="utf-8"><title>Remote Desktop MCP</title><form method="post" action="/authorize/confirm"><input type="hidden" name="transaction_id" value="${transaction}"><label>Email <input name="email" type="email" required></label><label>Password <input name="password" type="password" required></label><button type="submit">Authorize</button></form>`);
+  });
+  app.post("/authorize/confirm", async (req, res) => {
+    if (!rate.allow("confirm")) return res.status(429).send("Too many requests.");
+    const transaction = typeof req.body?.transaction_id === "string" ? req.body.transaction_id : "";
+    const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    const authorization = service.authorizations.get(transaction); service.authorizations.delete(transaction);
+    const user = service.cfg.users[0];
+    if (!authorization || authorization.expires < Date.now() || email !== user.email.toLowerCase() || !(await verifyPassword(password, user.passwordHash))) { await service.audit("oauth.rejected", { reason: "password" }); return res.status(403).send("Access denied."); }
+    const code = makeId(); service.codes.set(code, { ...authorization, email: user.email, expires: Date.now() + 5 * 60_000 });
+    const redirect = new URL(authorization.redirectUri); redirect.searchParams.set("code", code); if (authorization.state) redirect.searchParams.set("state", authorization.state);
+    await service.audit("oauth.authorization_granted", { user: user.email, clientId: authorization.clientId }); return res.redirect(303, redirect.toString());
+  });
+  app.post("/token", async (req, res) => {
+    if (!rate.allow("token")) { await service.audit("oauth.rate_limited", {}); return res.status(429).json({ error: "rate_limited" }); }
+    const code = typeof req.body?.code === "string" ? req.body.code : "";
+    const verifier = typeof req.body?.code_verifier === "string" ? req.body.code_verifier : "";
+    const clientId = typeof req.body?.client_id === "string" ? req.body.client_id : "";
+    const authorization = service.codes.get(code); service.codes.delete(code);
+    if (req.body?.grant_type !== "authorization_code" || !authorization || authorization.expires < Date.now() || authorization.clientId !== clientId || !authorization.email || !verifier || !equal(createHash("sha256").update(verifier).digest("base64url"), authorization.challenge)) { await service.audit("oauth.rejected", { reason: "token" }); return res.status(400).json({ error: "invalid_grant" }); }
+    const accessToken = service.sign({ type: "access", sub: authorization.email, aud: `${service.cfg.baseUrl}/mcp`, scope: "mcp", exp: Math.floor(Date.now() / 1000) + 3600 });
+    await service.audit("oauth.token_issued", { user: authorization.email, clientId }); return res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 3600, scope: "mcp" });
+  });
+  app.all("/mcp", async (req: Request, res: Response) => { if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }); const user = service.authenticate(req.header("authorization")); if (!user) { await service.audit("mcp.rejected", { reason: "authentication" }); res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${service.cfg.baseUrl}/.well-known/oauth-protected-resource"`); return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null }); } const server = service.server(user); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => { void transport.close(); void server.close(); }); try { await server.connect(transport); await transport.handleRequest(req, res, req.body); } catch { await service.audit("mcp.failed", { user }); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null }); } });
+  return app;
+}
+if (process.argv[1] === fileURLToPath(import.meta.url)) { const service = new RemoteDesktopService(configFromEnv()); await service.initialize(); createApp(service).listen(service.cfg.port, "127.0.0.1", () => console.log(`Remote Desktop MCP listening on http://127.0.0.1:${service.cfg.port}/mcp (local development)`)); }

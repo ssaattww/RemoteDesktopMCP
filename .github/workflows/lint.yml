@@ -2,13 +2,17 @@ name: lint
 
 on:
   push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
   lint:
+    name: Lint, check, build, and test (Ubuntu)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,7 +27,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p ci-artifacts
-          printf 'lint=not_run\n' > ci-artifacts/test-results.txt
+          printf 'lint=not_run\ncheck=not_run\nbuild=not_run\ntest=not_run\n' > ci-artifacts/test-results.txt
+
       - name: Install dependencies
         shell: bash
         run: |
@@ -36,15 +41,57 @@ jobs:
           exit "$status"
 
       - name: Run lint
+        if: always()
         shell: bash
         run: |
           set +e
           npm run lint >ci-artifacts/lint.stdout.log 2>ci-artifacts/lint.stderr.log
           status=$?
-          printf 'lint_exit_code=%s\n' "$status" > ci-artifacts/test-results.txt
+          printf 'lint_exit_code=%s\n' "$status" >> ci-artifacts/test-results.txt
+          printf 'command=npm run lint\nexit_code=%s\n' "$status" > ci-artifacts/lint.result.txt
           cat ci-artifacts/lint.stdout.log
           cat ci-artifacts/lint.stderr.log >&2
           exit "$status"
+
+      - name: Run type check
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          npm run check >ci-artifacts/check.stdout.log 2>ci-artifacts/check.stderr.log
+          status=$?
+          printf 'check_exit_code=%s\n' "$status" >> ci-artifacts/test-results.txt
+          printf 'command=npm run check\nexit_code=%s\n' "$status" > ci-artifacts/check.result.txt
+          cat ci-artifacts/check.stdout.log
+          cat ci-artifacts/check.stderr.log >&2
+          exit "$status"
+
+      - name: Build
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          npm run build >ci-artifacts/build.stdout.log 2>ci-artifacts/build.stderr.log
+          status=$?
+          printf 'build_exit_code=%s\n' "$status" >> ci-artifacts/test-results.txt
+          printf 'command=npm run build\nexit_code=%s\n' "$status" > ci-artifacts/build.result.txt
+          cat ci-artifacts/build.stdout.log
+          cat ci-artifacts/build.stderr.log >&2
+          exit "$status"
+
+      - name: Test
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          npm test >ci-artifacts/test.stdout.log 2>ci-artifacts/test.stderr.log
+          status=$?
+          printf 'test_exit_code=%s\n' "$status" >> ci-artifacts/test-results.txt
+          printf 'command=npm test\nexit_code=%s\n' "$status" > ci-artifacts/test.result.txt
+          cat ci-artifacts/test.stdout.log
+          cat ci-artifacts/test.stderr.log >&2
+          exit "$status"
+
       - name: Record environment
         if: always()
         shell: bash
@@ -59,7 +106,92 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lint-diagnostics-${{ github.sha }}
+          name: ubuntu-diagnostics-${{ github.sha }}
+          path: ci-artifacts
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Check, build, and test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Prepare diagnostics
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
+          'check=not_run', 'build=not_run', 'test=not_run' | Set-Content ci-artifacts/test-results.txt
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          & npm.cmd ci 1> ci-artifacts/npm-ci.stdout.log 2> ci-artifacts/npm-ci.stderr.log
+          $status = $LASTEXITCODE
+          "command=npm.cmd ci`nexit_code=$status" | Set-Content ci-artifacts/npm-ci.result.txt
+          Get-Content ci-artifacts/npm-ci.stdout.log
+          Get-Content ci-artifacts/npm-ci.stderr.log | ForEach-Object { [Console]::Error.WriteLine($_) }
+          exit $status
+
+      - name: Run type check
+        if: always()
+        shell: pwsh
+        run: |
+          & npm.cmd run check 1> ci-artifacts/check.stdout.log 2> ci-artifacts/check.stderr.log
+          $status = $LASTEXITCODE
+          "check_exit_code=$status" | Add-Content ci-artifacts/test-results.txt
+          "command=npm.cmd run check`nexit_code=$status" | Set-Content ci-artifacts/check.result.txt
+          Get-Content ci-artifacts/check.stdout.log
+          Get-Content ci-artifacts/check.stderr.log | ForEach-Object { [Console]::Error.WriteLine($_) }
+          exit $status
+
+      - name: Build
+        if: always()
+        shell: pwsh
+        run: |
+          & npm.cmd run build 1> ci-artifacts/build.stdout.log 2> ci-artifacts/build.stderr.log
+          $status = $LASTEXITCODE
+          "build_exit_code=$status" | Add-Content ci-artifacts/test-results.txt
+          "command=npm.cmd run build`nexit_code=$status" | Set-Content ci-artifacts/build.result.txt
+          Get-Content ci-artifacts/build.stdout.log
+          Get-Content ci-artifacts/build.stderr.log | ForEach-Object { [Console]::Error.WriteLine($_) }
+          exit $status
+
+      - name: Test
+        if: always()
+        shell: pwsh
+        run: |
+          & npm.cmd test 1> ci-artifacts/test.stdout.log 2> ci-artifacts/test.stderr.log
+          $status = $LASTEXITCODE
+          "test_exit_code=$status" | Add-Content ci-artifacts/test-results.txt
+          "command=npm.cmd test`nexit_code=$status" | Set-Content ci-artifacts/test.result.txt
+          Get-Content ci-artifacts/test.stdout.log
+          Get-Content ci-artifacts/test.stderr.log | ForEach-Object { [Console]::Error.WriteLine($_) }
+          exit $status
+
+      - name: Record environment
+        if: always()
+        shell: pwsh
+        run: |
+          @(
+            "sha=$env:GITHUB_SHA"
+            "node=$(& node --version)"
+            "npm=$(& npm.cmd --version)"
+          ) | Set-Content ci-artifacts/environment.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-diagnostics-${{ github.sha }}
           path: ci-artifacts
           if-no-files-found: error
           retention-days: 14

@@ -31,3 +31,25 @@ Run on 2026-09-25 in PowerShell at `C:\Users\donabe\Project\RemoteDesktopMCP`, b
 - `git diff --cached --check` — exit 0; no output. Added because the design changes were staged, so this checks the staged patch as well.
 
 No source files were edited for this validation task. No build or code test was run.
+
+## CI workflow wiring
+
+Workflow work was performed on 2026-09-25 in PowerShell at `C:\Users\donabe\Project\RemoteDesktopMCP`, branch `feat/tailscale-funnel-design-lint`, base HEAD `320ddb6d5b3a1c54fb4d760612bf4cec4464c5bd`. The tree was concurrently dirty, including `package.json`, `package-lock.json`, task/report files, and a temporary source deletion; those files were not edited here. Only `.github/workflows/lint.yml` and this report were in scope.
+
+- Updated `.github/workflows/lint.yml` to trigger on `push` to `main` and on `pull_request`. Retained the Ubuntu Node 22 lint job and extended it with `npm run check`, `npm run build`, and `npm test`. Added a Windows Node 22 job that runs `npm.cmd ci`, `npm.cmd run check`, `npm.cmd run build`, and `npm.cmd test` under PowerShell. Both jobs have a 15-minute timeout.
+- Each command records separate stdout, stderr, and result files in `ci-artifacts/`; both jobs also record environment details and upload diagnostics even after a failing command. The existing Ubuntu job continues to run `npm ci` and `npm run lint` before type check, build, and tests.
+- `node` YAML parser — exit 0; parsed workflow with `lint` and `windows` jobs, `push` restricted to `main`, `pull_request` enabled, and 15-minute timeouts on both jobs.
+- `git diff --check -- .github/workflows/lint.yml` — exit 0; no whitespace errors (Git printed only its line-ending conversion notice).
+- `npm.cmd run lint:md` — exit 0 after the final report edit; `markdownlint: 38 file(s), 0 issue(s)`.
+- No live workflow, build, type check, or test run was started, as requested pending implementation readiness.
+- Author wording self-check (`document-wording-review`, `author_self_check`) covered the new workflow-wiring paragraph in this report. Meaning, identifier preservation, and readability: checked with no finding; approved-usage review: not applicable because no terminology definition, approval, or ordinary product prose changed. The note preserves the exact job names, commands, paths, source identity, and verification boundary. It is a self-check, not an independent review.
+
+## Dependency audit
+
+Read-only dependency check on 2026-09-25 in PowerShell at `C:\Users\donabe\Project\RemoteDesktopMCP`, branch `feat/tailscale-funnel-design-lint`, HEAD `320ddb6d5b3a1c54fb4d760612bf4cec4464c5bd`. No package or lockfile edits were made.
+
+- `package-lock.json` pins `@wonderwhy-er/desktop-commander` exactly at `0.2.51`, resolved from `https://registry.npmjs.org/@wonderwhy-er/desktop-commander/-/desktop-commander-0.2.51.tgz`.
+- `npm.cmd audit --json` — exit 1; npm reported 4 vulnerabilities: 2 moderate, 2 high, 0 info/low/critical. JSON stdout was retained outside the repo at `%TEMP%\npm-audit-4c41b28d097148a38de4207968d07194.json`; stderr was empty. No `npm audit fix` or other package change was applied.
+- Reported package paths from `npm.cmd explain`: direct `@wonderwhy-er/desktop-commander@0.2.51`; `exceljs@4.4.0` and `sharp@0.34.5` are dependencies of Desktop Commander; `uuid@8.3.2` is a dependency of `exceljs@4.4.0`, which is pulled by Desktop Commander.
+- The audit names the affected packages as `@wonderwhy-er/desktop-commander` (high, direct, range `>=0.2.24`, via `exceljs` and `sharp`), `exceljs` (moderate, indirect, range `>=3.5.0`, via `uuid`), `sharp` (high, indirect, range `<=0.35.4-rc.0`; two libvips/libheif advisory entries), and `uuid` (moderate, indirect, range `<11.1.1`). npm’s JSON reports `@wonderwhy-er/desktop-commander@0.2.23` as the available fix for these advisories, marked `isSemVerMajor: true`.
+- `npm.cmd explain` completed for all four named packages and returned the paths above. No build or test was run while implementation work was active. Advisory disposition is left to the parent.

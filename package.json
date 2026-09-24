@@ -6,9 +6,10 @@
   "description": "Least-privilege MCP server for approved remote desktop actions",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "node --env-file=.env dist/index.js",
     "dev": "tsx watch src/index.ts",
     "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
     "user:hash": "tsx src/hash-password.ts",
     "lint": "npm run lint:ts && npm run lint:md && npm run lint:md:terms:design",
     "lint:ts": "eslint \"src/**/*.ts\"",
@@ -19,8 +20,13 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@wonderwhy-er/desktop-commander": "0.2.51",
     "express": "^5.2.1",
     "zod": "^3.24.2"
+  },
+  "overrides": {
+    "sharp": "0.35.4",
+    "uuid": "11.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
