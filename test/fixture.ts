@@ -33,7 +33,13 @@ export async function fixture(): Promise<Fixture> {
     allowedRedirectOrigins: new Set(["https://chatgpt.com"]),
   };
   const service = new RemoteDesktopService(cfg);
-  await service.initialize();
+  try { await service.initialize(); }
+  catch (error) {
+    await service.close().catch(() => undefined);
+    await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+    clearInterval(keepAlive);
+    throw error;
+  }
   return { service, root, data, base, cleanup: async () => { try { await service.close(); await rm(base, { recursive: true, force: true, maxRetries: 3 }); } finally { clearInterval(keepAlive); } } };
 }
 

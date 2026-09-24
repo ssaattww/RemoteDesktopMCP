@@ -29,7 +29,7 @@ const MAX_TERMINAL_TRANSFERS = 100;
 const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"];
 
-export type RuntimeConfig = { baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; allowedRedirectOrigins: Set<string>; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void> };
+export type RuntimeConfig = { baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; allowedRedirectOrigins: Set<string>; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void> };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -147,12 +147,14 @@ export class RemoteDesktopService {
   private readonly transferLock = new Mutex();
   private readonly dc: DesktopCommander;
   private readonly linkNoReplace: (existingPath: string, newPath: string) => Promise<void>;
+  private readonly linkProtectedConfig: (existingPath: string, newPath: string) => Promise<void>;
   private readonly terminalTransfers: string[] = [];
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
   private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
+  private readonly configIdentityLock = new Mutex();
   private expiryTimer?: NodeJS.Timeout;
-  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; }
+  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; }
   async initialize(): Promise<void> {
     await mkdir(this.cfg.dataDir, { recursive: true, mode: 0o700 });
     const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
@@ -165,7 +167,7 @@ export class RemoteDesktopService {
     const transferDirectory = path.join(this.cfg.dataDir, "transfers");
     await mkdir(transferDirectory, { recursive: true, mode: 0o700 });
     await this.loadProtectedConfigIdentities();
-    await this.rememberProtectedConfigIdentity();
+    await this.rememberProtectedConfigIdentity(true);
     for (const entry of await readdir(transferDirectory, { withFileTypes: true })) if (entry.isFile() && entry.name.endsWith(".snapshot")) await rm(path.join(transferDirectory, entry.name), { force: true });
     await this.cleanupOwnedUploadArtifacts();
     await this.dc.start();
@@ -211,9 +213,9 @@ export class RemoteDesktopService {
     for (const record of records as ProtectedConfigIdentity[]) {
       if (typeof record.pin !== "string") continue;
       const pin = path.resolve(record.pin);
-      const expectedName = `config-${record.dev}-${record.ino}.pin`;
+      const validPinName = /^config-(?:\d+-\d+|[A-Za-z0-9_-]{43})\.pin$/.test(path.basename(pin));
       const info = await lstat(pin).catch(() => undefined);
-      if (!inside(pinDirectory, pin) || path.basename(pin) !== expectedName || !info || info.isSymbolicLink() || info.dev !== record.dev || info.ino !== record.ino) throw new Error("Protected config identity history is invalid.");
+      if (!inside(pinDirectory, pin) || !validPinName || !info || info.isSymbolicLink() || info.dev !== record.dev || info.ino !== record.ino) throw new Error("Protected config identity history is invalid.");
       this.protectedConfigIdentities.set(this.identityKey(record), { ...record, pin });
     }
   }
@@ -224,26 +226,43 @@ export class RemoteDesktopService {
     await writeFile(pending, JSON.stringify(records), { mode: 0o600 });
     await rename(pending, manifest);
   }
-  private async rememberProtectedConfigIdentity(): Promise<void> {
-    const info = await lstat(this.configPath()).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
-    if (!info) return;
-    const key = this.identityKey(info);
-    const existing = this.protectedConfigIdentities.get(key);
-    if (existing) {
-      const pinInfo = await lstat(existing.pin).catch(() => undefined);
-      if (!pinInfo || pinInfo.isSymbolicLink() || pinInfo.dev !== info.dev || pinInfo.ino !== info.ino) throw new Error("Protected config identity pin is invalid.");
-      return;
-    }
-    if (this.protectedConfigIdentities.size >= 64) throw new Error("Protected config identity history limit reached.");
+  private async rememberProtectedConfigIdentity(allowMissing = false): Promise<void> { await this.configIdentityLock.run(() => this.rememberProtectedConfigIdentityLocked(allowMissing)); }
+  private async rememberProtectedConfigIdentityLocked(allowMissing: boolean): Promise<void> {
+    const config = this.configPath();
+    const same = (left: FileIdentity, right: FileIdentity) => left.dev === right.dev && left.ino === right.ino;
+    const transientLinkFailure = (error: unknown) => {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      return code === "ENOENT" || code === "EPERM" || code === "EACCES" || code === "EBUSY" || code === "EEXIST";
+    };
     const pinDirectory = this.configPinDirectory();
-    const pin = path.join(pinDirectory, `config-${info.dev}-${info.ino}.pin`);
     await mkdir(pinDirectory, { recursive: true, mode: 0o700 });
-    try { await link(this.configPath(), pin); } catch (error) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const pin = path.join(pinDirectory, `config-${makeId()}.pin`);
+      try { await this.linkProtectedConfig(config, pin); } catch (error) {
+        if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" && allowMissing) return;
+        if (transientLinkFailure(error)) continue;
+        throw error;
+      }
       const pinInfo = await lstat(pin).catch(() => undefined);
-      if (!pinInfo || pinInfo.isSymbolicLink() || pinInfo.dev !== info.dev || pinInfo.ino !== info.ino) throw error;
+      if (!pinInfo || pinInfo.isSymbolicLink() || !pinInfo.isFile()) {
+        await unlink(pin).catch(() => undefined);
+        throw new Error("Protected config identity pin is invalid.");
+      }
+      const key = this.identityKey(pinInfo);
+      const existing = this.protectedConfigIdentities.get(key);
+      if (existing) {
+        const existingInfo = await lstat(existing.pin).catch(() => undefined);
+        if (!existingInfo || existingInfo.isSymbolicLink() || !same(existingInfo, pinInfo)) throw new Error("Protected config identity pin is invalid.");
+        await unlink(pin);
+      } else {
+        if (this.protectedConfigIdentities.size >= 64) { await unlink(pin).catch(() => undefined); throw new Error("Protected config identity history limit reached."); }
+        this.protectedConfigIdentities.set(key, { dev: pinInfo.dev, ino: pinInfo.ino, pin });
+        await this.persistProtectedConfigIdentities();
+      }
+      const after = await lstat(config).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
+      if (!after || same(after, pinInfo)) return;
     }
-    this.protectedConfigIdentities.set(key, { dev: info.dev, ino: info.ino, pin });
-    await this.persistProtectedConfigIdentities();
+    throw new Error("Protected config identity changed while pinning.");
   }
   private async pruneProtectedConfigIdentities(): Promise<void> {
     let changed = false;

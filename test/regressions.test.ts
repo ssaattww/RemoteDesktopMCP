@@ -16,25 +16,46 @@ const nodeScriptCommand = (file: string) => `${process.execPath} ${file}`;
 const hasAuditEvent = (text: string, event: string, processId: string) => text.split("\n").some((line) => {
   try { const entry = JSON.parse(line) as { event?: unknown; processId?: unknown }; return entry.event === event && entry.processId === processId; } catch { return false; }
 });
-async function safeDcDiagnostics(data: string, service?: RemoteDesktopService): Promise<string> {
+const safeAuditDetail = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const redacted = value.replace(/(?:[A-Za-z]:)?(?:[\\/][^\s"']+)+/g, "[path]").replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]");
+  return redacted.replace(/[^\w .,:()[\]-]/g, "?").slice(0, 240);
+};
+async function safeDcDiagnostics(data: string, service?: RemoteDesktopService, candidate?: string): Promise<string> {
   const identity = await stat(configFile(data)).then((info) => `${info.dev}:${info.ino}`).catch(() => "unavailable");
+  const candidateIdentity = candidate ? await stat(candidate).then((info) => `${info.dev}:${info.ino}`).catch(() => "unavailable") : undefined;
   const identities = (service as unknown as { protectedConfigIdentities?: Map<unknown, unknown> } | undefined)?.protectedConfigIdentities;
   const identityKeys = identities instanceof Map ? [...identities.keys()].filter((key): key is string => typeof key === "string" && /^\d+:\d+$/.test(key)).sort() : [];
   const events = await readFile(path.join(data, "audit.jsonl"), "utf8").then((text) => text.split("\n").flatMap((line) => {
     try {
-      const value = JSON.parse(line) as { event?: unknown; tool?: unknown; reason?: unknown; category?: unknown };
+      const value = JSON.parse(line) as { event?: unknown; tool?: unknown; reason?: unknown; category?: unknown; detail?: unknown };
       if (typeof value.event !== "string" || !/^[a-z._-]+$/.test(value.event)) return [];
       const fields = [value.tool, value.reason, value.category].filter((field): field is string => typeof field === "string" && /^[a-z._-]+$/.test(field));
-      return [`${value.event}${fields.length ? `:${fields.join(":")}` : ""}`];
+      const detail = value.event === "desktop_commander.rejected" ? safeAuditDetail(value.detail) : undefined;
+      return [`${value.event}${fields.length ? `:${fields.join(":")}` : ""}${detail ? `:detail=${detail}` : ""}`];
     } catch { return []; }
   }).slice(-8)).catch(() => [] as string[]);
-  return `config_identity=${identity}; protected_identity_count=${identityKeys.length}; protected_identity_keys=${identityKeys.join(",") || "none"}; recent_audit_events=${events.join(",") || "none"}`;
+  return `config_identity=${identity};${candidateIdentity === undefined ? "" : ` candidate_identity=${candidateIdentity};`} protected_identity_count=${identityKeys.length}; protected_identity_keys=${identityKeys.join(",") || "none"}; recent_audit_events=${events.join(",") || "none"}`;
 }
 
-async function expectRejected(operation: Promise<unknown>, label: string, data: string, service: RemoteDesktopService): Promise<void> {
+async function expectRejected(operation: Promise<unknown>, label: string, data: string, service: RemoteDesktopService, candidate?: string): Promise<void> {
   try { await operation; }
   catch { return; }
-  throw new Error(`${label} unexpectedly succeeded; ${await safeDcDiagnostics(data, service)}`);
+  throw new Error(`${label} unexpectedly succeeded; ${await safeDcDiagnostics(data, service, candidate)}`);
+}
+
+async function replaceConfigWithRetry(source: string, destination: string): Promise<void> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try { await rename(source, destination); return; }
+    catch (error) {
+      last = error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "") || attempt === 5) break;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  throw last;
 }
 
 async function openSession(api: Awaited<ReturnType<typeof mcp>>) {
@@ -116,8 +137,9 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     const historicalAlias = path.join(f.root, "config-historical-alias.json");
     const replacement = `${protectedPath}.replacement`;
     await link(protectedPath, historicalAlias);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the known current config inode before replacement", f.data, service);
     await writeFile(replacement, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
-    await rename(replacement, protectedPath);
+    await replaceConfigWithRetry(replacement, protectedPath);
     const currentAlias = path.join(f.root, "config-current-alias.json");
     await link(protectedPath, currentAlias);
     await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the retained config inode", f.data, service);
@@ -148,6 +170,47 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     await assert.rejects(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "../data/audit.jsonl" }));
     await expectRejected(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the historical config inode after all operations", f.data, service);
   } finally { await api.close(); await service.close(); await f.cleanup(); }
+});
+
+test("DR003: a config replacement during pin linking preserves known history and the final config", async () => {
+  const f = await fixture(); let api: Awaited<ReturnType<typeof mcp>> | undefined; let service: RemoteDesktopService | undefined;
+  try {
+    const protectedPath = configFile(f.data);
+    const knownAlias = path.join(f.root, "config-known-before-race.json");
+    await link(protectedPath, knownAlias);
+    api = await mcp(f.service);
+    const knownSession = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: knownSession, root_id: "files", relative_path: "config-known-before-race.json" }), "the known config inode before the pin-link race", f.data, f.service);
+    await api.close(); api = undefined; await f.service.close();
+
+    let replacedDuringPin = false;
+    const racedAlias = path.join(f.root, "config-raced-during-pin.json");
+    const pinnedVersionAlias = path.join(f.root, "config-version-linked-during-pin.json");
+    let capturedPinVersion = false;
+    const cfg = {
+      ...f.service.cfg,
+      linkProtectedConfig: async (existingPath: string, pinPath: string) => {
+        if (!replacedDuringPin) {
+          replacedDuringPin = true;
+          await link(existingPath, racedAlias);
+          const staged = `${existingPath}.pin-race`;
+          await writeFile(staged, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
+          await replaceConfigWithRetry(staged, existingPath);
+        }
+        await link(existingPath, pinPath);
+        if (!capturedPinVersion) { await link(pinPath, pinnedVersionAlias); capturedPinVersion = true; }
+      },
+    };
+    service = new RemoteDesktopService(cfg); await service.initialize();
+    assert.equal(replacedDuringPin, true, "the deterministic hook must replace config.json between pin stat and link");
+    assert.equal(capturedPinVersion, true, "the deterministic hook must retain the identity actually linked to a private pin");
+    await writeFile(path.join(f.root, "ordinary-after-pin-race.txt"), "ordinary pin-race file");
+    api = await mcp(service);
+    const session = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-known-before-race.json" }), "the known historical config inode after the pin-link race", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-version-linked-during-pin.json" }), "the config inode actually linked during the pin-link race", f.data, service, pinnedVersionAlias);
+    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-after-pin-race.txt" })).output), /ordinary pin-race file/);
+  } finally { await api?.close(); await service?.close(); await f.cleanup(); }
 });
 
 test("NR009: canonical allowed roots work through a symlink or Windows junction", async (t) => {
