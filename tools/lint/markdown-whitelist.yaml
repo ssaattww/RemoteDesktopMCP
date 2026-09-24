@@ -85,6 +85,12 @@ entries:
     description: 別のファイルやディレクトリを参照するファイルシステム機能。
   - term: OS
     description: 基本処理系の略称。
+  - term: Windows
+    description: 原子的なファイル操作の対象となる基本処理系の名称。
+  - term: POSIX
+    description: ファイル操作の仕様を定める基本処理系の規格名。
+  - term: ハードリンク
+    description: 同一保存領域で既存のファイル実体へ別名を付ける操作。
   - term: PID
     description: プロセス識別子の略称。
   - term: ID

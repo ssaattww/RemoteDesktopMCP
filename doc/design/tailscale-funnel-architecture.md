@@ -5,6 +5,9 @@
 RemoteDesktopMCP を固定グローバル IP やルーター／モデムのポート開放なしで、ChatGPT などの外部 MCP クライアントから利用可能にする。
 公開経路には Tailscale Funnel を使用し、認証・認可は RemoteDesktopMCP 自身が担当する。
 
+1台のPCで動かす最初のローカル稼働段階では Funnel を公開せず、既存のパスワード認証を開発用に利用する。
+この文書の Google OIDC、CIMD、更新用トークンを含む公開条件は、その後の外部公開段階で満たす。
+
 ## 設計方針
 
 - 外部からの接続先は Tailscale Funnel の HTTPS エンドポイントだけとする。
