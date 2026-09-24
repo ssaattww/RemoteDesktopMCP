@@ -258,18 +258,29 @@ export class RemoteDesktopService {
   private async rememberProtectedConfigIdentityLocked(allowMissing: boolean): Promise<void> {
     const config = this.configPath();
     const same = (left: FileIdentity, right: FileIdentity) => left.dev === right.dev && left.ino === right.ino;
+    const deadline = Date.now() + 2_000;
+    const maxAttempts = 20;
     const transientLinkFailure = (error: unknown) => {
       const code = (error as NodeJS.ErrnoException | undefined)?.code;
       return code === "ENOENT" || code === "EPERM" || code === "EACCES" || code === "EBUSY" || code === "EEXIST";
     };
+    const waitForConfigurationToSettle = async (attempt: number): Promise<boolean> => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || attempt + 1 >= maxAttempts) return false;
+      const delay = Math.min(100, 10 * 2 ** Math.min(attempt, 3));
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
+      return true;
+    };
     const pinDirectory = this.configPinDirectory();
     await mkdir(pinDirectory, { recursive: true, mode: 0o700 });
-    await this.pruneProtectedConfigIdentitiesLocked();
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts && Date.now() <= deadline; attempt += 1) {
+      // Retire only pins with no link outside private state before checking the
+      // cap. Pins that still have an alias remain protected across retries.
+      await this.pruneProtectedConfigIdentitiesLocked();
       const pin = path.join(pinDirectory, `config-${makeId()}.pin`);
       try { await this.linkProtectedConfig(config, pin); } catch (error) {
         if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" && allowMissing) return;
-        if (transientLinkFailure(error)) continue;
+        if (transientLinkFailure(error) && await waitForConfigurationToSettle(attempt)) continue;
         throw error;
       }
       const pinInfo = await lstat(pin, { bigint: true }).catch(() => undefined);
@@ -290,7 +301,8 @@ export class RemoteDesktopService {
         await this.persistProtectedConfigIdentities();
       }
       const after = await lstat(config, { bigint: true }).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
-      if (!after || same(this.identityFromStats(after), pinnedIdentity)) return;
+      if (after && same(this.identityFromStats(after), pinnedIdentity)) return;
+      if (!await waitForConfigurationToSettle(attempt)) break;
     }
     throw new Error("Protected config identity changed while pinning.");
   }

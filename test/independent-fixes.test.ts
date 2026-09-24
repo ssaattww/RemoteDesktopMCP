@@ -39,7 +39,11 @@ test("RDMCP-MVP-IFR-002: live config history prunes past 64 versions without los
     const protectedConfig = configPath(f.data);
     const alias = path.join(f.root, "known-config-alias.json");
     const ordinary = path.join(f.root, "ordinary-history.txt");
-    await Promise.all([link(protectedConfig, alias), writeFile(ordinary, "ordinary history file")]);
+    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
+    const retainedPin = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
+    await Promise.all([link(retainedPin, alias), writeFile(ordinary, "ordinary history file")]);
+    const [pinIdentity, aliasIdentity] = await Promise.all([stat(retainedPin, { bigint: true }), stat(alias, { bigint: true })]);
+    assert.equal(`${pinIdentity.dev}:${pinIdentity.ino}`, `${aliasIdentity.dev}:${aliasIdentity.ino}`, "the known history alias must derive from a retained private pin");
     let session = await openSession(api);
     await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "known-config-alias.json" }));
     assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-history.txt" })).output), /ordinary history file/);
@@ -60,6 +64,65 @@ test("RDMCP-MVP-IFR-002: live config history prunes past 64 versions without los
     await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "known-config-alias.json" }), "restart preserves known config protection after pruning");
     assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-history.txt" })).output), /ordinary history file/);
   } finally { await api.close(); await restarted?.close(); await f.cleanup(); }
+});
+
+test("RDMCP-MVP-IFR-002: real pin-link replacements settle or fail closed within the retry budget", async () => {
+  const f = await fixture(); let stable: RemoteDesktopService | undefined; let stableApi: Awaited<ReturnType<typeof mcp>> | undefined;
+  const unstableFixture = await fixture(); let unstable: RemoteDesktopService | undefined;
+  try {
+    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
+    const retainedA = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
+    const aliasA = path.join(f.root, "retry-known-a.json");
+    const aliasB = path.join(f.root, "retry-known-b.json");
+    await link(retainedA, aliasA);
+    await f.service.close();
+
+    let settledReplacements = 0;
+    let capturedB = false;
+    stable = new RemoteDesktopService({
+      ...f.service.cfg,
+      linkProtectedConfig: async (existingPath: string, pinPath: string) => {
+        await link(existingPath, pinPath);
+        if (!capturedB) { await link(pinPath, aliasB); capturedB = true; }
+        if (settledReplacements < 5) {
+          const staged = `${existingPath}.settle-${settledReplacements}`;
+          await writeFile(staged, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false, retryVersion: settledReplacements }));
+          await replaceConfigWithRetry(staged, existingPath);
+          settledReplacements += 1;
+        }
+      },
+    });
+    await stable.initialize();
+    assert.equal(settledReplacements, 5, "the first five successful real links must observe a replacement before the config stabilizes");
+    assert.equal(capturedB, true, "the stable retry path must retain a second known config identity");
+    await writeFile(path.join(f.root, "retry-ordinary.txt"), "ordinary retry file");
+    stableApi = await mcp(stable);
+    const stableSession = await openSession(stableApi);
+    await assert.rejects(stableApi.call("file_read", { session_id: stableSession, root_id: "files", relative_path: "retry-known-a.json" }));
+    await assert.rejects(stableApi.call("file_read", { session_id: stableSession, root_id: "files", relative_path: "retry-known-b.json" }));
+    assert.match(String((await stableApi.call("file_read", { session_id: stableSession, root_id: "files", relative_path: "retry-ordinary.txt" })).output), /ordinary retry file/);
+
+    await unstableFixture.service.close();
+    const readyBefore = (await auditEvents(unstableFixture.data)).filter((entry) => entry.event === "desktop_commander.ready").length;
+    let unboundedReplacements = 0;
+    unstable = new RemoteDesktopService({
+      ...unstableFixture.service.cfg,
+      linkProtectedConfig: async (existingPath: string, pinPath: string) => {
+        await link(existingPath, pinPath);
+        const staged = `${existingPath}.never-stable-${unboundedReplacements}`;
+        await writeFile(staged, JSON.stringify({ allowedDirectories: [unstableFixture.root], telemetryEnabled: false, retryVersion: unboundedReplacements }));
+        await replaceConfigWithRetry(staged, existingPath);
+        unboundedReplacements += 1;
+      },
+    });
+    const started = Date.now();
+    await assert.rejects(unstable.initialize(), /Protected config identity changed while pinning/);
+    assert.ok(Date.now() - started < 3_500, "an endlessly replaced config must exhaust the bounded retry budget promptly");
+    assert.ok(unboundedReplacements > 1, "failure must arise from repeated real link-and-replace attempts");
+    assert.throws(() => (unstable as unknown as { dc: { currentGeneration: () => string } }).dc.currentGeneration(), /unavailable/, "failed initialization must not expose a ready Desktop Commander generation");
+    const readyAfter = (await auditEvents(unstableFixture.data)).filter((entry) => entry.event === "desktop_commander.ready").length;
+    assert.equal(readyAfter, readyBefore, "failed initialization must not audit a ready service");
+  } finally { await stableApi?.close(); await stable?.close(); await unstable?.close(); await f.cleanup(); await unstableFixture.cleanup(); }
 });
 
 test("RDMCP-MVP-IFR-003: uploads and downloads share one active-transfer cap", async () => {

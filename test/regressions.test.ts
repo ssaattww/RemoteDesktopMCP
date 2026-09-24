@@ -158,8 +158,8 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     assert.ok(initialPins.length > 0, "initialization must retain a private protected-config pin");
     const retainedInitialPin = path.join(pinDirectory, initialPins[0]!);
     await link(retainedInitialPin, historicalAlias);
-    const initialPinIdentity = await stat(retainedInitialPin);
-    const historicalIdentity = await stat(historicalAlias);
+    const initialPinIdentity = await stat(retainedInitialPin, { bigint: true });
+    const historicalIdentity = await stat(historicalAlias, { bigint: true });
     assert.equal(`${historicalIdentity.dev}:${historicalIdentity.ino}`, `${initialPinIdentity.dev}:${initialPinIdentity.ino}`, "A must be an alias of an actually retained private pin");
     await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the known protected A inode before replacement", f.data, service, historicalAlias);
 
@@ -186,8 +186,8 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     });
     await service.initialize(); api = await mcp(service);
     assert.equal(capturedReplacement, true, "the replacement alias must be captured from a successful private pin");
-    const capturedIdentity = await stat(currentAlias);
-    const pinnedIdentities = await Promise.all((await readdir(pinDirectory)).map(async (name) => stat(path.join(pinDirectory, name))));
+    const capturedIdentity = await stat(currentAlias, { bigint: true });
+    const pinnedIdentities = await Promise.all((await readdir(pinDirectory)).map(async (name) => stat(path.join(pinDirectory, name), { bigint: true })));
     assert.ok(pinnedIdentities.some((info) => info.dev === capturedIdentity.dev && info.ino === capturedIdentity.ino), "the replacement alias must retain the exact dev:ino recorded by a private pin");
     const replacementSession = await openSession(api);
     await expectRejected(api.call("file_read", { session_id: replacementSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the retained config inode", f.data, service);
@@ -209,10 +209,12 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
 
     const bytes = Buffer.from("x"); const id = await upload(api, restartedSession, "swap.bin", bytes, true);
     const item = service.transfers.get(id)!;
-    const configDigest = sha256(await readFile(protectedPath));
-    await unlink(item.temp!); await link(protectedPath, item.temp!);
+    const stableTargetAlias = path.join(f.root, "config-swap-target-alias.json");
+    await link(protectedPath, stableTargetAlias);
+    const stableTargetDigest = sha256(await readFile(stableTargetAlias));
+    await unlink(item.temp!); await link(stableTargetAlias, item.temp!);
     await assert.rejects(api.call("file_transfer_upload_chunk", { session_id: restartedSession, transfer_id: id, offset: 0, data: bytes.toString("base64") }));
-    assert.equal(sha256(await readFile(protectedPath)), configDigest, "a path swap must never write the protected inode");
+    assert.equal(sha256(await readFile(stableTargetAlias)), stableTargetDigest, "a path swap must never write the exact protected inode swapped into the temp path");
     assert.equal(service.transfers.get(id)?.state, "failed");
 
     await assert.rejects(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "../data/audit.jsonl" }));
@@ -229,7 +231,7 @@ test("DR003: a config replacement during pin linking preserves known history and
     assert.ok(existingPins.length > 0, "the pre-race A alias must derive from a retained private pin");
     const retainedA = path.join(f.data, "transfers", "protected-config-pins", existingPins[0]!);
     await link(retainedA, knownAlias);
-    const [retainedAIdentity, knownAliasIdentity] = await Promise.all([stat(retainedA), stat(knownAlias)]);
+    const [retainedAIdentity, knownAliasIdentity] = await Promise.all([stat(retainedA, { bigint: true }), stat(knownAlias, { bigint: true })]);
     assert.equal(`${retainedAIdentity.dev}:${retainedAIdentity.ino}`, `${knownAliasIdentity.dev}:${knownAliasIdentity.ino}`, "the pre-race A alias must retain its exact pinned identity");
     api = await mcp(f.service);
     const knownSession = await openSession(api);

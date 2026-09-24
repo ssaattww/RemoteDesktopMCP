@@ -52,3 +52,8 @@ state を確認し、private pin から正確な記録を復旧できる場合�
 してください。manifest を削除すると過去設定の保護と upload 所有証明を失うため、
 既知の設定別名と orphan 一時ファイルの内容を確認して fresh local state を作る
 場合だけ行ってください。
+
+安全な旧数値でも、config pin が現在の private pin と一致しなければ起動を停止
+します。upload の安全な旧数値が user-root の一時ファイルと一致しない場合は、
+そのファイルを残して manifest の所有記録だけを破棄します。どちらも別 inode を
+保護対象や削除対象と誤認しないためです。
