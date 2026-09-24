@@ -2,7 +2,7 @@ schema_version: 3
 producer:
   skill: chat-implementation-worker
   mode: review-follow-up
-  generated_at: 2026-09-24T12:47:03+09:00
+  generated_at: 2026-09-24T21:16:34+09:00
 
 repository: ssaattww/RemoteDesktopMCP
 issue_or_pr: "PR #1"
@@ -13,8 +13,9 @@ base_ref: main
 target:
   source_reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
   work_start_head: 6397a6ad3a854e29802ae412c4877f18bb0ae902
-  technical_head: 3a66f444a91e05f1667a7ca258c377679b23fbfc
-  current_head: 3a66f444a91e05f1667a7ca258c377679b23fbfc
+  design_fix_head: 3a66f444a91e05f1667a7ca258c377679b23fbfc
+  technical_head: b8ea26436ecef4b387d7413c681fa15b011dacbe
+  current_head: b8ea26436ecef4b387d7413c681fa15b011dacbe
 
 execution_environment:
   kind: connected_computer
@@ -27,7 +28,7 @@ execution_environment:
   working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
   repository: ssaattww/RemoteDesktopMCP
   branch: feat/tailscale-funnel-design-lint
-  head_sha: 3a66f444a91e05f1667a7ca258c377679b23fbfc
+  head_sha: b8ea26436ecef4b387d7413c681fa15b011dacbe
   source_state: report_handoff_pending
   ownership: current_task
 
@@ -78,12 +79,22 @@ files:
       purpose: Detailed implementation-side response report.
     - path: doc/report/2026-09-24-pr1-ifr001-review-followup-handoff.yaml
       purpose: Continuation packet for review.
+    - path: test/execution-boundary/windows/README.md
+      purpose: Define how to run the actual deployment composition fixture.
+    - path: test/execution-boundary/windows/Prepare-BoundaryFixture.ps1
+      purpose: Prepare protected/workspace paths and expected identities for the Windows boundary fixture.
+    - path: test/execution-boundary/windows/Probe-BoundaryFixture.ps1
+      purpose: Run through process_start under the execution identity and exercise allowed/denied paths.
+    - path: test/execution-boundary/windows/Verify-BoundaryFixture.ps1
+      purpose: Verify execution identity, denial results, secret non-inheritance, and protected-file hashes.
 
 implementation:
   outcome: design_fix_completed
   commits:
     - sha: 3a66f444a91e05f1667a7ca258c377679b23fbfc
       purpose: Define process execution privilege boundary.
+    - sha: b8ea26436ecef4b387d7413c681fa15b011dacbe
+      purpose: Add the Windows execution-boundary deployment fixture.
   addressed_findings:
     - id: RDMCP-IFR-001
       severity: high
@@ -127,11 +138,11 @@ whitelist:
   formatting_workaround_used: false
 
 validation:
-  diagnostics_path: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-ifr001-diagnostics-20260924
+  diagnostics_path: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-closure-readiness-diagnostics-20260924
   lint:
     command: npm run lint
     result: passed
-    evidence: markdownlint 23 files, 0 issues; terminology lint passed
+    evidence: markdownlint 26 files, 0 issues; terminology lint passed
   check:
     command: npm run check
     result: passed
@@ -149,10 +160,17 @@ validation:
     command: node scripts/check-markdown-whitelist.mjs --list-unknown --files doc/design/functional-requirements.md doc/design/multi-pc-architecture.md doc/design/tailscale-funnel-architecture.md
     result: passed
     evidence: 0 unknown terms
+  fixture_parser:
+    command: Parse Prepare-BoundaryFixture.ps1, Probe-BoundaryFixture.ps1, Verify-BoundaryFixture.ps1 with System.Management.Automation.Language.Parser
+    result: passed
+    evidence: All three PowerShell fixture scripts parse without errors.
+  fixture_runtime:
+    result: blocked
+    evidence: A separate deployed execution OS user and execution-worker runtime are not present in the current work environment. Same-user execution is not accepted as substitute evidence.
   publication_candidate:
     result: passed
     evidence:
-      - npm run lint: 24 Markdown files, 0 issues, terminology lint passed
+      - npm run lint passes after fixture/report updates
       - handoff YAML parse passed
       - npm run check passed
       - npm run build passed
@@ -187,6 +205,47 @@ review:
     - Verify coordinator-as-executor uses the same boundary.
     - Verify Desktop Commander reuse remains intact.
     - Verify RDMCP-R8 rules were not regressed.
+
+  independent_closure:
+    initial_independent_reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    closure_reviewed_heads: []
+    reviewer_continuity: same independent reviewer is required
+    closure_scope:
+      - RDMCP-IFR-001 and exact-head CI delta only
+    completeness_matrix:
+      - finding_id: RDMCP-IFR-001
+        required_action: Separate protected settings management from commands and descendants using an OS-enforced execution boundary.
+        production_path: doc/design/functional-requirements.md#ローカル実行の権限分離; doc/design/multi-pc-architecture.md#ローカル実行の権限境界; doc/design/multi-pc-architecture.md#desktop-commander-の起動経路
+        actual_composition_fixture: test/execution-boundary/windows/Prepare-BoundaryFixture.ps1 + Probe-BoundaryFixture.ps1 + Verify-BoundaryFixture.ps1
+        focused_evidence: PowerShell parser passes. Cross-account runtime execution is pending because the execution-worker runtime and deployed execution identity are not present; same-user execution is not substituted.
+      - finding_id: RDMCP-IFR-001
+        required_action: Prevent management secrets/environment/handles from reaching commands and prevent the execution identity from modifying boundary-defining configuration.
+        production_path: doc/design/multi-pc-architecture.md environment/service protection; doc/design/tailscale-funnel-architecture.md#ローカル秘密情報と実行環境
+        actual_composition_fixture: Probe secretNotInherited plus boundary-config/service-config/management-executable write-denial checks; Verify SHA-256 comparison
+        focused_evidence: Fixture scripts parse. Actual separate-user secret non-inheritance and write-denial evidence is pending.
+      - finding_id: RDMCP-IFR-001
+        required_action: Apply the same boundary when the coordinator is also an executor and fail closed when the boundary cannot be verified.
+        production_path: doc/design/multi-pc-architecture.md#起動時の確認と失敗時の扱い; doc/design/multi-pc-architecture.md#統括ノード自身を操作する場合
+        actual_composition_fixture: test/execution-boundary/windows/README.md deployment sequence plus Probe/Verify
+        focused_evidence: Design lint/check passes. Actual fail-closed composition evidence is pending runtime implementation.
+      - finding_id: RDMCP-IFR-001
+        required_action: Validate allowed work and denied access via shell, interpreter, redirection, descendants, symbolic links, and junctions using real deployment identities.
+        production_path: doc/design/multi-pc-architecture.md#権限境界の配備試験
+        actual_composition_fixture: Probe direct/cmd/PowerShell/Node.js/redirection/descendant/junction/symbolic-link checks
+        focused_evidence: Fixture scripts parse. Real deployment focused run is pending.
+      - finding_id: RDMCP-IFR-001
+        required_action: Confirm dummy secrets do not leak and protected content remains unchanged after denied attempts.
+        production_path: doc/design/multi-pc-architecture.md#権限境界の配備試験
+        actual_composition_fixture: Probe secret check plus Verify hashes for protected file, boundary config, service config, and management executable
+        focused_evidence: Fixture scripts parse. Real deployment focused run is pending.
+
+blocked:
+  - item: RDMCP-IFR-001 actual composition execution
+    reason: The runtime execution worker/service and dedicated execution OS user are not implemented/provisioned in the current work environment.
+    required_input_or_decision: Implement/provision the runtime boundary, then execute the Windows fixture through actual process_start with separate management/execution identities.
+  - item: normal fix verification
+    reason: The implementation chat cannot serve as normal reviewer for its own changes.
+    required_input_or_decision: Normal reviewer must verify RDMCP-R8 and RDMCP-IFR-001 response before independent closure.
 
 remaining_risks:
   - Runtime worker/service and OS ACL enforcement are not implemented yet.
