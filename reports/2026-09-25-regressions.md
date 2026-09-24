@@ -58,3 +58,17 @@ The first awaited 14-test full run with that seam initially failed an alias crea
 ## Limitations
 
 The unsupported no-replace path is tested through the injected narrow `linkNoReplace` capability seam because this Windows volume supports hard links. The test verifies the observable contract—upload begin refuses the destination and removes the probe—without claiming that the host filesystem lacks hard-link support.
+
+## Independent-fix regression matrix
+
+| Finding | Regression coverage |
+| --- | --- |
+| RDMCP-MVP-IFR-001 / High | A narrow process-only Desktop Commander adapter returns the same PID for successive logical processes. Both process-lock orderings prove stale logical IDs reject before output, status, or termination delegation can reach their successor. |
+| RDMCP-MVP-IFR-002 / High | A live service observes 70 atomically replaced config versions through its serialized protected-identity capture. A known config hard-link remains denied; an ordinary file works before and after churn and after service restart. |
+| RDMCP-MVP-IFR-003 / Medium | Ten uploads and ten downloads fill the one shared active-transfer cap. An overflow upload leaves no transfer, temp file, or owned-upload manifest record. |
+| RDMCP-MVP-IFR-004 / Medium | A process-only adapter injects a terminate timeout, then provides a later completed output. The watcher reaches actual finished state and writes exactly one exit audit event without a post-timeout status/output poll; a later status query returns the observed exit code. |
+| RDMCP-MVP-IFR-005 / Medium | Process-start audit binds the logical id, caller session and PID to a redacted command representation. It rejects configured token/hash literals plus labeled password, token and Bearer values while retaining the ordinary command label. |
+| RDMCP-MVP-IFR-006 / Medium | Real MCP multi-chunk uploads cover `overwrite:false` to a new destination and `overwrite:true` to an existing destination, with exact bytes/hash, terminal status, temp removal and owned-manifest cleanup. |
+| RDMCP-MVP-IFR-007 / Low | Documentation/version handling is owned by the Luna documentation pass; no product fixture is needed. |
+
+The initial focused independent Node 22.23.3 run passed IFR002–IFR006 6/6 in 38.039 seconds. The strengthened IFR005 configured-literal and labeled/Bearer redaction check passed 1/1 in 7.161 seconds. On the frozen source, the strengthened independent suite passed 6/6 in 37.939 seconds. The final awaited Node 22.23.3 suite passed 20/20 with 0 failed, cancelled, skipped, or todo in 67.538 seconds. This remains local evidence pending the independent review and any required CI evidence.

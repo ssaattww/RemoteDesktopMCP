@@ -285,7 +285,7 @@ RemoteDesktopMCP を起動した OS ユーザーと同等の権限を行使で�
 
 起動時は次を行う。
 
-1. 初期版の検証対象を `@wonderwhy-er/desktop-commander` 0.2.50 とする。導入時は検証済みのバージョンを固定し、実行コマンドと引数はローカル設定で指定する。本番環境で自動的に `latest` へ更新しない。
+1. 初期版の検証対象を `@wonderwhy-er/desktop-commander` 0.2.51 とする。導入時は検証済みのバージョンを固定し、実行コマンドと引数はローカル設定で指定する。本番環境で自動的に `latest` へ更新しない。
 2. MCP クライアントから `listTools()` を実行し、必要なツール名と入力定義が存在することを確認する。
 3. その実行ノードで利用できる RemoteDesktopMCP 操作を統括ノードへ通知する。
 4. 必要な Desktop Commander ツールがない操作は利用できないものとし、RemoteDesktopMCP の独自実装へ自動的に切り替えない。
