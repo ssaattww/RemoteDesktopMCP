@@ -17,6 +17,7 @@ type Authorization = { clientId: string; redirectUri: string; state?: string; ch
 type Session = { id: string; user: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
 type FileIdentity = { dev: number; ino: number };
 type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
+type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
 type Process = { id: string; sessionId: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean };
 
@@ -74,7 +75,7 @@ class DesktopCommander {
     if (path.resolve(config) !== expected || !inside(this.cfg.dataDir, expected)) throw new Error("Desktop Commander config path did not resolve inside DATA_DIR.");
     await mkdir(path.dirname(config), { recursive: true, mode: 0o700 });
     this.allowedDirectories = await Promise.all(this.cfg.roots.map((root) => realpath(root.path)));
-    await writeFile(config, JSON.stringify({ allowedDirectories: this.allowedDirectories, telemetryEnabled: false }), { mode: 0o600 });
+    await writeFile(config, JSON.stringify({ allowedDirectories: this.allowedDirectories, telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }), { mode: 0o600 });
     await this.configPrepared();
     const drive = path.parse(home).root;
     const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"), LOCALAPPDATA: path.join(home, "AppData", "Local"), HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) } as Record<string, string>;
@@ -149,7 +150,7 @@ export class RemoteDesktopService {
   private readonly terminalTransfers: string[] = [];
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
-  private readonly protectedConfigIdentities = new Set<string>();
+  private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
   private expiryTimer?: NodeJS.Timeout;
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; }
   async initialize(): Promise<void> {
@@ -169,6 +170,7 @@ export class RemoteDesktopService {
     await this.cleanupOwnedUploadArtifacts();
     await this.dc.start();
     await this.rememberProtectedConfigIdentity();
+    await this.pruneProtectedConfigIdentities();
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
     this.expiryTimer.unref();
   }
@@ -198,18 +200,27 @@ export class RemoteDesktopService {
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
   private configPath(): string { return path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json"); }
   private configIdentityManifestPath(): string { return path.join(this.cfg.dataDir, "transfers", "protected-config-identities.json"); }
+  private configPinDirectory(): string { return path.join(this.cfg.dataDir, "transfers", "protected-config-pins"); }
   private identityKey(identity: FileIdentity): string { return `${identity.dev}:${identity.ino}`; }
   private async loadProtectedConfigIdentities(): Promise<void> {
     const text = await readFile(this.configIdentityManifestPath(), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "[]" : Promise.reject(error));
     let records: unknown;
     try { records = JSON.parse(text); } catch { throw new Error("Protected config identity history is invalid."); }
-    if (!Array.isArray(records) || records.length > 64 || records.some((value) => !value || typeof value !== "object" || !Number.isInteger((value as FileIdentity).dev) || !Number.isInteger((value as FileIdentity).ino))) throw new Error("Protected config identity history is invalid.");
-    for (const record of records as FileIdentity[]) this.protectedConfigIdentities.add(this.identityKey(record));
+    if (!Array.isArray(records) || records.length > 64 || records.some((value) => !value || typeof value !== "object" || !Number.isInteger((value as ProtectedConfigIdentity).dev) || !Number.isInteger((value as ProtectedConfigIdentity).ino))) throw new Error("Protected config identity history is invalid.");
+    const pinDirectory = path.resolve(this.configPinDirectory());
+    for (const record of records as ProtectedConfigIdentity[]) {
+      if (typeof record.pin !== "string") continue;
+      const pin = path.resolve(record.pin);
+      const expectedName = `config-${record.dev}-${record.ino}.pin`;
+      const info = await lstat(pin).catch(() => undefined);
+      if (!inside(pinDirectory, pin) || path.basename(pin) !== expectedName || !info || info.isSymbolicLink() || info.dev !== record.dev || info.ino !== record.ino) throw new Error("Protected config identity history is invalid.");
+      this.protectedConfigIdentities.set(this.identityKey(record), { ...record, pin });
+    }
   }
   private async persistProtectedConfigIdentities(): Promise<void> {
     const manifest = this.configIdentityManifestPath();
     const pending = `${manifest}.next`;
-    const records = [...this.protectedConfigIdentities].map((value) => { const [dev, ino] = value.split(":").map(Number); return { dev, ino }; });
+    const records = [...this.protectedConfigIdentities.values()];
     await writeFile(pending, JSON.stringify(records), { mode: 0o600 });
     await rename(pending, manifest);
   }
@@ -217,10 +228,35 @@ export class RemoteDesktopService {
     const info = await lstat(this.configPath()).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
     if (!info) return;
     const key = this.identityKey(info);
-    if (this.protectedConfigIdentities.has(key)) return;
+    const existing = this.protectedConfigIdentities.get(key);
+    if (existing) {
+      const pinInfo = await lstat(existing.pin).catch(() => undefined);
+      if (!pinInfo || pinInfo.isSymbolicLink() || pinInfo.dev !== info.dev || pinInfo.ino !== info.ino) throw new Error("Protected config identity pin is invalid.");
+      return;
+    }
     if (this.protectedConfigIdentities.size >= 64) throw new Error("Protected config identity history limit reached.");
-    this.protectedConfigIdentities.add(key);
+    const pinDirectory = this.configPinDirectory();
+    const pin = path.join(pinDirectory, `config-${info.dev}-${info.ino}.pin`);
+    await mkdir(pinDirectory, { recursive: true, mode: 0o700 });
+    try { await link(this.configPath(), pin); } catch (error) {
+      const pinInfo = await lstat(pin).catch(() => undefined);
+      if (!pinInfo || pinInfo.isSymbolicLink() || pinInfo.dev !== info.dev || pinInfo.ino !== info.ino) throw error;
+    }
+    this.protectedConfigIdentities.set(key, { dev: info.dev, ino: info.ino, pin });
     await this.persistProtectedConfigIdentities();
+  }
+  private async pruneProtectedConfigIdentities(): Promise<void> {
+    let changed = false;
+    for (const [key, record] of this.protectedConfigIdentities) {
+      const info = await lstat(record.pin).catch(() => undefined);
+      if (!info || info.isSymbolicLink() || info.dev !== record.dev || info.ino !== record.ino) throw new Error("Protected config identity pin is invalid.");
+      if (info.nlink === 1) {
+        await rm(record.pin, { force: true });
+        this.protectedConfigIdentities.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) await this.persistProtectedConfigIdentities();
   }
   private isProtectedConfigIdentity(info: FileIdentity): boolean { return this.protectedConfigIdentities.has(this.identityKey(info)); }
   private ownershipManifestPath(): string { return path.join(this.cfg.dataDir, "transfers", "owned-uploads.json"); }
@@ -359,7 +395,7 @@ export class RemoteDesktopService {
       return pages.join("\n");
     } finally { await this.dc.call("stop_search", { sessionId: session }).catch(() => undefined); }
   }
-  private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>) => Promise<unknown>) { return async (args: z.infer<z.ZodObject<T>>) => { try { return result(await fn(args)); } catch (error) { const message = error instanceof Error ? error.message : "Operation failed."; await this.audit("operation.rejected", { user, reason: message }); const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot)/.test(message) ? message : "Operation failed."; return failure(publicMessage); } }; }
+  private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>) => Promise<unknown>) { return async (args: z.infer<z.ZodObject<T>>) => { try { return result(await fn(args)); } catch (error) { const message = error instanceof Error ? error.message : "Operation failed."; const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error"; await this.audit("operation.rejected", { user, reason }); const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot)/.test(message) ? message : "Operation failed."; return failure(publicMessage); } }; }
   server(user: string): McpServer {
     const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" });
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
