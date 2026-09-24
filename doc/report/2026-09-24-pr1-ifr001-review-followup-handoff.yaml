@@ -1,0 +1,215 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: review-follow-up
+  generated_at: 2026-09-24T12:47:03+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-IFR-001
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+
+target:
+  source_reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  work_start_head: 6397a6ad3a854e29802ae412c4877f18bb0ae902
+  technical_head: 3a66f444a91e05f1667a7ca258c377679b23fbfc
+  current_head: 3a66f444a91e05f1667a7ca258c377679b23fbfc
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  machine_name: FA780
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: 3a66f444a91e05f1667a7ca258c377679b23fbfc
+  source_state: report_handoff_pending
+  ownership: current_task
+
+authoritative_requirements:
+  - source: independent_review
+    reference: RDMCP-IFR-001
+    severity: high
+    summary: Define an OS-enforced boundary between protected RemoteDesktopMCP settings and commands/descendants started through process_start.
+  - source: user_instruction
+    reference: current chat
+    summary: Address the review finding.
+  - source: user_instruction
+    reference: prior current-task guidance
+    summary: Prioritize natural Japanese and surface whitelist candidates instead of using formatting workarounds.
+  - source: project_instruction
+    reference: RemoteDesktopMCP
+    summary: Use RDC for git, GitHub connector for PR operations, save detailed report and handoff, exact-head CI only, and do not merge.
+
+development_policy:
+  method: documentation-validation
+  testing_order: design change followed by focused and full repository validation
+
+scope:
+  - Separate protected settings management from Desktop Commander command execution using different OS users.
+  - Protect settings, secrets, logs, boundary configuration, service configuration, and executables with OS access control.
+  - Prevent management environment variables and handles from reaching Desktop Commander commands and descendants.
+  - Forbid same-user fallback and require process_start to be unavailable when the boundary cannot be verified.
+  - Define deployment-time positive and negative tests using the real deployment identities.
+  - Preserve Desktop Commander reuse.
+
+non_goals:
+  - Implement the worker/service runtime in product code.
+  - Perform real cross-account acceptance tests before the runtime exists.
+  - Change RDMCP-R8 review status.
+  - Merge PR #1.
+
+files:
+  changed:
+    - path: doc/design/functional-requirements.md
+      purpose: Make OS-user separation and process_start refusal mandatory.
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Define control/execution identities, execution worker, protected resources, environment isolation, startup checks, and deployment tests.
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: Bind OAuth/user settings and tokens to the management identity and exclude the execution identity.
+    - path: tools/lint/markdown-whitelist.yaml
+      purpose: Allow ordinary security and OS terminology used by the design.
+    - path: doc/report/2026-09-24-pr1-ifr001-review-followup.md
+      purpose: Detailed implementation-side response report.
+    - path: doc/report/2026-09-24-pr1-ifr001-review-followup-handoff.yaml
+      purpose: Continuation packet for review.
+
+implementation:
+  outcome: design_fix_completed
+  commits:
+    - sha: 3a66f444a91e05f1667a7ca258c377679b23fbfc
+      purpose: Define process execution privilege boundary.
+  addressed_findings:
+    - id: RDMCP-IFR-001
+      severity: high
+      reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+      disposition: addressed_pending_review
+      evidence:
+        - RemoteDesktopMCP management and Desktop Commander execution use different OS users.
+        - The execution identity is non-administrator and has only workspace/scratch access.
+        - Protected settings, PSKs, tokens, audit logs, DATA_DIR, service settings, executable paths, and boundary configuration are denied to the execution identity by OS access control.
+        - The execution worker launches Desktop Commander under the restricted identity; the management process never launches unrestricted commands directly.
+        - Worker/Desktop Commander environments are constructed without inheriting management secrets.
+        - Management communication handles are not inherited by commands or descendants.
+        - allowedDirectories and command deny lists are explicitly defense-in-depth, not the security boundary.
+        - process_start is unavailable when the boundary cannot be verified; no same-user/direct fallback is allowed.
+        - Deployment tests cover allowed workspace operations and denied access via shells, interpreters, redirection, descendants, symlinks/junctions, environment leakage, and boundary configuration modification.
+
+whitelist:
+  added_candidates:
+    - Windows
+    - Administrators
+    - PowerShell
+    - Node.js
+    - インタープリター
+    - グループ
+    - シェル
+    - シェルコマンド
+    - ジャンクション
+    - シンボリックリンク
+    - スクリプト
+    - ダミー
+    - ダミーファイル
+    - デバッグ
+    - バックアップ
+    - ハンドル
+    - リンク
+    - ワーカー
+  considered_not_added:
+    - term: マシン
+      reason: PC全体で共有される環境変数という表現の方が明確だった。
+  unknown_terms_after_update: 0
+  formatting_workaround_used: false
+
+validation:
+  diagnostics_path: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-ifr001-diagnostics-20260924
+  lint:
+    command: npm run lint
+    result: passed
+    evidence: markdownlint 23 files, 0 issues; terminology lint passed
+  check:
+    command: npm run check
+    result: passed
+  build:
+    command: npm run build
+    result: passed
+  audit:
+    command: npm audit --audit-level=low
+    result: passed
+    evidence: 0 vulnerabilities
+  diff_check:
+    command: git diff --check
+    result: passed
+  terminology_candidates:
+    command: node scripts/check-markdown-whitelist.mjs --list-unknown --files doc/design/functional-requirements.md doc/design/multi-pc-architecture.md doc/design/tailscale-funnel-architecture.md
+    result: passed
+    evidence: 0 unknown terms
+  publication_candidate:
+    result: passed
+    evidence:
+      - npm run lint: 24 Markdown files, 0 issues, terminology lint passed
+      - handoff YAML parse passed
+      - npm run check passed
+      - npm run build passed
+      - npm audit --audit-level=low passed with 0 vulnerabilities
+      - git diff --check passed
+
+failure_diagnostics:
+  - type: local_logs
+    location: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-ifr001-diagnostics-20260924
+    summary: stdout, stderr, and result files for lint/check/build/audit/diff/terminology validation.
+  - type: workflow_artifact_policy
+    location: .github/workflows/lint.yml
+    summary: always uploads npm install/lint stdout, stderr, results, SHA, and environment information.
+
+ci:
+  required: true
+  final_publication_head: pending
+  exact_head_run_id: null
+  conclusion: pending
+  rule: only a workflow run whose head_sha equals the final PR current HEAD may be used
+
+review:
+  mode: pending_fix_verification
+  source_review: independent_final_review
+  source_finding: RDMCP-IFR-001
+  severity: high
+  requested_scope:
+    - Verify OS-user separation is mandatory and cannot fall back to unrestricted same-user execution.
+    - Verify protected settings, secrets, logs, service configuration, and boundary-defining files are outside the execution identity permissions.
+    - Verify management secrets/environment/handles do not reach Desktop Commander commands or descendants.
+    - Verify actual deployment acceptance criteria cover shell/interpreter/redirection/descendant/link access attempts and hash preservation.
+    - Verify coordinator-as-executor uses the same boundary.
+    - Verify Desktop Commander reuse remains intact.
+    - Verify RDMCP-R8 rules were not regressed.
+
+remaining_risks:
+  - Runtime worker/service and OS ACL enforcement are not implemented yet.
+  - Cross-account acceptance tests can only run after the runtime boundary is implemented.
+  - RDMCP-R8 normal-review fix verification remains pending.
+  - Independent closure of RDMCP-IFR-001 remains pending.
+
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Normal reviewer should verify RDMCP-R8 and the RDMCP-IFR-001 design response; the independent reviewer should later close its own finding.
+  instructions:
+    - Re-resolve PR #1 current HEAD after publication.
+    - Preserve RDMCP-IFR-001 severity as High.
+    - Confirm no semantic regression in RDMCP-R1 through RDMCP-R8.
+    - Use only exact-head CI evidence matching the final current HEAD.
+    - Do not merge.
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-24-pr1-ifr001-review-followup-handoff.yaml
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user
