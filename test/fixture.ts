@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -62,4 +62,25 @@ export async function mcp(service: RemoteDesktopService, user = "owner@example.t
 
 export async function absent(file: string): Promise<void> {
   await assert.rejects(import("node:fs/promises").then(({ access }) => access(file)));
+}
+
+/** Capture a current config identity before selecting a private pin. Startup may
+ * legitimately prune sole-link pins after Commander rewrites config.json. */
+export async function captureProtectedConfigPin(service: RemoteDesktopService, data: string, alias?: string): Promise<string> {
+  const capture = (service as unknown as { rememberProtectedConfigIdentity: () => Promise<void> }).rememberProtectedConfigIdentity.bind(service);
+  await capture();
+  const directory = path.join(data, "transfers", "protected-config-pins");
+  const identities = (service as unknown as { protectedConfigIdentities: Map<string, unknown> }).protectedConfigIdentities;
+  const candidates = await Promise.all((await readdir(directory)).map(async (name) => {
+    const pin = path.join(directory, name);
+    return { pin, info: await stat(pin, { bigint: true }) };
+  }));
+  const selected = candidates.find(({ info }) => info.isFile() && identities.has(`${info.dev}:${info.ino}`));
+  assert.ok(selected, "a serialized config capture must retain a verified private pin");
+  if (alias) {
+    await link(selected.pin, alias);
+    const aliasInfo = await stat(alias, { bigint: true });
+    assert.equal(`${aliasInfo.dev}:${aliasInfo.ino}`, `${selected.info.dev}:${selected.info.ino}`, "the alias must retain the captured private pin identity");
+  }
+  return selected.pin;
 }

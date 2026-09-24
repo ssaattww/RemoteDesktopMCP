@@ -7,7 +7,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { configFromEnv, createApp, RemoteDesktopService } from "../src/index.js";
-import { absent, fixture, mcp } from "./fixture.js";
+import { absent, captureProtectedConfigPin, fixture, mcp } from "./fixture.js";
 
 const sha256 = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const old = () => Date.now() - 31 * 60_000;
@@ -154,13 +154,7 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     const historicalAlias = path.join(f.root, "config-historical-alias.json");
     const replacement = `${protectedPath}.replacement`;
     const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
-    const initialPins = await readdir(pinDirectory);
-    assert.ok(initialPins.length > 0, "initialization must retain a private protected-config pin");
-    const retainedInitialPin = path.join(pinDirectory, initialPins[0]!);
-    await link(retainedInitialPin, historicalAlias);
-    const initialPinIdentity = await stat(retainedInitialPin, { bigint: true });
-    const historicalIdentity = await stat(historicalAlias, { bigint: true });
-    assert.equal(`${historicalIdentity.dev}:${historicalIdentity.ino}`, `${initialPinIdentity.dev}:${initialPinIdentity.ino}`, "A must be an alias of an actually retained private pin");
+    await captureProtectedConfigPin(service, f.data, historicalAlias);
     await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the known protected A inode before replacement", f.data, service, historicalAlias);
 
     // Stop Desktop Commander before manually replacing config.json.  Its asynchronous
@@ -227,12 +221,7 @@ test("DR003: a config replacement during pin linking preserves known history and
   try {
     const protectedPath = configFile(f.data);
     const knownAlias = path.join(f.root, "config-known-before-race.json");
-    const existingPins = await readdir(path.join(f.data, "transfers", "protected-config-pins"));
-    assert.ok(existingPins.length > 0, "the pre-race A alias must derive from a retained private pin");
-    const retainedA = path.join(f.data, "transfers", "protected-config-pins", existingPins[0]!);
-    await link(retainedA, knownAlias);
-    const [retainedAIdentity, knownAliasIdentity] = await Promise.all([stat(retainedA, { bigint: true }), stat(knownAlias, { bigint: true })]);
-    assert.equal(`${retainedAIdentity.dev}:${retainedAIdentity.ino}`, `${knownAliasIdentity.dev}:${knownAliasIdentity.ino}`, "the pre-race A alias must retain its exact pinned identity");
+    await captureProtectedConfigPin(f.service, f.data, knownAlias);
     api = await mcp(f.service);
     const knownSession = await openSession(api);
     await expectRejected(api.call("file_read", { session_id: knownSession, root_id: "files", relative_path: "config-known-before-race.json" }), "the known config inode before the pin-link race", f.data, f.service);
@@ -287,11 +276,10 @@ test("DR003: exact bigint identity keys distinguish adjacent unsafe ids while pr
     const secondExact = identityService.identityFromStats({ dev: 1n, ino: BigInt(secondUnsafe) });
     assert.notEqual(identityService.identityKey(firstExact), identityService.identityKey(secondExact), "protected identity keys must retain bigint precision");
 
-    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
-    const pin = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
     const protectedAlias = path.join(f.root, "config-exact-identity-alias.json");
     const ordinary = path.join(f.root, "ordinary-exact-identity.txt");
-    await Promise.all([link(pin, protectedAlias), writeFile(ordinary, "ordinary bigint identity file")]);
+    const pin = await captureProtectedConfigPin(f.service, f.data, protectedAlias);
+    await writeFile(ordinary, "ordinary bigint identity file");
     const [pinInfo, ordinaryInfo] = await Promise.all([stat(pin, { bigint: true }), stat(ordinary, { bigint: true })]);
     const pinIdentity = identityService.identityFromStats(pinInfo);
     const ordinaryIdentity = identityService.identityFromStats(ordinaryInfo);
@@ -318,9 +306,8 @@ test("DR003: protected identity manifests accept safe legacy values and fail clo
     assert.equal(identityService.validLegacyIdentity({ dev: 1, ino: 2 }), true, "safe integer records retain a migration path");
     assert.equal(identityService.validLegacyIdentity({ dev: Number.MAX_SAFE_INTEGER + 1, ino: 2 }), false, "unsafe numeric records are ambiguous and must fail closed");
 
+    const pin = await captureProtectedConfigPin(f.service, f.data);
     await f.service.close();
-    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
-    const pin = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
     const manifest = path.join(f.data, "transfers", "protected-config-identities.json");
     const unsafeManifest = JSON.stringify([{ dev: Number.MAX_SAFE_INTEGER + 1, ino: 2, pin }]);
     await writeFile(manifest, unsafeManifest);

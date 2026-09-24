@@ -6,7 +6,7 @@ Requested: gpt-5.6-terra / high, explicit user implementation override. Fresh bo
 
 ## Fixtures and findings matrix
 
-`test/fixture.ts` creates a uniquely named, bounded temporary root and DATA_DIR for every composition fixture. It closes the MCP client, service, and Desktop Commander process before removing that exact directory. A referenced fixture timer remains alive until `service.close()` resolves; Node 22 otherwise treats the SDK close promise as pending after its unreferenced fallback timer is the only remaining handle.
+`test/fixture.ts` creates a uniquely named, bounded temporary root and DATA_DIR for every composition fixture. It closes the MCP client, service, and Desktop Commander process before removing that exact directory. A referenced fixture timer remains alive until `service.close()` resolves; Node 22 otherwise treats the SDK close promise as pending after its unreferenced fallback timer is the only remaining handle. Its shared protected-config helper serializes `rememberProtectedConfigIdentity()` before selecting a private pin, verifies that pin is present in the protected map with bigint device/inode identity, and verifies any created alias has that exact identity. This avoids assuming startup retains a sole-link pin after Commander legitimately rewrites and final-prunes config history.
 
 | Finding | Regression coverage |
 | --- | --- |
@@ -94,3 +94,15 @@ Final frozen local command:
 `npx.cmd --yes --package=node@22.23.3 node node_modules/tsx/dist/cli.mjs --test test/**/*.test.ts`
 
 It was awaited through its shell session to completion and exited 0: 24 passed; 0 failed, cancelled, skipped, or todo; duration 75.635 seconds. This is local Windows evidence only; remote CI is still the required evidence for CI-scoped closure.
+
+## Captured-pin fixture lifecycle correction
+
+CI run `36046213583` passed all 24 Ubuntu tests. The matching Windows job passed 23/24 and failed only the bigint identity fixture because it selected `readdir(protected-config-pins)[0]` after initialization. On that host, Commander had rewritten config and the final prune correctly removed all sole-link pins. This was a fixture lifecycle assumption, not a product regression.
+
+Every fixture that needs a private config pin now calls the shared serialized capture helper before selecting or linking a pin. The helper requires a map-backed pin to exist and checks bigint identity equality for every alias; no rejection assertion was skipped or relaxed.
+
+Final frozen local command:
+
+`npx.cmd --yes --package=node@22.23.3 node node_modules/tsx/dist/cli.mjs --test test/**/*.test.ts`
+
+It was awaited through its shell session to completion and exited 0: 24 passed; 0 failed, cancelled, skipped, or todo; duration 79.391 seconds. This is local Windows evidence; CI closure still depends on the matching remote evidence.

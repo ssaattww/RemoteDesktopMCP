@@ -4,7 +4,7 @@ import { link, readFile, readdir, rename, stat, unlink, writeFile } from "node:f
 import path from "node:path";
 import test from "node:test";
 import { RemoteDesktopService, type ProcessAdapter } from "../src/index.js";
-import { absent, fixture, mcp } from "./fixture.js";
+import { absent, captureProtectedConfigPin, fixture, mcp } from "./fixture.js";
 
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const configPath = (data: string) => path.join(data, "desktop-commander-home", ".claude-server-commander", "config.json");
@@ -39,11 +39,8 @@ test("RDMCP-MVP-IFR-002: live config history prunes past 64 versions without los
     const protectedConfig = configPath(f.data);
     const alias = path.join(f.root, "known-config-alias.json");
     const ordinary = path.join(f.root, "ordinary-history.txt");
-    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
-    const retainedPin = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
-    await Promise.all([link(retainedPin, alias), writeFile(ordinary, "ordinary history file")]);
-    const [pinIdentity, aliasIdentity] = await Promise.all([stat(retainedPin, { bigint: true }), stat(alias, { bigint: true })]);
-    assert.equal(`${pinIdentity.dev}:${pinIdentity.ino}`, `${aliasIdentity.dev}:${aliasIdentity.ino}`, "the known history alias must derive from a retained private pin");
+    await captureProtectedConfigPin(f.service, f.data, alias);
+    await writeFile(ordinary, "ordinary history file");
     let session = await openSession(api);
     await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "known-config-alias.json" }));
     assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-history.txt" })).output), /ordinary history file/);
@@ -70,11 +67,9 @@ test("RDMCP-MVP-IFR-002: real pin-link replacements settle or fail closed within
   const f = await fixture(); let stable: RemoteDesktopService | undefined; let stableApi: Awaited<ReturnType<typeof mcp>> | undefined;
   const unstableFixture = await fixture(); let unstable: RemoteDesktopService | undefined;
   try {
-    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
-    const retainedA = path.join(pinDirectory, (await readdir(pinDirectory))[0]!);
     const aliasA = path.join(f.root, "retry-known-a.json");
     const aliasB = path.join(f.root, "retry-known-b.json");
-    await link(retainedA, aliasA);
+    await captureProtectedConfigPin(f.service, f.data, aliasA);
     await f.service.close();
 
     let settledReplacements = 0;
