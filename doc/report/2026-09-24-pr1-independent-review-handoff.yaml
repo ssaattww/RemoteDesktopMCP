@@ -1,0 +1,570 @@
+schema_version: 3
+producer:
+  skill: chat-handoff-manager
+  mode: independent_final_review
+  generated_at: 2026-09-24T11:39:07+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "#1"
+task_id: null
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target: &a4
+  current_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  commit_range: 759f6c429cdaabb47cbdd16d2e4acda5eaa69041..99f2fd2a084156951db5f036d4bf01f79aded3e5
+execution_environment: &a1
+  kind: connected_computer
+  tool: Remote_Desktop_Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-20260924-1121
+  repository: ssaattww/RemoteDesktopMCP
+  branch: detached
+  head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  source_state: snapshot
+  source_fingerprint: git-tree:c4c392cd80666b06a0bc2bd836b29a522adbefc1
+  ownership: current_task
+  writable_paths:
+    - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-20260924-1121
+    - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121
+  dependencies:
+    - name: Node.js v24.20.0 / npm 11.19.0
+      status: available
+      evidence: validation stdout and results.json
+    - name: Desktop Commander 0.2.50
+      status: available
+      evidence: npm pack --ignore-scripts; dependency-probe.results.json
+  evidence:
+    - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\identity.json
+    - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\source-manifest.json
+verification: &a5
+  capability: local_execution_available
+  capability_evidence:
+    - "FA780 isolated clone: exact source hash matched before and after execution"
+  technical_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  administrative_parent: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  commit:
+    state: commit_pending
+    review_target_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  push:
+    state: push_pending
+    head_sha: unknown
+  ci_wait:
+    state: ci_wait_completed
+    required_for: route_verification
+  final_publication:
+    sequence: not_applicable
+    pr_action: update
+authoritative_requirements: &a6
+  - source: user_instruction
+    reference: current user message
+    summary: "#1 独立レビュー。実装の修正ではなく独立したレビューを行う。"
+  - source: design
+    reference: doc/design/functional-requirements.md:14-15,88-99
+    summary: 許可ユーザー設定はローカルでのみ変更し、プロセス実行はDesktop Commanderへ委譲する。
+development_policy: &a7
+  method: review only
+  testing_order: source identity; design and dependency review; isolated verification; report
+  governing_source: CodexSkill@89c2bc6d1a9bdf2797770a70331d5b0723cf92b7
+validation_plan: &a8
+  commands:
+    - npm.cmd ci
+    - npm.cmd run lint
+    - npm.cmd run check
+    - npm.cmd run build
+    - npm.cmd audit --audit-level=low
+    - git diff --check 759f6c429cdaabb47cbdd16d2e4acda5eaa69041 HEAD
+    - node --experimental-vm-modules dependency-probe.mjs
+  required_failure_diagnostics:
+    - exact HEAD and source hashes
+    - stdout and stderr
+    - exit code
+    - dependency version and stub disclosure
+blocked: &a2 []
+authorized_actions: &a9
+  - read_repository
+  - write_report
+  - write_handoff
+  - commit
+  - push
+  - comment_pr
+write_boundary: &a10
+  allowed:
+    - path_or_operation: doc/report/2026-09-24-pr1-independent-review.md
+      reason: independent review report
+    - path_or_operation: doc/report/2026-09-24-pr1-independent-review-handoff.yaml
+      reason: lossless review handoff
+    - path_or_operation: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121
+      reason: isolated evidence only
+    - path_or_operation: "PR #1 comment"
+      reason: publish review result
+  forbidden:
+    - path_or_operation: product/design/workflow/config changes
+      reason: independent reviewer; not implementation worker
+    - path_or_operation: other task sessions and original worktree
+      reason: not owned by this review
+    - path_or_operation: merge or force push
+      reason: not authorized
+scope: &a11
+  - current design documents and direct implementation/configuration dependencies
+  - R1-R8 finding history and current contracts
+  - latest readability diff b55f57e..99f2fd2
+  - independent dependency component verification and exact-HEAD CI
+non_goals: &a12
+  - implement fixes
+  - approve scaffold for deployment
+  - change normal reviewer closure state
+  - merge
+files: &a15
+  changed:
+    - path: doc/report/2026-09-24-pr1-independent-review.md
+      purpose: fail review report
+    - path: doc/report/2026-09-24-pr1-independent-review-handoff.yaml
+      purpose: schema-v3 handoff
+  inspected:
+    - path: doc/design/*.md
+      purpose: all three active design documents, entire text and latest before/after diff
+    - path: src/index.ts; src/hash-password.ts
+      purpose: initial implementation and explicitly deferred scope
+    - path: scripts/*.mjs; lint/config files; package.json; .github/workflows/lint.yml
+      purpose: handwritten validation/configuration and diagnostics
+    - path: doc/report/*fix-verification.md; latest implementation reports
+      purpose: finding chain and accurate current evidence
+    - path: Desktop Commander 0.2.50 terminal-manager, command-manager, improved-process-tools, schemas
+      purpose: actual dependency contracts
+  intentionally_untouched:
+    - path_or_area: all pre-existing tracked files
+      reason: review-only task; source manifest unchanged
+    - path_or_area: original worktree / unrelated process sessions
+      reason: isolation
+commands: &a16
+  - command: npm.cmd ci
+    purpose: install
+    exit_code: 0
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\install.stdout.log
+    execution_environment: *a1
+    source_fingerprint: git-tree:c4c392cd80666b06a0bc2bd836b29a522adbefc1
+  - command: npm.cmd run lint
+    purpose: lint
+    exit_code: 0
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\lint.stdout.log
+    execution_environment: *a1
+    source_fingerprint: git-tree:c4c392cd80666b06a0bc2bd836b29a522adbefc1
+  - command: npm.cmd run check
+    purpose: check
+    exit_code: 0
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\check.stdout.log
+    execution_environment: *a1
+    source_fingerprint: git-tree:c4c392cd80666b06a0bc2bd836b29a522adbefc1
+  - command: npm.cmd run build
+    purpose: build
+    exit_code: 0
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\build.stdout.log
+    execution_environment: *a1
+    source_fingerprint: git-tree:c4c392cd80666b06a0bc2bd836b29a522adbefc1
+  - command: npm.cmd audit --audit-level=low
+    purpose: audit
+    exit_code: 0
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\audit.stdout.log
+    execution_environment: *a1
+    source_fingerprint: git-tree:c4c392cd80666b06a0bc2bd836b29a522adbefc1
+  - command: git diff --check 759f6c429cdaabb47cbdd16d2e4acda5eaa69041 HEAD
+    purpose: diff-check
+    exit_code: 0
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\diff-check.stdout.log
+    execution_environment: *a1
+    source_fingerprint: git-tree:c4c392cd80666b06a0bc2bd836b29a522adbefc1
+  - command: node --experimental-vm-modules dependency-probe.mjs
+    purpose: actual dependency component probe, not full product E2E
+    exit_code: 0
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\dependency-probe.results.json
+    execution_environment: *a1
+    source_fingerprint: dependency hashes in probe results
+tests: &a17
+  - name: dependency process boundary/output component probe
+    phase: verification
+    result: passed
+    head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    evidence: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\dependency-probe.results.json
+ci: &a18
+  required: true
+  workflow: lint
+  run_id: 35941652910
+  head_sha: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  conclusion: success
+  artifacts:
+    - id: 10785335981
+      name: lint-diagnostics-99f2fd2a084156951db5f036d4bf01f79aded3e5
+      purpose: success/failure diagnostics; existence and SHA verified, ZIP contents not inspected
+implementation:
+  outcome: not_applicable
+  final_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  commits: *a2
+  addressed_findings: *a2
+  failure_diagnostics:
+    - type: other
+      location: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\dependency-probe.results.json
+      summary: security-boundary evidence; no product fix performed
+  blocked_items: *a2
+  summary:
+    - review-only; product/design unchanged
+review: &a13
+  mode: independent_final_review
+  reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  reviewer:
+    identity: PR1-independent-chat-20260924-1118
+    role: independent_final_reviewer
+    continuity:
+      previous_reviewer_identity: null
+      changed: false
+      reason: initial independent review
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: false
+      inherited_conversation: false
+      evidence:
+        - fresh user-requested independent review; existing source untouched
+  verdict: fail
+  required_coverage:
+    - criterion: requirements/design
+      disposition: checked_finding
+      evidence: RDMCP-IFR-001
+    - criterion: correctness/edge cases
+      disposition: checked_finding
+      evidence: same-identity process execution reaches protected data
+    - criterion: scope
+      disposition: checked_no_finding
+      evidence: scaffold is explicitly deferred
+    - criterion: changed files/direct dependencies
+      disposition: checked_finding
+      evidence: active design and actual 0.2.50 modules
+    - criterion: API/config/workflow
+      disposition: checked_finding
+      evidence: output contract confirmed; configuration boundary insufficient
+    - criterion: errors/diagnostics
+      disposition: checked_finding
+      evidence: isolation-unavailable rejection must be specified
+    - criterion: security/secrets
+      disposition: checked_finding
+      evidence: file access and environment inheritance
+    - criterion: tests/validation
+      disposition: checked_finding
+      evidence: deployment-identity boundary acceptance cases required
+    - criterion: exact-HEAD CI
+      disposition: checked_no_finding
+      evidence: push run 35941652910 success
+    - criterion: wording/report accuracy
+      disposition: checked_no_finding
+      evidence: all active document text and 469-line latest diff read
+    - criterion: regression/maintainability
+      disposition: checked_finding
+      evidence: R8 constraints retained; independent security gap
+    - criterion: deployment E2E
+      disposition: held
+      evidence: design-stage implementation pending; no deployment approval
+  independent_closure:
+    initial_independent_reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    closure_reviewed_heads: *a2
+    reviewer_continuity: continue this independent chat for bounded closure after normal verification
+    closure_scope:
+      - finding_or_ci_delta: RDMCP-IFR-001 and resulting change/CI delta
+    completeness_matrix: *a2
+  validation_assessment:
+    - item: mechanical validation
+      result: supported
+      evidence: all six commands exit 0; exact source unchanged
+    - item: security boundary
+      result: failed
+      evidence: RDMCP-IFR-001; dependency probe is not full product E2E
+    - item: R8 design requirements
+      result: supported
+      evidence: multi-pc-architecture.md:442-458 and both interleaving cases; normal closure unchanged
+    - item: live OAuth/node/process composition
+      result: unavailable
+      evidence: design-stage implementation pending
+  reserved_report_paths: &a3
+    - doc/report/2026-09-24-pr1-independent-review.md
+  report_attestation:
+    allowed: false
+    reviewed_implementation_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+    allowed_paths: *a2
+    required_first_parent: null
+    maximum_commits_after_reviewed_head: null
+    forbidden_path_classes:
+      - product
+      - design
+      - workflow
+      - configuration
+      - skill
+      - tracking
+    no_later_commits_required: not_applicable
+    validation_status: not_applicable
+    validation_evidence:
+      - fail report; no passing attestation
+  summary:
+    - "fail: High 1 new finding"
+    - R8 design contract and readability preserved; normal reviewer state unchanged
+report: &a22
+  report_type: independent_final_review_report
+  outcome: created
+  persistence_mode: repository_file
+  paths: *a3
+  reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  attestation_head: null
+  pr_comments: *a2
+  summary:
+    - detailed finding, actual evidence and limits, previous finding continuity, coverage, CI and next action;
+      publication pending
+findings: &a14
+  - id: RDMCP-IFR-001
+    severity: high
+    origin: introduced_by_change
+    location: functional-requirements.md:14-15,88-99; tailscale-funnel-architecture.md:148-158,190-196;
+      multi-pc-architecture.md:215-225
+    description: ローカル専用設定を、process_startのシェルと子孫プロセスから守る必須の実行権限境界が未定義。直近の文章変更以前から存在するPR全体の問題。
+    impact: 同一OSユーザーでの実行を許す現在の設計では、許可ユーザー設定・ノード登録・秘密情報・監査ログへリモートコマンドから到達し得る。未認証侵入や実データ改変を再現したものではない。
+    evidence: 固定版0.2.50の実モジュールで、allowedDirectories外のダミー設定を読み書きし、親のダミー秘密環境変数を取得した。設定取得・テレメトリー・表示用検出などは差し替え、実際のシェル起動と禁止コマンド検査を実行した。別OS主体のACLを突破した試験ではない。
+    required_action: 設定管理主体とコマンド・子孫の強制的な実行境界を具体化する。秘密の環境/ハンドル/管理接続を継承せず、保護設定や実行経路の変更で解除できない条件、隔離不能時の拒否、実配備の主体での許可/拒否試験を定義する。統括と実行を兼ねる場合も必須。禁止コマンド、cwd、管理ツール非公開だけで完了としない。
+held: &a19
+  - item: live OAuth/node integration and process lock tests
+    reason: not implemented in design-stage target
+    owner: implementation worker
+    remaining_risk: runtime correctness and deployment readiness not established
+    verdict_impact: no deployment approval; independent verdict already fail
+unexplored: &a20
+  - area: all duplicated historical handoff payloads and every generated lockfile line
+    blocker: supplementary archival/generated data; not repeated semantic audit
+    remaining_risk: historical duplicate metadata not exhaustively re-audited
+    verdict_impact: does not remove independently demonstrated current design finding
+unknown:
+  - field_or_fact: publication commit and comment ID
+    reason: generated before connector publication; final PR comment records resulting SHA
+not_applicable:
+  - field_or_area: tasks/tasks-status.md
+    reason: not present in repository
+  - field_or_area: passing report attestation
+    reason: verdict fail
+remaining_risks: &a21
+  - RDMCP-IFR-001 remains open
+  - R8 original normal-review closure not replaced
+  - product scaffold is not authorized for deployment
+  - new report-publication HEAD CI must not be inferred from reviewed HEAD CI
+source_payloads:
+  - source_skill: work-context-manager
+    output_contract_version: observed 89c2bc6
+    content_type: application/json
+    payload:
+      repository: ssaattww/RemoteDesktopMCP
+      issue_or_pr: "#1"
+      task_id: null
+      branch: feat/tailscale-funnel-design-lint
+      base_ref: main
+      target: *a4
+      execution_environment: *a1
+      verification: *a5
+      authoritative_requirements: *a6
+      development_policy: *a7
+      validation_plan: *a8
+      blocked: *a2
+      authorized_actions: *a9
+      write_boundary: *a10
+      scope: *a11
+      non_goals: *a12
+  - source_skill: review-worker
+    output_contract_version: observed 89c2bc6
+    content_type: application/json
+    payload:
+      review: *a13
+      findings: *a14
+      files: *a15
+      commands: *a16
+      tests: *a17
+      ci: *a18
+      held: *a19
+      unexplored: *a20
+      remaining_risks: *a21
+      reserved_report_paths: *a3
+      next_action: &a23
+        type: design_rework
+        target_skill: implementation-worker
+        mode: null
+        summary: define enforceable command execution boundary; normal verification then same independent bounded
+          closure
+        instructions:
+          - 設定管理主体とコマンド・子孫の強制的な実行境界を具体化する。秘密の環境/ハンドル/管理接続を継承せず、保護設定や実行経路の変更で解除できない条件、隔離不能時の拒否、実配備の主体での許可/拒否試験を定義する。統括と実行を兼ねる場合も必須。禁止コマンド、cwd、管理ツール非公開だけで完了としない。
+          - obtain normal reviewer verification including pending R8 before independent closure
+          - recheck current HEAD, connection, ownership and authorization; do not inherit machine/write permissions
+            automatically
+        required_attachments_or_references:
+          - doc/report/2026-09-24-pr1-independent-review.md
+          - doc/report/2026-09-24-pr1-independent-review-handoff.yaml
+          - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\dependency-probe.results.json
+        requested_authorized_actions:
+          - read_repository
+          - edit_documentation
+          - write_report
+          - write_handoff
+          - commit
+          - push
+          - comment_pr
+  - source_skill: report-writer
+    output_contract_version: observed 89c2bc6
+    content_type: application/json
+    payload:
+      report: *a22
+      reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+      report_sha256: 74b0ae2e42ee602cefa34aad6ca0c3cf0b071f65d4dd3103c420a7ab9c359e32
+      pr_publication: pending
+      report_attestation_allowed: false
+extensions:
+  - namespace: rdmcp.independent.evidence
+    payload:
+      results:
+        - name: install
+          command: npm.cmd ci
+          exit_code: 0
+          head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+          started_at: 2026-09-24T02:23:43.849295+00:00
+          source_unchanged: true
+        - name: lint
+          command: npm.cmd run lint
+          exit_code: 0
+          head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+          started_at: 2026-09-24T02:23:46.180154+00:00
+          source_unchanged: true
+        - name: check
+          command: npm.cmd run check
+          exit_code: 0
+          head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+          started_at: 2026-09-24T02:23:58.588317+00:00
+          source_unchanged: true
+        - name: build
+          command: npm.cmd run build
+          exit_code: 0
+          head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+          started_at: 2026-09-24T02:23:59.847439+00:00
+          source_unchanged: true
+        - name: audit
+          command: npm.cmd audit --audit-level=low
+          exit_code: 0
+          head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+          started_at: 2026-09-24T02:24:00.906516+00:00
+          source_unchanged: true
+        - name: diff-check
+          command: git diff --check 759f6c429cdaabb47cbdd16d2e4acda5eaa69041 HEAD
+          exit_code: 0
+          head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+          started_at: 2026-09-24T02:24:01.625307+00:00
+          source_unchanged: true
+      dependency_probe:
+        dependency: "@wonderwhy-er/desktop-commander@0.2.50"
+        source_hashes:
+          file:///C:/Users/donabe/Project/RemoteDesktopMCP-pr1-independent-evidence-20260924-1121/dependency/unpacked/package/dist/tools/improved-process-tools.js: 702d972ec92424298315a2bc551bbc9b12c337949f62a84410879576d50235fb
+          file:///C:/Users/donabe/Project/RemoteDesktopMCP-pr1-independent-evidence-20260924-1121/dependency/unpacked/package/dist/terminal-manager.js: d4d0773b79501858be4fd45fcd03066fd98acf8cb969e65f168c89c52ee564c3
+          file:///C:/Users/donabe/Project/RemoteDesktopMCP-pr1-independent-evidence-20260924-1121/dependency/unpacked/package/dist/tools/schemas.js: f342345e34e48769dabaefe1b932f09d41e2e207b422f7794a15ee50ffa8f140
+          file:///C:/Users/donabe/Project/RemoteDesktopMCP-pr1-independent-evidence-20260924-1121/dependency/unpacked/package/dist/command-manager.js: 4d55de79684136a5ff198c0ec52889015eed1242a86900687c9f32dd841416e4
+        substitutions:
+          - configManager (isolated configuration only)
+          - capture (no telemetry)
+          - process-detection (formatting only)
+          - DEFAULT_COMMAND_TIMEOUT
+        actual_modules:
+          - tools/improved-process-tools.js
+          - tools/schemas.js
+          - command-manager.js
+          - terminal-manager.js
+        config:
+          allowedDirectories:
+            - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\probe-files\allowed
+          blockedCommands:
+            - shutdown
+            - format
+            - sudo
+          defaultShell: powershell.exe
+          fileReadLineLimit: 1000
+        started:
+          content:
+            - type: text
+              text: "Process started with PID 14688 (shell: powershell.exe)
+
+                Initial output:
+
+                DUMMY_LOCAL_SETTING\r
+
+                DUMMY_INHERITED_SECRET\r
+
+                STDOUT_MARKER\r
+
+                STDERR_MARKER\r\n"
+        output:
+          content:
+            - type: text
+              text: "[Reading 5 new lines (total: 5 lines)]
+
+
+                DUMMY_LOCAL_SETTING\r
+
+                DUMMY_INHERITED_SECRET\r
+
+                STDOUT_MARKER\r
+
+                STDERR_MARKER\r
+
+
+                ✅ Process completed with exit code 7 (runtime: 0.17s)"
+        completedKill:
+          content:
+            - type: text
+              text: No active session found for PID 14688
+        blocked_command_negative_control:
+          content:
+            - type: text
+              text: "Error: Command not allowed: shutdown"
+          isError: true
+        outside_root_read: true
+        outside_root_write: true
+        environment_inheritance: true
+        combined_output_and_exit: true
+        no_real_configuration_accessed: true
+      skills_hashes:
+        - Path: C:\Users\donabe\Project\CodexSkill\skills\chat-review-worker\SKILL.md
+          Hash: FE2253A7179197DA13682FA10737F4EC32E7ACAF7D3AD0128D6F4953CD0FE71B
+        - Path: C:\Users\donabe\Project\CodexSkill\skills\work-context-manager\SKILL.md
+          Hash: 1003C3FD76BC1D90C8937AC7490C342E4C013B050A776977359CE7C267261F4D
+        - Path: C:\Users\donabe\Project\CodexSkill\skills\review-worker\SKILL.md
+          Hash: 294AFD7816D3CC8727CD933344FF15BBDF47167BE22D9CE6E48C1BC21172BDD1
+        - Path: C:\Users\donabe\Project\CodexSkill\skills\document-wording-review\SKILL.md
+          Hash: 090A4DAD84842EE9A2DDAC2EA2573F83C32EF3F3FFB441CDCB1377838C215818
+        - Path: C:\Users\donabe\Project\CodexSkill\skills\document-wording-review\references\decision-examples.md
+          Hash: 01C85DFAD9A581D4301D73909247308FBAF4EE79DD8460B5630D70667019B564
+        - Path: C:\Users\donabe\Project\CodexSkill\skills\report-writer\SKILL.md
+          Hash: D56A3185FD330995357A8E03643FFDD4F2755533E9E0817BC72452E204EC3299
+        - Path: C:\Users\donabe\Project\CodexSkill\skills\chat-handoff-manager\SKILL.md
+          Hash: 46E534A7E59142DF9C978E2B5EB6959FCB68E76E01C8765E7B5C531D9680C263
+      artifact_digest: sha256:f3927b26c605eccd4f5459935083fa18c85ad36d3edf268c69c14c2fbb5fe388
+      current_source_manifest: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-independent-evidence-20260924-1121\source-manifest.json
+      report_sha256: 74b0ae2e42ee602cefa34aad6ca0c3cf0b071f65d4dd3103c420a7ab9c359e32
+next_action: *a23
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-24-pr1-independent-review-handoff.yaml
+  packet_url: null
+  transport_note: FA780 paths are machine-local, not sandbox attachments. Commit/push status is a prepublication
+    snapshot; final PR comment records publication. Re-resolve access before reuse.
