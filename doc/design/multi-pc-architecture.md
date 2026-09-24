@@ -146,7 +146,7 @@ PSKそのものを接続相手へ送るのではなく、PSKから計算したHM
 4. 照合に成功した実行ノードは、今度は実行ノード用のHMAC値を計算し、統括ノードへ返す。
 5. 統括ノードも受け取ったHMAC値を照合する。双方の照合が成功した場合だけ、認証済みの接続として操作を受け付ける。
 
-`client_nonce` と `server_nonce` は、接続のたびに新しく生成する乱数である。
+`client_nonce` と `server_nonce` は、接続のたびに新しく生成する、暗号学的に安全な乱数である。
 以前の認証メッセージを再送しても、今回のnonceを使った計算結果とは一致しないため受け付けない。
 認証が完了するまでは、ファイル操作、プロセス操作、ノード状態更新を受け付けない。
 照合に失敗した場合は接続を閉じ、リクエストを実行しない。
@@ -180,9 +180,10 @@ rdmcp-node-auth-v1|executor|node_id|client_nonce|server_nonce
 | 入力項目 | 値 |
 | --- | --- |
 | 元になる鍵 | PSK |
-| `salt` | `client_nonce \|\| server_nonce` |
-| 追加情報 | `rdmcp-node-session-v1` |
+| 接続ごとの乱数（`salt`） | `client_nonce \|\| server_nonce` |
+| 鍵の用途を示す追加情報 | `rdmcp-node-session-v1` |
 
+式中の `||` は値を順に連結することを表す。
 接続IDも双方が同じ式で計算する。
 
 ```text
@@ -382,6 +383,12 @@ sequenceDiagram
 
 ## セッションとプロセス
 
+セッションはユーザーの一連の操作を管理するためのもの、論理プロセスIDは起動したプロセスを特定するためのものである。
+セッションが終了しても、そのセッションで起動したプロセスは停止しない。
+プロセスを管理する際は、セッションの有効性とは別に、指定されたIDが現在もそのプロセスを指しているか確認する。
+
+### セッションと起動元の記録
+
 RemoteDesktopMCP のセッションは、MCP の通信セッションや個々の HTTP 接続とは別に統括ノードで管理する。
 `session_open` で生成した `session_id` は、認証済みユーザーが一致し、有効期限内であれば別の HTTP 接続からも継続利用できる。
 ファイル操作とプロセス操作では明示された `session_id` を使い、接続状態からセッションを自動生成したり自動選択したりしない。
@@ -390,6 +397,19 @@ RemoteDesktopMCP のセッションは、MCP の通信セッションや個々�
 遠隔実行ノードへはログを追跡するための `session_id` と `request_id` を渡すが、セッションの作成、期限管理、一覧表示は統括ノードだけが行う。
 プロセスは必ず起動時の `session_id` と起動元ノードに関連付ける。
 異なるPCでは同じ PID が使われることがあるため、外部へ返すプロセスIDは複数PCをまたいで一意になるよう RemoteDesktopMCP が生成する。
+
+### プロセスの識別に使うID
+
+PIDだけでは対象を安全に特定できない。
+異なるPCで同じPIDが使われるほか、同じPCでも終了したプロセスのPIDが別のプロセスに再利用されることがある。
+このため、以下の情報を組み合わせて管理する。
+
+| 名前 | 何を表すか |
+| --- | --- |
+| 論理プロセスID | 利用者が状態確認・出力取得・停止の際に指定する、RemoteDesktopMCP が発行するID |
+| `node_id` | どのPCで起動したか |
+| `desktop_commander_generation` | どの Desktop Commander 接続で起動したかを表す世代ID |
+| `pid` | そのPC上のプロセス番号 |
 
 統括ノードは、外部へ返す論理プロセスIDと、実際の実行先を対応付けて管理する。
 対応表には少なくとも `{ node_id, desktop_commander_generation, pid }` を保持する。
@@ -401,6 +421,23 @@ Desktop Commander の子プロセスまたは `stdio` 接続を作り直した�
 統括ノードとの通信だけが再接続し、Desktop Commander との接続が継続している場合は世代IDを変えない。
 実行ノード自身が再起動した場合も新しい世代IDを生成する。
 実行ノードは現在の世代IDを統括ノードへ通知する。統括ノードが記録している世代IDと異なる場合は、以前の世代に属する実行中プロセスの対応を無効にする。
+
+### 同じPIDが再利用された場合
+
+同じノード、同じ世代、同じPIDに対応する論理プロセスIDは、現在有効なものを1件だけ保持する。
+例えば、古いプロセスAのPIDを新しいプロセスBが使ったとき、Aの論理プロセスIDでBを停止できてはならない。
+そのため、新しいIDを利用者へ返す前に古いIDを無効にする。
+
+`process_start` が成功したら、`{ node_id, desktop_commander_generation, pid }` を `process_key` とし、そのキーに現在有効な論理プロセスIDを最大1件だけ対応付ける。
+実装上、この現在有効なIDを `current_process_owner` として保持する。
+
+新しい `process_start` が既存と同じ `process_key` を返した場合は、新しい論理プロセスIDを利用者へ返す前に、古いIDを `stale`（無効）にする。
+その後、同じロック内で `current_process_owner` を新しい論理プロセスIDへ切り替える。
+論理プロセスID自体は `process_start` 完了前に生成してよいが、切り替えが完了するまでは外部へ返さない。
+
+`process_status`、`process_output`、`process_kill` から Desktop Commander を呼ぶのは、世代IDが現在の値と一致し、かつ指定された論理プロセスIDが `process_key` の `current_process_owner` と一致する場合だけとする。
+どちらかが一致しないIDは `stale`（無効）として扱い、PID を Desktop Commander へ渡さない。
+特に `process_kill` では、無効なIDに対して `force_terminate` を呼び出さない。
 
 ### プロセス操作の排他制御
 
@@ -420,24 +457,19 @@ PID の取得、同じ PID を使っていた古い論理プロセスIDの無効
 終了済みプロセスについて、保存済みの状態や出力だけを返す `process_status` と `process_output` は Desktop Commander を呼び出さないため、このロックは不要とする。
 1つのリクエストで複数の排他単位を同時にロックしない。
 
-`process_start` が成功したら、`{ node_id, desktop_commander_generation, pid }` を `process_key` とし、そのキーに現在有効な論理プロセスIDを最大1件だけ対応付ける。
-実装上、この現在有効なIDを `current_process_owner` として保持する。
-
-新しい `process_start` が既存と同じ `process_key` を返した場合は、新しい論理プロセスIDを利用者へ返す前に、古いIDを `stale`（無効）にする。
-その後、同じロック内で `current_process_owner` を新しい論理プロセスIDへ切り替える。
-論理プロセスID自体は `process_start` 完了前に生成してよいが、切り替えが完了するまでは外部へ返さない。
-
-`process_status`、`process_output`、`process_kill` から Desktop Commander を呼ぶのは、世代IDが現在の値と一致し、かつ指定された論理プロセスIDが `process_key` の `current_process_owner` と一致する場合だけとする。
-どちらかが一致しないIDは `stale`（無効）として扱い、PID を Desktop Commander へ渡さない。
-特に `process_kill` では、無効なIDに対して `force_terminate` を呼び出さない。
+### Desktop Commander との接続が切れた場合
 
 Desktop Commander との接続が切れた場合は、その世代に属する実行中プロセスの対応をすべて `stale`（無効）にし、その世代の `current_process_owner` の対応表も削除する。
 新しい Desktop Commander 接続で同じ PID が使われても、古い論理プロセスIDを新しいプロセスへ対応付け直さない。
+
+### 終了を確認したプロセス
 
 プロセスの終了を確認できた場合は、終了状態、取得済みの統合出力、取得できた終了コードを保存し、実行中プロセスの対応表から外す。
 その論理プロセスIDが `current_process_owner` だった場合は、`current_process_owner` の対応も削除する。
 終了済みプロセスの `process_status` と `process_output` は保存済みの結果から返し、`process_kill` は終了済みとして拒否する。
 終了確認前に Desktop Commander との接続が切れた場合は、終了したと推測せず状態不明とする。
+
+### セッションが終了した場合
 
 RemoteDesktopMCP のセッションが終了または期限切れになっても、それだけを理由に実行中プロセスは停止しない。
 同じユーザーの別の有効なセッションから論理プロセスIDを指定した場合は、上記の世代IDと現在有効なIDの確認を通過した場合だけ、状態確認、出力取得、停止を行えるようにする。
@@ -517,8 +549,45 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 11. RemoteDesktopMCP が拒否するパスや操作は Desktop Commander が許可していても実行されず、Desktop Commander のローカル設定が拒否する操作も実行されない。
 12. Desktop Commander の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
 13. 現在の `src/index.ts` にある直接探索、直接 `spawn`、初期版対象外の直接ファイル取得処理を Desktop Commander の MCP ツール呼び出しへ置き換え、同じローカル操作を RemoteDesktopMCP 側にも重複実装していないことを確認する。
-14. 固定した Desktop Commander バージョンで、stdout と stderr の両方へ識別用の文字列を出す検証用プロセスを実行する。`read_process_output` と RemoteDesktopMCP の `process_output` が両方を1つの統合出力として返すこと、終了状態と取得可能な終了コードを返すこと、stdout / stderr の区分を推測して付けないことを確認する。
-15. 世代 `G1` で起動した論理プロセスIDを保持したまま Desktop Commander を再起動して世代 `G2` に変更する。`G2` で同じ PID のプロセスが存在しても、古い論理プロセスIDの `process_status`、`process_output`、`process_kill` は `stale`（無効）となり、`read_process_output` や `force_terminate` を呼び出さないことを確認する。
-16. 終了を確認したプロセスは実行中プロセスの対応表と `current_process_owner` から外す。その後の `process_status` と `process_output` は保存済みの状態・統合出力・終了コードから返し、`process_kill` は終了済みとして拒否する。
-17. Desktop Commander を再起動せず、同じ世代 `G1` のまま検証用実装から2回の `process_start` に同じ PID `P` を順に返す。1回目の終了を RemoteDesktopMCP がまだ確認していない状態で2回目を開始し、2回目の論理プロセスIDを返す前に1回目を `stale`（無効）にすること、`current_process_owner[{node_id,G1,P}]` が2回目のIDだけを指すこと、1回目のIDから `read_process_output` や `force_terminate` を呼び出さないことを確認する。
-18. 同じ実行ノードの世代 `G1` で、PID `P` に対応する現在有効な論理プロセスIDを A とする。`process_status`、`process_output`、`process_kill` の各操作について、A が先にロックを取得した場合と、並行する `process_start` B が先にロックを取得した場合の両方を検証する。A が先の場合は、A の Desktop Commander 呼び出しと状態更新が終わるまで B が `start_process` を呼べないことを確認する。B が先に同じ PID `P` の新しいIDを登録した場合は、待機していた A がロック取得後の再確認で無効と判定され、`read_process_output` や `force_terminate` を呼び出さないことを確認する。
+
+### プロセス出力の確認
+
+固定した Desktop Commander バージョンで、stdout と stderr の両方へ識別用の文字列を出す検証用プロセスを実行する。
+`read_process_output` と RemoteDesktopMCP の `process_output` について、次を確認する。
+
+- 両方の文字列が1つの統合出力に含まれる。
+- 終了状態と、取得可能な終了コードが返る。
+- stdout / stderr の区分を推測して追加していない。
+
+### Desktop Commander 再起動後のID
+
+世代 `G1` で起動した論理プロセスIDを保持したまま、Desktop Commander を再起動して世代 `G2` に変更する。
+`G2` に同じPIDのプロセスが存在しても、古いIDによる `process_status`、`process_output`、`process_kill` は `stale`（無効）となることを確認する。
+これらの操作から `read_process_output` や `force_terminate` を呼び出してはならない。
+
+### 終了済みプロセスの確認
+
+終了を確認したプロセスが、実行中プロセスの対応表と `current_process_owner` から外れることを確認する。
+その後の `process_status` と `process_output` は、保存済みの状態・統合出力・終了コードから返す。
+`process_kill` は終了済みとして拒否する。
+
+### 再起動せずに同じPIDを再利用した場合
+
+Desktop Commander を再起動せず、世代 `G1` のまま検証する。
+検証用実装から2回の `process_start` に同じPID `P` を順に返す。
+1回目の終了を RemoteDesktopMCP がまだ確認していない状態で、2回目を開始する。
+
+- 2回目の論理プロセスIDを返す前に、1回目のIDが `stale`（無効）になる。
+- `current_process_owner[{node_id,G1,P}]` が2回目のIDだけを指す。
+- 1回目のIDによる状態確認・出力取得・停止から、`read_process_output` や `force_terminate` を呼び出さない。
+
+### プロセス操作が並行した場合
+
+同じ実行ノードの世代 `G1` で、PID `P` に対応する現在有効な論理プロセスIDをAとする。
+Aに対する `process_status`、`process_output`、`process_kill` を、それぞれ新しい `process_start` Bと並行して実行する。
+Bは同じPID `P` を返すものとし、次の両方の順序を確認する。
+
+**Aの操作が先にロックを取得する場合。** Aの Desktop Commander 呼び出しと状態更新が終わるまで、Bは `start_process` を呼び出せない。
+
+**Bが先にロックを取得する場合。** Bが新しいIDを登録した後、待機していたAの操作がロックを取得する。
+Aの操作はロック内の再確認でIDが無効だと判定し、`read_process_output` や `force_terminate` を呼び出さない。
