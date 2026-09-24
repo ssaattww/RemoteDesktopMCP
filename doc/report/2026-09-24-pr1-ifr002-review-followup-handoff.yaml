@@ -1,0 +1,355 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: review-follow-up
+  generated_at: 2026-09-24T22:09:12+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-IFR-002
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+
+target:
+  current_head: 972c28a04b22d0832e8f30217e09e45b119408f8
+  reviewed_head: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+  commit_range: eabe5c9d35becc941c9d38f20bf5dfe92f2e7fc1..972c28a04b22d0832e8f30217e09e45b119408f8
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+  source_state: clean_before_report
+  ownership: current_task
+  writable_paths:
+    - doc/design
+    - tools/lint/markdown-whitelist.yaml
+    - test/execution-boundary/windows
+    - doc/report
+  dependencies:
+    - name: npm
+      status: available
+      evidence: lint/check/build/audit executed successfully.
+    - name: git
+      status: available
+      evidence: commit and push completed through RDC.
+  evidence:
+    - PR #1 current HEAD matched local technical HEAD after push.
+    - tasks/tasks-status.md is absent.
+    - .github/workflows/lint.yml already preserves required diagnostics.
+
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - RDC on FA780 executed repository validation successfully.
+  technical_head: 972c28a04b22d0832e8f30217e09e45b119408f8
+  administrative_parent: 972c28a04b22d0832e8f30217e09e45b119408f8
+  commit:
+    state: committed
+    review_target_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+  push:
+    state: pushed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+  ci_wait:
+    state: ci_wait_pending
+    required_for: route_verification
+  final_publication:
+    sequence: final_push_then_authorized_pr_create_or_update_then_exact_head_pull_request_ci_wait
+    pr_action: update
+
+authoritative_requirements:
+  - source: user_instruction
+    reference: clarified trust model
+    summary: process_start may run with the MCP server OS user's permissions; mandatory separate-user isolation or a new sandbox is excessive.
+  - source: pr
+    reference: RDMCP-IFR-002
+    summary: Make same-OS-user execution the baseline trust model, state file_* directory limits are not a process_start sandbox, and make additional isolation optional.
+  - source: project_instruction
+    reference: RemoteDesktopMCP
+    summary: Use RDC for git, GitHub connector for PR actions, exact-head CI only, persist report/handoff, and do not merge.
+
+development_policy:
+  method: documentation-validation
+  testing_order: focused terminology/markdown validation followed by full lint/check/build/audit/diff gate
+  governing_source: repository/project instructions
+
+validation_plan:
+  commands:
+    - npm run lint
+    - npm run check
+    - npm run build
+    - npm audit --audit-level=low
+    - git diff --check
+    - node scripts/check-markdown-whitelist.mjs --list-unknown --files doc/design/functional-requirements.md doc/design/multi-pc-architecture.md doc/design/tailscale-funnel-architecture.md
+  required_failure_diagnostics:
+    - stdout
+    - stderr
+    - exit result
+    - workflow artifact on CI
+
+authorized_actions:
+  - read_repository
+  - edit_documentation
+  - edit_configuration
+  - write_handoff
+  - write_report
+  - commit
+  - push
+  - update_pr
+  - comment_pr
+
+write_boundary:
+  allowed:
+    - path_or_operation: doc/design/functional-requirements.md
+      reason: Update execution trust model.
+    - path_or_operation: doc/design/multi-pc-architecture.md
+      reason: Remove mandatory execution-worker/isolation design and align validation.
+    - path_or_operation: doc/design/tailscale-funnel-architecture.md
+      reason: Clarify local-setting semantics under arbitrary process_start.
+    - path_or_operation: tools/lint/markdown-whitelist.yaml
+      reason: Remove obsolete isolation-only terms and allow current natural terminology.
+    - path_or_operation: test/execution-boundary/windows
+      reason: Remove fixture that existed only for superseded mandatory isolation.
+    - path_or_operation: doc/report/2026-09-24-pr1-ifr002-review-followup.md
+      reason: Persist detailed implementation report.
+    - path_or_operation: doc/report/2026-09-24-pr1-ifr002-review-followup-handoff.yaml
+      reason: Persist continuation state.
+  forbidden:
+    - path_or_operation: product source
+      reason: RDMCP-IFR-002 is a design mismatch; no runtime implementation is required by the finding.
+    - path_or_operation: .github/workflows/lint.yml
+      reason: Existing workflow already preserves required diagnostics.
+    - path_or_operation: merge
+      reason: Merge is reserved for the user.
+
+scope:
+  - Make same-OS-user process execution the initial product trust model.
+  - State that authenticated allowed users can exercise that OS user's command authority.
+  - State that file_* allowed directories do not sandbox arbitrary process_start commands.
+  - Make separate-user/OS ACL isolation optional.
+  - Remove fail-closed behavior triggered only by absence of optional hardening.
+  - Remove the obsolete mandatory-isolation fixture.
+  - Keep Desktop Commander reuse and existing RDMCP-R8 process identity/concurrency rules.
+
+non_goals:
+  - Add a new sandbox.
+  - Add a mandatory execution worker or Windows service.
+  - Reimplement Desktop Commander operations.
+  - Change OAuth, session, node authentication, or RDMCP-R8 behavior.
+  - Merge PR #1.
+
+files:
+  changed:
+    - path: doc/design/functional-requirements.md
+      purpose: Define same-user execution authority and file-tool/process-start distinction.
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Remove mandatory worker/OS-user isolation and return to direct Desktop Commander delegation.
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: Clarify local settings under the same-user arbitrary-command trust model.
+    - path: tools/lint/markdown-whitelist.yaml
+      purpose: Remove obsolete isolation-only entries; add モデル and ファイルアクセス.
+  intentionally_untouched:
+    - path_or_area: src/
+      reason: Product code is outside this design-only finding.
+    - path_or_area: RDMCP-R8 process locking/generation/current owner rules
+      reason: Latest product-only review found no product issue there.
+    - path_or_area: OAuth/OIDC, session, node selection, PSK/HMAC/HKDF design
+      reason: Latest product-only review found no blocking issue in these areas.
+  changed_by_deletion:
+    - path: test/execution-boundary/windows/Prepare-BoundaryFixture.ps1
+      purpose: Remove mandatory-isolation-only fixture.
+    - path: test/execution-boundary/windows/Probe-BoundaryFixture.ps1
+      purpose: Remove mandatory-isolation-only fixture.
+    - path: test/execution-boundary/windows/README.md
+      purpose: Remove mandatory-isolation-only fixture.
+    - path: test/execution-boundary/windows/Verify-BoundaryFixture.ps1
+      purpose: Remove mandatory-isolation-only fixture.
+
+commands:
+  - command: npm run lint
+    purpose: Full lint gate
+    exit_code: 0
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: markdownlint 27 files / 0 issues; design terminology lint passed
+  - command: npm run check
+    purpose: TypeScript type check
+    exit_code: 0
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: tsc --noEmit passed
+  - command: npm run build
+    purpose: Build validation
+    exit_code: 0
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: tsc build passed
+  - command: npm audit --audit-level=low
+    purpose: Dependency audit
+    exit_code: 0
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: 0 vulnerabilities
+  - command: git diff --check
+    purpose: Whitespace validation
+    exit_code: 0
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: no diff errors
+  - command: node scripts/check-markdown-whitelist.mjs --list-unknown --files doc/design/functional-requirements.md doc/design/multi-pc-architecture.md doc/design/tailscale-funnel-architecture.md
+    purpose: Check terminology candidates
+    exit_code: 0
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: 0 unknown terms
+  - command: publication candidate validation
+    purpose: Validate report/handoff plus technical content before publication commit
+    exit_code: 0
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: npm run lint passed with 28 Markdown files / 0 issues; handoff YAML parse, check, build, audit, and diff-check all passed
+
+tests:
+  - name: documentation validation
+    phase: verification
+    result: passed
+    head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+    evidence: Full repository local gate passed.
+
+ci:
+  required: true
+  workflow: lint
+  run_id: null
+  head_sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+  conclusion: unknown
+  artifacts: []
+
+implementation:
+  outcome: completed
+  final_head: 972c28a04b22d0832e8f30217e09e45b119408f8
+  commits:
+    - sha: 972c28a04b22d0832e8f30217e09e45b119408f8
+      purpose: Align process trust model with clarified product intent.
+  addressed_findings:
+    - id: RDMCP-IFR-002
+      reviewed_head: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+      disposition: addressed
+      evidence: Same-user execution is baseline; file_* limits are not a process_start sandbox; optional isolation is no longer required; obsolete fixture removed.
+  failure_diagnostics:
+    - type: other
+      location: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-ifr002-diagnostics-20260924
+      summary: Local validation stdout/stderr/result files.
+    - type: artifact
+      location: .github/workflows/lint.yml
+      summary: CI uploads install/lint diagnostics for both success and failure.
+  blocked_items: []
+  summary:
+    - RDMCP-IFR-002 addressed without adding a sandbox or runtime worker.
+    - Desktop Commander reuse and prior process identity/concurrency design remain intact.
+
+review:
+  mode: fix_verification
+  reviewed_head: unknown
+  reviewer:
+    identity: pending normal reviewer
+    role: normal_reviewer
+    continuity:
+      previous_reviewer_identity: null
+      changed: false
+      reason: null
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: false
+      inherited_conversation: false
+      evidence:
+        - This implementation chat does not issue its own fix-verification verdict.
+  verdict: incomplete
+  required_coverage:
+    - criterion: RDMCP-IFR-002 same-user trust model
+      disposition: unexplored
+      evidence: Pending normal reviewer.
+  validation_assessment: []
+  reserved_report_paths: []
+  report_attestation:
+    allowed: not_applicable
+    reviewed_implementation_head: null
+    allowed_paths: []
+    required_first_parent: null
+    maximum_commits_after_reviewed_head: null
+    forbidden_path_classes: []
+    no_later_commits_required: not_applicable
+    validation_status: not_applicable
+    validation_evidence: []
+  summary:
+    - Normal fix verification remains the next review action.
+
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-24-pr1-ifr002-review-followup.md
+    - doc/report/2026-09-24-pr1-ifr002-review-followup-handoff.yaml
+  reviewed_head: null
+  attestation_head: null
+  pr_comments: []
+  summary:
+    - Records the RDMCP-IFR-002 review follow-up and validation.
+
+findings: []
+held: []
+unexplored:
+  - area: normal fix verification
+    blocker: implementation chat cannot self-review
+    remaining_risk: RDMCP-IFR-002 closure not yet independently verified
+    verdict_impact: implementation is addressed, review closure pending
+
+unknown:
+  - field_or_fact: exact-head CI after final publication
+    reason: final publication commit does not exist yet
+
+not_applicable:
+  - field_or_area: separate-user execution fixture
+    reason: no longer required by clarified product trust model
+
+remaining_risks:
+  - process_start intentionally grants the authenticated allowed user the authority of the MCP server OS user.
+  - Operators that require less authority must run RemoteDesktopMCP under a lower-privileged OS user or choose optional additional isolation.
+
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Verify RDMCP-IFR-002 against the final publication HEAD.
+  instructions:
+    - Re-resolve PR #1 current HEAD.
+    - Preserve RDMCP-IFR-002 severity as Medium.
+    - Verify same-OS-user execution is the baseline and does not require optional isolation.
+    - Verify file_* allowed-directory behavior is explicitly distinct from process_start arbitrary command authority.
+    - Verify Desktop Commander reuse and RDMCP-R8 rules were not regressed.
+    - Use only exact-head CI evidence.
+    - Do not merge.
+  required_attachments_or_references:
+    - doc/report/2026-09-24-pr1-product-only-rereview-trust-model.md
+    - doc/report/2026-09-24-pr1-ifr002-review-followup.md
+    - doc/report/2026-09-24-pr1-ifr002-review-followup-handoff.yaml
+  requested_authorized_actions:
+    - read_repository
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-24-pr1-ifr002-review-followup-handoff.yaml
+  packet_url: null
+  transport_note: Review follow-up packet; not a merge authorization.
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user
