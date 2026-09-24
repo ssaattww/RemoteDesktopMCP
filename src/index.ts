@@ -65,14 +65,17 @@ class DesktopCommander {
   private client?: Client;
   private transport?: StdioClientTransport;
   private tools = new Set<string>();
-  constructor(private readonly cfg: RuntimeConfig, private readonly audit: (name: string, data: Record<string, unknown>) => Promise<void>) {}
+  private allowedDirectories: string[] = [];
+  constructor(private readonly cfg: RuntimeConfig, private readonly audit: (name: string, data: Record<string, unknown>) => Promise<void>, private readonly configPrepared: () => Promise<void>) {}
   async start(): Promise<void> {
     const home = path.join(this.cfg.dataDir, "desktop-commander-home");
     const config = path.join(home, ".claude-server-commander", "config.json");
     const expected = path.resolve(home, ".claude-server-commander", "config.json");
     if (path.resolve(config) !== expected || !inside(this.cfg.dataDir, expected)) throw new Error("Desktop Commander config path did not resolve inside DATA_DIR.");
     await mkdir(path.dirname(config), { recursive: true, mode: 0o700 });
-    await writeFile(config, JSON.stringify({ allowedDirectories: this.cfg.roots.map((root) => root.path), telemetryEnabled: false }), { mode: 0o600 });
+    this.allowedDirectories = await Promise.all(this.cfg.roots.map((root) => realpath(root.path)));
+    await writeFile(config, JSON.stringify({ allowedDirectories: this.allowedDirectories, telemetryEnabled: false }), { mode: 0o600 });
+    await this.configPrepared();
     const drive = path.parse(home).root;
     const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"), LOCALAPPDATA: path.join(home, "AppData", "Local"), HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) } as Record<string, string>;
     this.transport = new StdioClientTransport({ command: this.cfg.dcCommand, args: this.cfg.dcArgs, env, stderr: "pipe", cwd: process.cwd() });
@@ -81,10 +84,7 @@ class DesktopCommander {
     const available = await this.client.listTools(); this.tools = new Set(available.tools.map((tool) => tool.name));
     const missing = REQUIRED_TOOLS.filter((tool) => !this.tools.has(tool));
     if (missing.length) { await this.close(); throw new Error(`Desktop Commander is missing required tools: ${missing.join(", ")}`); }
-    const reported = await this.call("get_config", {});
-    const normalizeSlashes = (value: string) => value.replaceAll("\\", "/").replace(/\/+/g, "/");
-    const normalizedReport = normalizeSlashes(reported);
-    if (!this.cfg.roots.every((root) => normalizedReport.includes(normalizeSlashes(root.path)))) { await this.close(); throw new Error("Desktop Commander did not load the isolated allowedDirectories configuration."); }
+    try { await this.verifyAllowedRoots(); } catch (error) { await this.close(); throw error; }
     await this.audit("desktop_commander.ready", { toolCount: this.tools.size });
   }
   async close(): Promise<void> {
@@ -107,11 +107,31 @@ class DesktopCommander {
   }
   async call(name: string, args: Record<string, unknown>, timeout?: number): Promise<string> {
     if (!this.client || !this.tools.has(name)) throw new Error("Desktop Commander is unavailable for this operation.");
+    if (name !== "get_config") await this.verifyAllowedRoots();
     const value = await this.client.callTool({ name, arguments: args }, undefined, timeout ? { timeout } : undefined);
-    if ("isError" in value && value.isError) throw new Error("Desktop Commander rejected the operation.");
+    if ("isError" in value && value.isError) {
+      const content = value.content as Array<{ type: string; text?: string }>;
+      const text = content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
+      const detail = text.replace(/(?:[A-Za-z]:)?(?:[\\/][^\s"']+)+/g, "[path]").replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]").slice(0, 240);
+      await this.audit("desktop_commander.rejected", { tool: name, detail });
+      throw new Error("Desktop Commander rejected the operation.");
+    }
     if (!("content" in value)) throw new Error("Desktop Commander returned an unsupported response.");
     const content = value.content as Array<{ type: string; text?: string }>;
     return content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
+  }
+  private async verifyAllowedRoots(): Promise<void> {
+    const reported = await this.call("get_config", {});
+    const start = reported.indexOf("{");
+    let config: { allowedDirectories?: unknown };
+    try { config = JSON.parse(reported.slice(start)) as { allowedDirectories?: unknown }; } catch { throw new Error("Desktop Commander returned an unreadable configuration."); }
+    if (!Array.isArray(config.allowedDirectories) || !config.allowedDirectories.every((value) => typeof value === "string")) throw new Error("Desktop Commander did not return allowedDirectories.");
+    const normalize = (value: string) => {
+      const normalized = path.resolve(value).replaceAll("\\", "/").replace(/\/+/g, "/");
+      return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+    };
+    const configured = new Set(config.allowedDirectories.map(normalize));
+    if (configured.size !== this.allowedDirectories.length || !this.allowedDirectories.every((root) => configured.has(normalize(root)))) throw new Error("Desktop Commander allowedDirectories changed unexpectedly.");
   }
 }
 
@@ -129,8 +149,9 @@ export class RemoteDesktopService {
   private readonly terminalTransfers: string[] = [];
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
+  private readonly protectedConfigIdentities = new Set<string>();
   private expiryTimer?: NodeJS.Timeout;
-  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this)); this.linkNoReplace = cfg.linkNoReplace ?? link; }
+  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; }
   async initialize(): Promise<void> {
     await mkdir(this.cfg.dataDir, { recursive: true, mode: 0o700 });
     const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
@@ -138,12 +159,16 @@ export class RemoteDesktopService {
     for (const root of this.cfg.roots) {
       const actualRoot = await realpath(root.path);
       if (overlaps(actualRoot, actualData) || overlaps(actualRoot, protectedParent)) throw new Error("FILE_ROOTS_JSON must not overlap DATA_DIR or Desktop Commander config parent.");
+      root.path = actualRoot;
     }
     const transferDirectory = path.join(this.cfg.dataDir, "transfers");
     await mkdir(transferDirectory, { recursive: true, mode: 0o700 });
+    await this.loadProtectedConfigIdentities();
+    await this.rememberProtectedConfigIdentity();
     for (const entry of await readdir(transferDirectory, { withFileTypes: true })) if (entry.isFile() && entry.name.endsWith(".snapshot")) await rm(path.join(transferDirectory, entry.name), { force: true });
     await this.cleanupOwnedUploadArtifacts();
     await this.dc.start();
+    await this.rememberProtectedConfigIdentity();
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
     this.expiryTimer.unref();
   }
@@ -172,6 +197,32 @@ export class RemoteDesktopService {
   node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
   private configPath(): string { return path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json"); }
+  private configIdentityManifestPath(): string { return path.join(this.cfg.dataDir, "transfers", "protected-config-identities.json"); }
+  private identityKey(identity: FileIdentity): string { return `${identity.dev}:${identity.ino}`; }
+  private async loadProtectedConfigIdentities(): Promise<void> {
+    const text = await readFile(this.configIdentityManifestPath(), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "[]" : Promise.reject(error));
+    let records: unknown;
+    try { records = JSON.parse(text); } catch { throw new Error("Protected config identity history is invalid."); }
+    if (!Array.isArray(records) || records.length > 64 || records.some((value) => !value || typeof value !== "object" || !Number.isInteger((value as FileIdentity).dev) || !Number.isInteger((value as FileIdentity).ino))) throw new Error("Protected config identity history is invalid.");
+    for (const record of records as FileIdentity[]) this.protectedConfigIdentities.add(this.identityKey(record));
+  }
+  private async persistProtectedConfigIdentities(): Promise<void> {
+    const manifest = this.configIdentityManifestPath();
+    const pending = `${manifest}.next`;
+    const records = [...this.protectedConfigIdentities].map((value) => { const [dev, ino] = value.split(":").map(Number); return { dev, ino }; });
+    await writeFile(pending, JSON.stringify(records), { mode: 0o600 });
+    await rename(pending, manifest);
+  }
+  private async rememberProtectedConfigIdentity(): Promise<void> {
+    const info = await lstat(this.configPath()).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (!info) return;
+    const key = this.identityKey(info);
+    if (this.protectedConfigIdentities.has(key)) return;
+    if (this.protectedConfigIdentities.size >= 64) throw new Error("Protected config identity history limit reached.");
+    this.protectedConfigIdentities.add(key);
+    await this.persistProtectedConfigIdentities();
+  }
+  private isProtectedConfigIdentity(info: FileIdentity): boolean { return this.protectedConfigIdentities.has(this.identityKey(info)); }
   private ownershipManifestPath(): string { return path.join(this.cfg.dataDir, "transfers", "owned-uploads.json"); }
   private async writeOwnershipManifest(): Promise<void> {
     const manifest = this.ownershipManifestPath();
@@ -214,15 +265,14 @@ export class RemoteDesktopService {
     if (!uploadPath || !this.ownedUploads.delete(uploadPath)) return;
     await this.writeOwnershipManifest();
   }
-  private async sameFile(left: string, right: string): Promise<boolean> { try { const [a, b] = await Promise.all([lstat(left), lstat(right)]); return a.dev === b.dev && a.ino === b.ino; } catch { return false; } }
   private async guardSearchRoot(root: Root): Promise<void> {
-    const config = this.configPath();
+    await this.rememberProtectedConfigIdentity();
     const visit = async (folder: string): Promise<void> => {
       for (const entry of await readdir(folder, { withFileTypes: true })) {
         const candidate = path.join(folder, entry.name);
         if (entry.isSymbolicLink()) throw new Error("Search root contains a symbolic link.");
         if (/^\.__rdmcp_[A-Za-z0-9_-]+\.(upload|probe)$/.test(entry.name)) throw new Error("Protected transfer files cannot be searched.");
-        if (await this.sameFile(candidate, config)) throw new Error("Protected service files cannot be searched.");
+        if (this.isProtectedConfigIdentity(await lstat(candidate))) throw new Error("Protected service files cannot be searched.");
         if (entry.isDirectory()) await visit(candidate);
       }
     };
@@ -238,10 +288,9 @@ export class RemoteDesktopService {
     const resolved = absent ? await realpath(path.dirname(candidate)) : await realpath(candidate);
     if (!inside(actualRoot, resolved)) throw new Error("Path resolves outside the allowed root.");
     if (!absent) {
-      const protectedConfig = this.configPath();
+      await this.rememberProtectedConfigIdentity();
       try {
-        const [candidateInfo, configInfo] = await Promise.all([lstat(candidate), lstat(protectedConfig)]);
-        if (candidateInfo.ino === configInfo.ino && candidateInfo.dev === configInfo.dev) throw new Error("Protected service files cannot be accessed.");
+        if (this.isProtectedConfigIdentity(await lstat(candidate))) throw new Error("Protected service files cannot be accessed.");
       } catch (error) { if (error instanceof Error && error.message.startsWith("Protected")) throw error; }
     }
     if (overlaps(candidate, this.cfg.dataDir)) throw new Error("Protected service files cannot be accessed.");

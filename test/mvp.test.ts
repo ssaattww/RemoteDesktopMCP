@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,7 +10,14 @@ import { hashPassword } from "../src/hash-password.js";
 import { RemoteDesktopService, configFromEnv, createApp, type RuntimeConfig } from "../src/index.js";
 
 async function fixture(): Promise<{ service: RemoteDesktopService; root: string; cleanup: () => Promise<void> }> {
-  const base = await mkdtemp(path.join(tmpdir(), "rdmcp-test-"));
+  const workspace = path.resolve(process.cwd());
+  const validation = path.resolve(workspace, "reference", "validation");
+  const relativeValidation = path.relative(workspace, validation);
+  if (!relativeValidation || relativeValidation.startsWith("..") || path.isAbsolute(relativeValidation)) throw new Error("MVP fixture directory must stay within the workspace.");
+  await mkdir(validation, { recursive: true });
+  const base = await mkdtemp(path.join(validation, "rdmcp-test-"));
+  const relativeBase = path.relative(validation, base);
+  if (!relativeBase || relativeBase.startsWith("..") || path.isAbsolute(relativeBase)) throw new Error("MVP fixture escaped its validation directory.");
   const root = path.join(base, "files"); const data = path.join(base, "data");
   await mkdir(root); await mkdir(data);
   const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };

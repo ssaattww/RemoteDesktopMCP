@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -13,7 +12,14 @@ export async function fixture(): Promise<Fixture> {
   // Node 22 does not keep the test process alive for an in-memory MCP handshake.
   // This referenced timer belongs to the fixture and is always cleared by cleanup.
   const keepAlive = setInterval(() => undefined, 1_000);
-  const base = await mkdtemp(path.join(tmpdir(), "rdmcp-regression-"));
+  const workspace = path.resolve(process.cwd());
+  const validation = path.resolve(workspace, "reference", "validation");
+  const relativeValidation = path.relative(workspace, validation);
+  if (!relativeValidation || relativeValidation.startsWith("..") || path.isAbsolute(relativeValidation)) throw new Error("Regression fixture directory must stay within the workspace.");
+  await mkdir(validation, { recursive: true });
+  const base = await mkdtemp(path.join(validation, "rdmcp-regression-"));
+  const relativeBase = path.relative(validation, base);
+  if (!relativeBase || relativeBase.startsWith("..") || path.isAbsolute(relativeBase)) throw new Error("Regression fixture escaped its validation directory.");
   const root = path.join(base, "files");
   const data = path.join(base, "data");
   await Promise.all([mkdir(root), mkdir(data)]);

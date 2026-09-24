@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { link, mkdir, readFile, readdir, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, readdir, rename, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import path from "node:path";
 import test from "node:test";
@@ -16,6 +16,18 @@ const nodeScriptCommand = (file: string) => `${process.execPath} ${file}`;
 const hasAuditEvent = (text: string, event: string, processId: string) => text.split("\n").some((line) => {
   try { const entry = JSON.parse(line) as { event?: unknown; processId?: unknown }; return entry.event === event && entry.processId === processId; } catch { return false; }
 });
+async function safeDcDiagnostics(data: string): Promise<string> {
+  const identity = await stat(configFile(data)).then((info) => `${info.dev}:${info.ino}`).catch(() => "unavailable");
+  const events = await readFile(path.join(data, "audit.jsonl"), "utf8").then((text) => text.split("\n").flatMap((line) => {
+    try {
+      const value = JSON.parse(line) as { event?: unknown; tool?: unknown; reason?: unknown; category?: unknown };
+      if (typeof value.event !== "string" || !/^[a-z._-]+$/.test(value.event)) return [];
+      const fields = [value.tool, value.reason, value.category].filter((field): field is string => typeof field === "string" && /^[a-z._-]+$/.test(field));
+      return [`${value.event}${fields.length ? `:${fields.join(":")}` : ""}`];
+    } catch { return []; }
+  }).slice(-8)).catch(() => [] as string[]);
+  return `config_identity=${identity}; recent_audit_events=${events.join(",") || "none"}`;
+}
 
 async function openSession(api: Awaited<ReturnType<typeof mcp>>) {
   return (await api.call("session_open", {})).session_id as string;
@@ -93,10 +105,16 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
   try {
     const session = await openSession(api);
     const protectedPath = configFile(f.data);
+    const historicalAlias = path.join(f.root, "config-historical-alias.json");
+    const replacement = `${protectedPath}.replacement`;
+    await link(protectedPath, historicalAlias);
+    await writeFile(replacement, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
+    await rename(replacement, protectedPath);
     const config = await readFile(protectedPath, "utf8");
-    const alias = path.join(f.root, "config-alias.json");
-    await link(protectedPath, alias);
-    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-alias.json" }));
+    const currentAlias = path.join(f.root, "config-current-alias.json");
+    await link(protectedPath, currentAlias);
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "a config inode retained across an atomic replacement remains protected");
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-current-alias.json" }), "the replacement config inode is protected after identity refresh");
     await assert.rejects(api.call("content_search", { session_id: session, root_id: "files", query: "allowedDirectories" }));
 
     const bytes = Buffer.from("x"); const id = await upload(api, session, "swap.bin", bytes, true);
@@ -107,8 +125,30 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     assert.equal(f.service.transfers.get(id)?.state, "failed");
 
     await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "../data/audit.jsonl" }));
-    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-alias.json" }));
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }));
   } finally { await api.close(); await f.cleanup(); }
+});
+
+test("NR009: canonical allowed roots work through a symlink or Windows junction", async (t) => {
+  const f = await fixture(); let service: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  try {
+    await f.service.close();
+    const aliasedRoot = path.join(f.base, "allowed-root-link");
+    try { await symlink(f.root, aliasedRoot, process.platform === "win32" ? "junction" : "dir"); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EACCES") { t.skip(`directory link capability unavailable: ${code}`); return; }
+      throw error;
+    }
+    await writeFile(path.join(f.root, "ordinary.txt"), "ordinary allowed-root content");
+    service = new RemoteDesktopService({ ...f.service.cfg, roots: [{ id: "files", path: aliasedRoot }] });
+    await service.initialize(); api = await mcp(service);
+    const session = await openSession(api);
+    const read = await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary.txt" });
+    assert.match(String(read.output), /ordinary allowed-root content/);
+    const search = await api.call("file_search", { session_id: session, root_id: "files", query: "ordinary" });
+    assert.match(String(search.output), /ordinary\.txt/);
+  } finally { await api?.close(); await service?.close(); await f.cleanup(); }
 });
 
 test("NR002 and NR006: expiry sweeps cancel transfers, clean files, and list session state", async () => {
@@ -170,7 +210,9 @@ test("NR003 and NR004: searches return every page and portable Node processes re
   try {
     const session = await openSession(api);
     await Promise.all(Array.from({ length: 115 }, (_, index) => writeFile(path.join(f.root, `needle-${index}.txt`), `literal [term] ${index}`)));
-    const files = await api.call("file_search", { session_id: session, root_id: "files", query: "needle-" });
+    let files: Record<string, unknown>;
+    try { files = await api.call("file_search", { session_id: session, root_id: "files", query: "needle-" }); }
+    catch { throw new Error(`file_search returned an MCP error; ${await safeDcDiagnostics(f.data)}`); }
     const fileHits = new Set([...String(files.output).matchAll(/needle-(\d+)\.txt/g)].map((match) => Number(match[1])));
     assert.deepEqual([...fileHits].sort((left, right) => left - right), Array.from({ length: 115 }, (_, index) => index));
     const content = await api.call("content_search", { session_id: session, root_id: "files", query: "[term]" });
@@ -268,7 +310,11 @@ test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, an
     await writeFile(path.join(f.root, "http.txt"), "before");
     const client = new Client({ name: "http-regression", version: "1" }); const transport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${accessToken}` } } });
     await client.connect(transport);
-    const call = async (name: string, args: Record<string, unknown>) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError); return JSON.parse(response.content.find((item) => item.type === "text")?.text ?? "{}") as Record<string, unknown>; };
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const response = await client.callTool({ name, arguments: args });
+      if (response.isError) throw new Error(`HTTP MCP ${name} returned isError; ${await safeDcDiagnostics(f.data)}`);
+      return JSON.parse(response.content.find((item) => item.type === "text")?.text ?? "{}") as Record<string, unknown>;
+    };
     const session = (await call("session_open", {})).session_id as string;
     assert.match(String((await call("file_read", { session_id: session, root_id: "files", relative_path: "http.txt" })).output), /before/);
     await call("file_patch", { session_id: session, root_id: "files", relative_path: "http.txt", old_string: "before", new_string: "after" });
