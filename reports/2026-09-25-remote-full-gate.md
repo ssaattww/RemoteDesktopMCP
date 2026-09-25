@@ -73,3 +73,20 @@ NR005の標準エラーpipe drainと出力上限stub、NR010のoutput guardとbo
 | Node 22 version probe | 0 (`v22.23.3`) |
 
 テストは43件、42 pass、0 fail、1 skip、所要約153.7秒。skipはPOSIX permissionsテストで、Windows上では未実行。npm auditのinfo/low/moderate/high/critical脆弱性はすべて0。この結果でWindows上の全体ゲートは通過した。Linux CIおよびPOSIX permissionsテストは未確認。
+
+## 追試: c58352ddd860f3b113c08852bbb28d9946f2eed1
+
+IFR001 valid-token/consent rate admission、port 0 fixture拡張、IFR002/003の文書更新後のHEADで全体ゲートを実行した。証拠は `reference/validation/remote-full-gate-c58352d/` に保存した。開始・終了HEADは `c58352ddd860f3b113c08852bbb28d9946f2eed1` で一致し、実行前の作業ツリーはclean。各コマンド後もHEADの変化はなかった。実行時Nodeは `v24.20.0`、テストはNode `v22.23.3`。
+
+| コマンド | 終了コード |
+| --- | ---: |
+| `npm.cmd ci` | 0 |
+| `npm.cmd run lint` | 0 |
+| `npm.cmd run check` | 0 |
+| `npm.cmd run build` | 0 |
+| `npx.cmd --yes --package=node@22.23.3 node node_modules/tsx/dist/cli.mjs --test test/**/*.test.ts` | 0 |
+| `npm.cmd audit --json` | 0 |
+| `git diff --check` | 0 |
+| Node 22 version probe | 0 (`v22.23.3`) |
+
+テストは43件、42 pass、0 fail、1 skip、所要約153.5秒。skipはPOSIX permissionsテストで、Windows上では未実行。npm auditのinfo/low/moderate/high/critical脆弱性はすべて0。この結果でWindows上の全体ゲートは通過した。Linux CIおよびPOSIX permissionsテストは未確認。

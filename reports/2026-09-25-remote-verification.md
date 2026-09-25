@@ -74,3 +74,6 @@ Markdown lint は48ファイル、指摘0件。これらは製品コードの合
 | RDMCP-REMOTE-IFR-001 / P2 | `src/public-auth.ts` の `tokenAdmissionKey` / `consentAdmissionKey` と `src/index.ts` の対応 endpoint で、発行済みcode・署名済みrefresh・cookie付き同意を無効要求と別枠で制限する。状態の本検証と固定容量は維持する。 | port 0 の公開HTTP試験で、無効token要求11件後に正しいcodeとrefreshが200、無効同意11件後に正しい同意が303。担当のfocused試験1件成功・失敗0件、49,046.3432ms。全体検証は追加修正後に別途行う。 |
 | RDMCP-REMOTE-IFR-002 / P3 | 本報告の冒頭と文書確認を2026年9月25日の初期履歴と明示する。 | 初期失敗、96bの全体成功、公開起動、実ChatGPT未確認を別の時点と証拠で照合。Markdown lint成功。 |
 | RDMCP-REMOTE-IFR-003 / P3 | `remote-tests` 報告のstorage/contextリンクを同じディレクトリからの相対リンクへ修正する。 | 担当がreportsディレクトリ基準で両リンク先の存在を確認。Markdown lint成功。 |
+
+追加修正の固定 HEAD `c58352ddd860f3b113c08852bbb28d9946f2eed1` は、Node22.23.3 の全体43件中42件成功・失敗0件・POSIX専用1件スキップ。npm ci、lint、check、build、audit、diff-checkは全て終了コード0、脆弱性0件。開始・終了HEADは一致し、実行中のsource/test変更なし。ログは `reference/validation/remote-full-gate-c58352d` に保存した。
+修正版の実サービス反映は未完了である。既存PID28532の停止と再起動をまとめたコマンドが自動承認レビューに拒否され、実行されなかった。拒否理由の詳細は返されていない。起動中の実サービスには引き続き96bの実装が読み込まれている。

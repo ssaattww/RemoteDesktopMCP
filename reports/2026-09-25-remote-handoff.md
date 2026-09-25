@@ -17,7 +17,9 @@ Tailscale Funnel は公開 URL `https://fa780.tail8bf1af.ts.net` を loopback �
 `96b10cd8b7026e73512de3c294f67894621709bf` は通常コードレビューの必須指摘0件、Node 22 全体43件中42件成功・POSIX1件除外・失敗0件、全必須コマンド成功。公開サービスを起動し、公開 HTTPS の health、Google モード、resource/issuer、CIMD、未認証401を確認した。
 起動時 PID は28532、ログは管理ディレクトリの `service.stdout.log` と `service.stderr.log`。今回の非表示プロセス起動は PC 再起動後の自動起動を設定するものではない。
 利用者へ ChatGPT で `session_open`、`node_list`、`file_read` による `workspace` 内 `remote-connection-check.txt` の読取を依頼した。実操作の結果を得るまで接続完了とは扱わない。
-独立レビュー、最終提出、同一提出 HEAD の CI は未完了。merge は行わない。
+独立初回は `3ffd783c3fc38b46b54ccbacb97075f8581de41e` に対し、認証要求の制限1件と文書2件の必須指摘で fail。追加修正 `c58352ddd860f3b113c08852bbb28d9946f2eed1` は Node22 全体43件中42件成功・POSIX1件除外・失敗0件、全必須コマンド成功。通常担当と同じ独立担当の限定解消確認、最終提出、同一提出 HEAD の CI はこの記録時点で未完了。最終判定と提出証拠は公開用独立レビュー報告および PR #1 で確認する。merge は行わない。
+
+修正版の反映のため既存PID28532の停止と再起動をまとめて要求したが、自動承認レビューが実行前に拒否した。拒否理由の詳細は返されていない。実サービスは96bの版のままで、検証済みの修正版への再起動が必要である。秘密と本人登録状態は変更していない。起動手順は `doc/remote-setup.md` を参照する。
 
 ## 作業方法の振り返り
 
