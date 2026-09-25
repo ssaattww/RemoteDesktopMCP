@@ -233,3 +233,28 @@ verdict: **fail**（この非最終文書同期だけ）。コード review の�
 - coverage: `checked_no_finding` 文書の状態整合、`not_applicable` 新しい source/test/config、`held` F03 の ChatGPT `session_open`/`node_list`/`file_read` 実結果と再起動後実 refresh、Linux CI/POSIX 専用試験、独立最終レビュー。実 `.env`・Google JSON・外部 `DATA_DIR` の内容は読んでいない。
 
 verdict: **pass_with_held**。今回の非最終文書同期に必須 finding は残らず、通常コードレビューの必須指摘0件と Windows 全体 gate 成功を維持する。独立 reviewer は次の凍結 HEAD に対し独立の判定を行い、実 ChatGPT 操作・実 refresh の未確認を F03 と区別する。通常 review の `report_attestation_allowed=false`。
+
+### 公開独立指摘3件の同一通常担当による限定修正確認
+
+- mode: normal fix verification。reviewer `/root/remote_normal_review`、初回独立対象 `3ffd783c3fc38b46b54ccbacb97075f8581de41e`、修正 commit `c58352ddd860f3b113c08852bbb28d9946f2eed1`、今回の immutable reviewed implementation HEAD `a27f36b33e85abd7688879c5e8588b39029102bc`。初回通常レビュー以来の同一 reviewer identity と元の Sol / high 要求を維持する。実 runtime profile は観測不能、application status `reused_existing_agent_profile`。実装・試験・commit・push、実資格情報・実 state・外部 `DATA_DIR` の参照はしていない。独立 reviewer の最終判定を代行しない。
+- scope: `3ffd783..c58352d` の IFR001 認証制限変更と HTTP fixture、IFR002/003 文書修正、`c58352d..a27f36b` の5文書だけ、および直接依存を照合した。後者に source/test/config 差分はない。元 REMOTE-NR-001〜010 や以前の IFR 全域を再レビューせず、3指摘の元 severity を維持する。
+
+| 元指摘 / severity | required action・production path・composition evidence | 限定 closure |
+| --- | --- | --- |
+| `RDMCP-REMOTE-IFR-001` / P2 | `src/public-auth.ts` の `tokenAdmissionKey` は現在の in-memory code または署名・期限・client/resource/scope が妥当な refresh を credential 別 bucket に分類し、`consentAdmissionKey` は cookie-bound の未期限・subject 済み transaction を別 bucket に分類する。`src/index.ts` の `/token` と `/authorize/consent` は無効要求を固定 invalid bucket に入れ、本体の serialized state reload、epoch、許可主体、one-use、refresh family/replay 検査は残す。port 0 の実 HTTP fixture は無効 code 11件目と forged consent 11件目の429後、未使用 code と既存 signed refresh の200、正しい cookie-bound consent の303を確認。担当 focused は1 pass/0 fail/49,046.3432ms、固定 `c58352d` の Node22 全体は43件中42 pass/1 POSIX skip/0 fail。 | **code/test closed**。固定 public client を秘密識別子として共有正常 bucket に入れる元欠陥は解消。匿名の新規認可要求すべての可用性は識別不能なので保証しない。実運用中の旧版にはまだ反映されていない。 |
+| `RDMCP-REMOTE-IFR-002` / P3 | `reports/2026-09-25-remote-verification.md` の冒頭と初期文書確認は日付と過去形で初期履歴に修正された。しかし同報告の後続「現在地」節 :67 は追加修正を「再検証中」と現在形で示し、matrix :74 は全体検証を「別途行う」と未来形で示す。後続 :78 と `reports/2026-09-25-remote-full-gate.md` は固定 `c58352d` の全体検証成功を記録済み。 | **open**。同じ temporal-context 欠陥が直接変更節に残る。下の finding 参照。 |
+| `RDMCP-REMOTE-IFR-003` / P3 | `reports/2026-09-25-remote-tests.md` の storage/context への相対リンクを同じ `reports` ディレクトリから解決し、両リンク先の存在を確認した。 | **closed**。リンクの解決先は正しい。 |
+
+| ID / severity | source・locus | proof / impact | required action |
+| --- | --- | --- | --- |
+| `RDMCP-REMOTE-IFR-002` / P3（残存） | `reports/2026-09-25-remote-verification.md:67,74` | :67 の「追加修正は再検証中」と :74 の「全体検証は追加修正後に別途行う」は、同じ文書の :78 にある `c58352d` 全体43件・42 pass・0 failの成功後も現在の状態に読める。初期履歴を時点付きにする元 required action が後続節まで一貫していない。 | 両箇所を当時の時点付き過去形にし、後続の固定 HEAD 全体成功と現在の未確認事項を区別する。 |
+| `REMOTE-DOC-002` / P3（直接証拠の新規指摘） | `reports/2026-09-25-remote-implementation.md:86` | IFR001 matrix は「無効 code/refresh を既定10件まで送った」と記すが、`test/public-auth.test.ts:475-479` の11件はすべて forged `authorization_code` であり、無効 refresh は送っていない。正常 refresh 200の確認はあるため機能 closure は保てるが、試験入力の説明は実証範囲を過大に示す。 | composition cell を「固定 client の無効 code 要求11件後、正しい code と signed refresh が各200」など実 fixture に一致させる。無効 refresh flood の実証を主張しない。 |
+
+| coverage criterion | disposition / evidence |
+| --- | --- |
+| admission の識別・本体 authorization 境界 | `checked_no_finding`。無効要求は固定 invalid bucket、発行済み credential/transaction は固有 bucket、本体は永続 grant を再検証する。署名済みでも revoke/replay 済み refresh が固有 bucket へ分類され得るが、その token を持つ相手に限られ、本体は拒否する。 |
+| port 0 合成・全体 gate | `checked_no_finding`。HTTP fixture の無効 code/consent 429 と正常 code/refresh/consent 成功を source assertions と照合。`reference/validation/remote-full-gate-c58352d` の Node22 test exit 0、43件42 pass/1 POSIX skip/0 failと全コマンド exit 0を確認。`a27f` は文書のみの後続差分なので同じ source/test/config の Windows 結果として適用できる。 |
+| 文書の意味・証拠識別・リンク・読みやすさ | `checked_finding` 上記 P3 の2件。`document_wording_review` は同一 reviewer が normal fix scope で実施。before=`3ffd783...`、target=`a27f36b...`、reader=Windows runtime_local。初期履歴の過去形、test 報告のリンク、handoff/tasks/phases の現在地は整合。承認済み用語の用法と読みやすさは `checked_no_finding`、temporal meaning と fixture evidence の識別は `checked_finding`。wording result=`fail`。mechanical lint 成功はこれらを解消しない。 |
+| 実サービス・外部検証 | `held`。PID28532 は旧 `96b10cd` 版で稼働中。停止・修正版再起動をまとめた要求は自動承認レビューに実行前拒否され、理由詳細は未提示、操作は未実施。実 Google 本人登録は成功済みだが、修正版の実サービス反映、ChatGPT `session_open`/`node_list`/`file_read`、実 refresh、Linux CI/POSIX 専用試験、同一独立 reviewer の限定解消判定は未確認。 |
+
+closure-readiness: **incomplete**。IFR001 の code/test と IFR003 のリンクは閉じたが、IFR002/P3 と直接証拠 `REMOTE-DOC-002/P3` が残る。verdict: **fail**（この固定 HEAD の限定文書 closure）。コードの新しい必須 finding はない。unexplored は実 ChatGPT UI/Funnel の F03 経路、修正版サービスでの実 refresh、Linux CI。通常 review では `report_attestation_allowed=false`。文書2箇所の時制と matrix 入力数を修正した次 HEAD に限り、同じ reviewer が限定再確認できる。

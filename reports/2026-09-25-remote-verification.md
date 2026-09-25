@@ -64,14 +64,14 @@ Markdown lint は48ファイル、指摘0件。これらは製品コードの合
 ## 独立レビュー後の現在地（2026年9月25日）
 
 固定 HEAD `96b10cd8b7026e73512de3c294f67894621709bf` の全体検証は43件中42件成功、POSIX 専用1件スキップ、失敗0件。全必須コマンドが成功した。詳細は [全体検証記録](2026-09-25-remote-full-gate.md) に保持している。
-その後の文書更新を含む `3ffd783c3fc38b46b54ccbacb97075f8581de41e` を対象に独立レビューを行い、認証要求の制限1件と文書2件の必須指摘を得た。追加修正は再検証中であり、先の全体成功を追加修正の検証として転用しない。
+その後の文書更新を含む `3ffd783c3fc38b46b54ccbacb97075f8581de41e` を対象に独立レビューを行い、認証要求の制限1件と文書2件の必須指摘を得た。初回独立レビュー直後には追加修正を再検証中だった。追加修正後の全体結果は本節末尾に記録し、先の96bの成功と区別する。
 公開サービスは起動済みで、公開 HTTPS の health、Google モード、resource/issuer、CIMD、未認証401を確認した。ChatGPT の実操作と再起動後の実 refresh は未確認である。
 
 `RDMCP-REMOTE-IFR-002 / P3` に対し、冒頭の作業ツリーと文書確認の「作業中」は2026年9月25日の初期履歴だと明示した。初期失敗の記録と実 ChatGPT 接続の未確認状態は保持する。
 
 | 独立指摘 / 元severity | 必須対応と経路 | 組合せと確認証拠 |
 | --- | --- | --- |
-| RDMCP-REMOTE-IFR-001 / P2 | `src/public-auth.ts` の `tokenAdmissionKey` / `consentAdmissionKey` と `src/index.ts` の対応 endpoint で、発行済みcode・署名済みrefresh・cookie付き同意を無効要求と別枠で制限する。状態の本検証と固定容量は維持する。 | port 0 の公開HTTP試験で、無効token要求11件後に正しいcodeとrefreshが200、無効同意11件後に正しい同意が303。担当のfocused試験1件成功・失敗0件、49,046.3432ms。全体検証は追加修正後に別途行う。 |
+| RDMCP-REMOTE-IFR-001 / P2 | `src/public-auth.ts` の `tokenAdmissionKey` / `consentAdmissionKey` と `src/index.ts` の対応 endpoint で、発行済みcode・署名済みrefresh・cookie付き同意を無効要求と別枠で制限する。状態の本検証と固定容量は維持する。 | port 0 の公開HTTP試験で、無効token要求11件後に正しいcodeとrefreshが200、無効同意11件後に正しい同意が303。担当のfocused試験1件成功・失敗0件、49,046.3432ms。担当focused試験の後、c58352dで全体検証を行い成功した（本節末尾）。 |
 | RDMCP-REMOTE-IFR-002 / P3 | 本報告の冒頭と文書確認を2026年9月25日の初期履歴と明示する。 | 初期失敗、96bの全体成功、公開起動、実ChatGPT未確認を別の時点と証拠で照合。Markdown lint成功。 |
 | RDMCP-REMOTE-IFR-003 / P3 | `remote-tests` 報告のstorage/contextリンクを同じディレクトリからの相対リンクへ修正する。 | 担当がreportsディレクトリ基準で両リンク先の存在を確認。Markdown lint成功。 |
 
