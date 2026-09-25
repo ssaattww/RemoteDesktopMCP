@@ -66,3 +66,15 @@ strict ACL 検査を弱めず、storage helper の `assertPrivateAuditStorage` �
 | MVP ACL fixture 3 件 | isolated fixture `DATA_DIR` が strict storage 前提を満たしていなかった。 | 試験担当の fixture 準備のみ。production ACL は緩和しない。 | overlap 0.84 秒、OAuth 12.25 秒、snapshot 14.60 秒。 |
 
 `process_start` は start audit が失敗しても `finally` で watcher を開始する。そのため監査保存が fail-closed になっても、既に開始した process を無監視で残さない。実 `.env`、Google credential、実 OAuth state は本修正で読まず変更していない。
+
+## F01c follow-up: REMOTE-NR-010 と NR005
+
+immutable `f4b2076` の全体 gate は 42 件中 40 pass、1 fail、POSIX 1 skip であり、失敗は NR005 の `content_search` MCP timeout だけだった。診断 fixture は timeout が `start_search` 自体より前の `verifyAllowedRoots` 内 `get_config` 応答待ちで起き、`get_more_search_results` と `stop_search` には到達していないことを確認した。
+
+Desktop Commander 0.2.51 の `getConfig()` は呼出ごとに stderr へ診断を書き出す。`StdioClientTransport` の `stderr: "pipe"` は child stderr を PassThrough へ接続するだけであり、consumer がなければ backpressure により child の MCP stdout 応答まで止め得る。`src/index.ts` は stderr の内容を保存・ログ出力せず data listener で drain するよう修正した。1 MiB のダミー stderr を drain 待ちで書いた stdio MCP stub に対して initialize、繰返し `get_config`、`file_read` が成立する composition fixture を加えた。stderr の内容は test output、audit、report に出さない。
+
+`REMOTE-NR-010 / P2` には、active な `terminating` process の `process_output` を `process_status`、watcher と同じ規則にそろえた。Desktop Commander session が残る間は output read を委譲せず、保存済み output と `termination_unconfirmed` を返す。IFR-004 fixture は status と output の双方で read count が増えず owner が保たれること、session 消滅後に一度だけ exit audit と `finished` になることを検査する。
+
+NR006 の body timeout は、socket の idle timeout を handler 実行と keep-alive に残す方式から、受信開始からの絶対 15 秒 deadline に置き換えた。request `end`、`aborted`、response `close` で deadline を解除するため、body を受信し終えた後の MCP handler 実行は切断しない。public HTTP fixture には 15 秒超の `session.open` audit を使う境界確認を追加した。
+
+この時点で IFR-004 focused、stderr capacity fixture は成功し、`npm run check`、`npm run lint:ts`、`git diff --check` は成功した。stderr drain 後の NR005 focused は最初の 2 回が約 12 秒で成功した。長時間の body 境界 fixture と連続 NR005 の完走は親担当の session polling と current-HEAD full gate で確認するため、ここでは成功と断定しない。

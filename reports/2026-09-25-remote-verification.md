@@ -46,3 +46,17 @@ Markdown lint は48ファイル、指摘0件。これらは製品コードの合
 対象は初回実装 HEAD `2e6ecefef8b0b2b4e0903565a7496b8050e5a443` からの修正差分であり、次の通常修正確認用コミットへ含める。全体 Node 22 gate と公開 ChatGPT 接続は未実施。
 
 通常修正確認1の `a08343014ac8214e5efeb62156b46fceb5d81e13` では4項目の不足が残った。追加修正後、親が同じ公開認証と ACL のまとめ試験を完了まで待ち、終了コード0、18件中17件成功、POSIX 専用1件スキップ、失敗・中断0件、51961.5453msを確認した。既存秘密ファイルの起動前拒否、通常の親フォルダでの安全な設定作成、生の HTTP 応答の tool metadata と再認可情報、過剰要求の制限、秘密の非出力を追加確認している。
+
+## 全体回帰で見つかった不足
+
+全体検証1は42件中8件失敗、検証2の固定 HEAD `f4b2076d4d026c8710985c0a81f9c9c83617ad41` は40件成功・NR005の1件失敗・POSIX1件除外だった。詳細とログは `reports/2026-09-25-remote-full-gate.md` に保持する。
+内容検索の直前の `get_config` 応答待ちを診断で特定し、Desktop Commander の未読 stderr を非保持で読み捨てる修正と、1MiB の出力を伴う試験を追加した。終了待ちの出力取得は REMOTE-NR-010 として修正した。
+親の Node22 focused 実行で NR010、NR005、stderr容量の3件は成功。要求受信時間の追加試験は Accept ヘッダ不足による406で失敗し、試験のヘッダを修正して再確認している。この途中の失敗を製品側の成功証拠には含めない。
+
+ヘッダ修正後、親が Node22.23.3 の公開 HTTP 試験を完走し、1件成功・失敗0件・終了コード0、45120.7298msを確認した。1秒ごとの少量送信も絶対15秒の受信期限で拒否し、受信済みの要求は15秒を超える処理でも成功応答を返す。`npm.cmd run lint`（Markdown53件）と `npm.cmd run build` も終了コード0。
+
+| 対応 | 実装経路 | 組合せ試験と証拠 |
+| --- | --- | --- |
+| REMOTE-NR-010 / P2 | `src/index.ts` の `process_output` が終了待ちかつ実セッション生存中は `observe` を呼ばない | `test/independent-fixes.test.ts` の termination timeout fixture で status/output の未読取・所有者維持・消滅後の単一終了を確認。親 Node22 focused 成功。 |
+| NR005 timeout の直接修正 | `DesktopCommander.start` が stderr を秘密の保存・出力なしで読み捨てる | `test/regressions.test.ts` の1MiB stderr fixtureと実 HTTP NR005が親 Node22 focused 成功。 |
+| REMOTE-NR-006 の受信期限 | `createApp` の絶対受信期限を end/aborted/close で解除する | `test/public-auth.test.ts` の少量継続送信拒否と長処理成功を同じ実 HTTP 構成で確認。上記45120.7298msの実行で成功。 |

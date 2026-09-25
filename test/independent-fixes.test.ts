@@ -227,9 +227,10 @@ test("RDMCP-MVP-IFR-001: same PID reuse never lets an old logical process delega
 
 test("RDMCP-MVP-IFR-004: a termination timeout becomes an observed single finished exit", async () => {
   let active = true;
+  let reads = 0;
   const adapter: ProcessAdapter = {
     start: async () => "Process started with PID 5050",
-    read: async () => "Reading 1 new lines (total: 1 lines)\nProcess completed with exit code 9",
+    read: async () => { reads += 1; return "Reading 1 new lines (total: 1 lines)\nProcess completed with exit code 9"; },
     terminate: async () => { throw Object.assign(new Error("timeout"), { code: -32001 }); },
     sessions: async () => active ? "PID: 5050" : "No active sessions",
   };
@@ -240,8 +241,14 @@ test("RDMCP-MVP-IFR-004: a termination timeout becomes an observed single finish
     const processId = started.process_id as string;
     const timedOut = await api.call("process_kill", { session_id: session, process_id: processId });
     assert.equal(timedOut.state, "terminating"); assert.equal(timedOut.termination_unconfirmed, true);
+    const readsBeforeHeldCalls = reads;
     const unknown = await api.call("process_status", { session_id: session, process_id: processId });
     assert.equal(unknown.state, "terminating"); assert.equal(unknown.termination_unconfirmed, true);
+    const heldOutput = await api.call("process_output", { session_id: session, process_id: processId });
+    assert.equal(heldOutput.state, "terminating"); assert.equal(heldOutput.termination_unconfirmed, true);
+    assert.equal(reads, readsBeforeHeldCalls, "active terminating process must not delegate output reads");
+    const owners = (service as unknown as { currentProcessOwners: Map<string, string> }).currentProcessOwners;
+    assert.ok([...owners.values()].includes(processId), "active terminating process must retain current-process ownership");
     active = false;
     let exits: Record<string, unknown>[] = [];
     for (let attempt = 0; attempt < 20; attempt++) {

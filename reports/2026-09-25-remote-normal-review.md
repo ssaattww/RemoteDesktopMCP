@@ -161,3 +161,25 @@ remaining risk / next action: NR002 の parent owner 条件を実装・Windows A
 | current-HEAD full gate、CI、F03 | `held`。全体 Node22 gate は前 HEAD で開始され継続中であり、今回 HEAD の全件成功に読み替えない。CI は未 push のためなし。実 Google 本人登録は成功済みだが、公開サービス・Funnel・ChatGPT 実操作と実 refresh は未実施。 |
 
 unexplored は実 ChatGPT UI/Funnel の F03 経路。次工程は新 HEAD に対する全体 gate の結果と、利用者の実公開接続を別途記録すること。通常レビューに独立最終レビューの report-attestation allowlist は該当せず、`report_attestation_allowed=false`。
+
+### 同一担当の F01c 直接回帰確認
+
+- mode: normal fix verification。reviewer `/root/remote_normal_review`。前回 code review HEAD `75197bb42085e87e340df6fa5982aab54073014e`、今回の immutable reviewed implementation HEAD `f4b2076d4d026c8710985c0a81f9c9c83617ad41`。初回 `2e6ecefef8b0b2b4e0903565a7496b8050e5a443` からの同一 reviewer continuity。元の要求 profile Sol / high、runtime profile は非公開で観測不能、application status `reused_existing_agent_profile`。実装・試験・commit・push をしていない。旧 REMOTE-NR-001〜009 と旧 IFR の判定をこの F01c 証拠で書き換えない。
+- scope/evidence: F01c は NR002 の厳密 ACL 検査が Node22 全体試験の既存 process/MCP/MVP 経路へ与えた直接回帰。`75197bb..f4b2076` の11変更ファイル一覧、`src/index.ts`・`src/private-storage.ts` の全差分、`test/{independent-fixes,mvp,private-storage}.test.ts` の全差分、implementation/tests/storage/full-gate/task/通常報告の変更文脈と直接依存を確認。実 `.env`・Google JSON・外部 `DATA_DIR` の内容は読んでいない。追加の全域レビューはしていない。
+- closure-readiness: **incomplete**。`reports/2026-09-25-remote-implementation.md` の F01c matrix は失敗群、production path、focused 結果を列挙するが、IFR-004 行の「termination timeout 中に active session を読まない」は `watchProcess` と `process_status` にだけ適用され、同じ公開 tool `process_output` と合成 fixture が欠ける。下記の具体的な P2 欠陥があるため、コード受入も不可。今回 HEAD に対する formal verdict は `incomplete`、技術判定は `fail`。他の focused 成功を全体 gate 成功へ転用しない。
+
+| ID / severity | source・locus | proof / impact | required action |
+| --- | --- | --- | --- |
+| REMOTE-NR-010 / P2 | F01c `src/index.ts:548-554`。旧 IFR-004 の termination timeout 境界に直接影響する新差分。 | `process_kill` が timeout になり `terminating` となった後、`watchProcess` と `process_status` は active session なら `observe` を避ける。一方 `process_output` は `finished` 以外で無条件に `observe(item)` を呼ぶ。既存 IFR-004 adapter は active の間も `read` が completion を返すので、`process_status` では保留される同じ対象が `process_output` 経由なら active のまま `finished` と exit audit に進む。focused fixture は timeout 後に `process_status` だけを呼び、`process_output` の sibling 経路を検査していない。 | active な `terminating` process の `process_output` も読込を避け、保留状態と既存出力を返す。timeout 後に status と output の双方を呼び、adapter read 回数が増えず状態と owner が維持され、session 消滅後に一度だけ exit audit と `finished` になる composition fixture を追加する。 |
+
+| F01c failure group / required action | production path / composition / focused assessment |
+| --- | --- |
+| IFR-001 stale PID と watcher 混同 | `process_start` audit 後に watcher を開始し、audit 失敗でも `finally` で保持する。fixture は合法な新 owner watcher を停止してから旧 owner 委譲3操作を検査する。focused `same PID reuse` pass。`checked_no_finding`。 |
+| IFR-004 finished/audit 順と terminating active | `auditExit` の成功後だけ `finished` を公開し、`watchProcess` と `process_status` は active `terminating` を読まない。IFR-004 2件 focused pass。ただし `process_output` sibling が欠落。`checked_finding` REMOTE-NR-010。 |
+| NR003/004/005 audit ACL timeout | `assertPrivateAuditStorage` は直接の audit file と private directory を一つの PowerShell 呼出で従来と同じ owner・継承・3主体・完全制御条件で検査する。cache/TTL はなく、追記前に再検査する。Windows ACL fixture は directory と file の broad 許可を別々に拒否し、NR003/004 を2連続、NR005 を focused pass。`checked_no_finding`。 |
+| NR003 streaming page omission | `file_search` は実返却の inclusive `Showing results start-end` の末尾を次 offset に優先し、hint は次点。全115 hit の focused 証拠。`checked_no_finding`。 |
+| MVP isolated DATA_DIR 3件 | fixture だけが isolated data directory を service 初期化前に private 化。root overlap・OAuth one-use・snapshot/no-replace の assertion は弱めず、focused pass。`checked_no_finding`。 |
+
+`document_wording_review`: mode normal fix verification、同一 reviewer/Windows runtime_local。Skill と decision examples は既読。target は今回 HEAD、before は `75197bb42085e87e340df6fa5982aab54073014e`。implementation の F01c 原因・表、tests の follow-up、storage の監査境界、full-gate の混在 HEAD と42件失敗、task の F01c/F03/F04 行を確認。意味・承認用語・読みやすさは `checked_no_finding`。識別は `checked_finding`: immutable HEAD の `reports/2026-09-25-remote-tests.md` NR002 行は現行の改名済み Windows ACL test と異なる旧名を示す。親には報告済みで、review 後の report-only working tree 修正を確認したが、その未コミット修正を今回 HEAD の証拠に算入しない。wording result は `fail`（report evidence 同定）。mechanical lint 成功は別証拠。
+
+held: この HEAD の Node22 全体 gate は別の同一 Luna 担当が実行中で、終了結果をまだ得ていない。前回の42件中33 pass・8 fail・1 skip は実行中に HEAD が変わった混在 tree の結果で、今回 HEAD の成否ではない。CI は未 push、F03 の実 ChatGPT/Funnel 操作・再起動後実 refresh は未実施。旧 NR001〜009 の code closure 自体は維持するが、新 F01c finding と full gate の未達を隠して公開完了とはしない。unexplored: 実 ChatGPT UI と公開経路。次は REMOTE-NR-010 の product/fixture 修正と current-HEAD full gate の結果を、同じ reviewer が限定確認する。`report_attestation_allowed=false`。

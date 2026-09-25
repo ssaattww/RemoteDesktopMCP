@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { configFromEnv, createApp, RemoteDesktopService } from "../src/index.js";
+import { configFromEnv, createApp, RemoteDesktopService, type RuntimeConfig } from "../src/index.js";
 import { absent, captureProtectedConfigPin, fixture, mcp } from "./fixture.js";
 
 const sha256 = (value: Buffer) => createHash("sha256").update(value).digest("hex");
@@ -472,6 +472,22 @@ test("NR003 and NR004: searches return every page and portable Node processes re
 test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, and MCP file operations", async () => {
   const f = await fixture(); const app = createApp(f.service); const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
   const port = (server.address() as { port: number }).port; const url = `http://127.0.0.1:${port}`;
+  type Commander = { call: (name: string, args: Record<string, unknown>, timeout?: number) => Promise<string> };
+  const commander = (f.service as unknown as { dc: Commander }).dc;
+  const originalCommanderCall = commander.call;
+  const traceStarted = Date.now(); const dcTrace: string[] = [];
+  const trace = () => dcTrace.join(",") || "none";
+  commander.call = async (name, args, timeout) => {
+    dcTrace.push(`start:${name}@${Date.now() - traceStarted}`);
+    try {
+      const output = await originalCommanderCall.call(commander, name, args, timeout);
+      dcTrace.push(`ok:${name}@${Date.now() - traceStarted}`);
+      return output;
+    } catch (error) {
+      dcTrace.push(`error:${name}@${Date.now() - traceStarted}`);
+      throw error;
+    }
+  };
   const request = (endpoint: string, init?: RequestInit) => fetch(`${url}${endpoint}`, init);
   const register = async () => {
     const response = await request("/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "regression", redirect_uris: ["https://chatgpt.com/callback"] }) });
@@ -500,9 +516,12 @@ test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, an
     assert.equal((await request("/mcp", { method: "POST", headers: { authorization: "Bearer tampered", "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) })).status, 401);
     await writeFile(path.join(f.root, "http.txt"), "before");
     const client = new Client({ name: "http-regression", version: "1" }); const transport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${accessToken}` } } });
-    await client.connect(transport);
+    try { await client.connect(transport); }
+    catch (error) { throw new Error(`NR005 MCP RPC failed at transport connect; DC trace=${trace()}`, { cause: error }); }
     const call = async (name: string, args: Record<string, unknown>) => {
-      const response = await client.callTool({ name, arguments: args });
+      let response;
+      try { response = await client.callTool({ name, arguments: args }); }
+      catch (error) { throw new Error(`NR005 MCP RPC failed at ${name}; DC trace=${trace()}`, { cause: error }); }
       if (response.isError) throw new Error(`HTTP MCP ${name} returned isError; ${await safeDcDiagnostics(f.data, f.service)}`);
       return JSON.parse(response.content.find((item) => item.type === "text")?.text ?? "{}") as Record<string, unknown>;
     };
@@ -511,7 +530,43 @@ test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, an
     await call("file_patch", { session_id: session, root_id: "files", relative_path: "http.txt", old_string: "before", new_string: "after" });
     assert.match(String((await call("content_search", { session_id: session, root_id: "files", query: "after" })).output), /after/);
     await client.close();
-  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+  } finally { commander.call = originalCommanderCall; await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("Desktop Commander stderr is drained before repeated get_config calls can block MCP", async () => {
+  const f = await fixture(); let service: RemoteDesktopService | undefined;
+  try {
+    await f.service.close();
+    await writeFile(path.join(f.root, "anything.txt"), "anything");
+    const stub = path.join(f.base, "stderr-capacity-stub.mjs");
+    await writeFile(stub, `
+import { once } from "node:events";
+import { readFile } from "node:fs/promises";
+import readline from "node:readline";
+const names = ${JSON.stringify(["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"])};
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") reply(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "stderr-stub", version: "1" } });
+  else if (request.method === "tools/list") reply(request.id, { tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
+  else if (request.method === "tools/call") {
+    if (request.params.name === "get_config") { if (!process.stderr.write("x".repeat(1024 * 1024))) await once(process.stderr, "drain"); const config = JSON.parse(await readFile(process.env.HOME + "/.claude-server-commander/config.json", "utf8")); reply(request.id, { content: [{ type: "text", text: JSON.stringify({ allowedDirectories: config.allowedDirectories }) }] }); }
+    else reply(request.id, { content: [{ type: "text", text: "stub" }] });
+  }
+}
+`);
+    const original = (f.service as unknown as { cfg: RuntimeConfig }).cfg;
+    service = new RemoteDesktopService({ ...original, dcCommand: process.execPath, dcArgs: [stub], allowedRedirectOrigins: new Set(original.allowedRedirectOrigins) });
+    await Promise.race([
+      service.initialize(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stderr drain fixture timed out")), 5_000)),
+    ]);
+    const api = await mcp(service);
+    try {
+      const session = await openSession(api);
+      assert.equal((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "anything.txt" })).output, "stub");
+    } finally { await api.close(); }
+  } finally { await service?.close(); await f.cleanup(); }
 });
 
 test("configuration rejects resolved overlap and traversal aliases", async () => {

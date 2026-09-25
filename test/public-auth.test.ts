@@ -470,6 +470,34 @@ test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, and REMOTE-NR-00
       body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`grant_type=${"x".repeat(17 * 1024)}`)); controller.close(); } }), duplex: "half",
     } as RequestInit);
     assert.equal(chunked.status, 413, "chunked authentication bodies are bounded even without content-length");
+    let slowBodyTimer: NodeJS.Timeout | undefined;
+    const slowBody = new ReadableStream<Uint8Array>({
+      start(controller) { slowBodyTimer = setInterval(() => controller.enqueue(new TextEncoder().encode("x")), 1_000); },
+      cancel() { if (slowBodyTimer) clearInterval(slowBodyTimer); },
+    });
+    const slowBodyBegan = Date.now();
+    try {
+      await assert.rejects(fetch(`${local}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: slowBody, duplex: "half" } as RequestInit).then((response) => response.text()));
+    } finally { if (slowBodyTimer) clearInterval(slowBodyTimer); }
+    assert.ok(Date.now() - slowBodyBegan >= 14_000, "a trickling body is held to the absolute receive deadline");
+    const originalAudit = publicService.audit.bind(publicService);
+    publicService.audit = async (event, fields) => {
+      if (event === "session.open") await new Promise<void>((resolve) => setTimeout(resolve, 15_100));
+      await originalAudit(event, fields);
+    };
+    try {
+      const began = Date.now();
+      const completedBody = await fetch(`${local}/mcp`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenBody.access_token}`, accept: "application/json, text/event-stream", "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "session_open", arguments: {} } }),
+      });
+      assert.equal(completedBody.status, 200, "a completed request body is not timed out while its handler runs");
+      const completedPayload = JSON.parse(/^data: (.+)$/m.exec(await completedBody.text())?.[1] ?? "{}") as { result?: { content?: Array<{ type?: string; text?: string }> } };
+      const completedContent = completedPayload.result?.content?.find((item) => item.type === "text")?.text ?? "{}";
+      assert.ok(JSON.parse(completedContent).session_id, "the completed handler response is usable");
+      assert.ok(Date.now() - began >= 15_000);
+    } finally { publicService.audit = originalAudit; }
   } finally {
     await client?.close();
     await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()) ?? resolve());
