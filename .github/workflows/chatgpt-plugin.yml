@@ -1,0 +1,116 @@
+name: ChatGPT plugin artifacts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/chatgpt-plugin.yml'
+      - 'plugins/remotedesktopmcp/**'
+      - 'scripts/build_chatgpt_plugin.py'
+      - 'test/plugin-packaging/**'
+      - 'doc/chatgpt-setup.md'
+      - 'package.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/chatgpt-plugin.yml'
+      - 'plugins/remotedesktopmcp/**'
+      - 'scripts/build_chatgpt_plugin.py'
+      - 'test/plugin-packaging/**'
+      - 'doc/chatgpt-setup.md'
+      - 'package.json'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test packaging
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s test/plugin-packaging -v 2>&1 | tee plugin-tests.log
+      - name: Build artifacts from the checked-out revision
+        shell: bash
+        env:
+          CHATGPT_MCP_APP_ID: ${{ vars.CHATGPT_MCP_APP_ID }}
+        run: |
+          set -o pipefail
+          python scripts/build_chatgpt_plugin.py --output plugin-artifacts \
+            --revision "$(git rev-parse HEAD)" 2>&1 | tee plugin-build.log
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatgpt-plugin-${{ matrix.os }}-${{ github.sha }}
+          path: plugin-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload diagnostics on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatgpt-plugin-diagnostics-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            plugin-tests.log
+            plugin-build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  release-assets:
+    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: package
+    concurrency:
+      group: chatgpt-plugin-release-${{ github.event.release.id }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: chatgpt-plugin-ubuntu-latest-${{ github.sha }}
+          path: plugin-artifacts
+      - name: Verify artifact checksums
+        working-directory: plugin-artifacts
+        run: sha256sum --check SHA256SUMS
+      - name: Attach packages to the triggering release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const release_id = context.payload.release.id;
+            const params = { ...context.repo, release_id };
+            const previous = await github.paginate(github.rest.repos.listReleaseAssets, params);
+            const names = fs.readdirSync('plugin-artifacts').sort();
+            const info = JSON.parse(fs.readFileSync('plugin-artifacts/build-info.json', 'utf8'));
+            const boundName = `remotedesktopmcp-chatgpt-plugin-v${info.version}.zip`;
+            // An ID removed between reruns must not leave an obsolete bound ZIP behind.
+            const obsolete = previous.find(asset => asset.name === boundName && !names.includes(boundName));
+            if (obsolete) {
+              await github.rest.repos.deleteReleaseAsset({ ...context.repo, asset_id: obsolete.id });
+            }
+            for (const name of names) {
+              const existing = previous.find(asset => asset.name === name);
+              if (existing) {
+                await github.rest.repos.deleteReleaseAsset({ ...context.repo, asset_id: existing.id });
+              }
+              await github.rest.repos.uploadReleaseAsset({
+                ...params, name, data: fs.readFileSync(path.join('plugin-artifacts', name))
+              });
+            }

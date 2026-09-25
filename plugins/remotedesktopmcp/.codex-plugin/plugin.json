@@ -1,0 +1,6 @@
+{
+  "name": "remotedesktopmcp",
+  "version": "0.1.0",
+  "description": "RemoteDesktopMCP connection workflow template; MCP registration and authorization are separate.",
+  "skills": "./skills/"
+}
