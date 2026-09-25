@@ -12,6 +12,7 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import {
   CHATGPT_CLIENT_ID,
   CHATGPT_REDIRECT_URI,
+  createFileOAuthStateStore,
   GoogleOidcClient,
   PublicAuthService,
   type GoogleIdentity,
@@ -20,7 +21,7 @@ import {
   type OidcVerifier,
 } from "../src/public-auth.js";
 import { configFromEnv, createApp, RemoteDesktopService } from "../src/index.js";
-import { protectPrivateDirectory } from "../src/private-storage.js";
+import { assertPrivateFile, createPrivateFile, protectPrivateDirectory } from "../src/private-storage.js";
 import { fixture } from "./fixture.js";
 
 const baseUrl = "https://remote.example.test";
@@ -31,17 +32,38 @@ const challenge = createHash("sha256").update(verifier).digest("base64url");
 const subject: GoogleIdentity = { iss: "https://accounts.google.com", sub: "allowed-subject", email: "owner@example.test" };
 const authSecret = "test-secret-that-is-long-enough";
 
-async function runCli(cwd: string, args: string[]) {
+async function runCli(cwd: string, args: string[], timeoutMs = 0) {
   const workspace = path.resolve(process.cwd());
   await mkdir(cwd, { recursive: true });
   const loader = pathToFileURL(path.join(workspace, "node_modules", "tsx", "dist", "loader.mjs")).href;
   const cli = path.join(workspace, "src", "remote-auth-cli.ts").replaceAll(path.sep, "/");
-  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+  return new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolve, reject) => {
     const child = spawn(process.execPath, ["--import", loader, cli, ...args], { cwd, windowsHide: true });
     let stdout = ""; let stderr = "";
+    let timedOut = false;
+    const timer = timeoutMs ? setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs) : undefined;
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-    child.once("error", reject).once("close", (code) => resolve({ code, stdout, stderr }));
+    child.once("error", (error) => { if (timer) clearTimeout(timer); reject(error); }).once("close", (code) => { if (timer) clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }); });
+  });
+}
+
+async function runBootstrap(cwd: string, timeoutMs: number) {
+  const workspace = path.resolve(process.cwd());
+  const loader = pathToFileURL(path.join(workspace, "node_modules", "tsx", "dist", "loader.mjs")).href;
+  const bootstrap = path.join(workspace, "src", "bootstrap.ts").replaceAll(path.sep, "/");
+  return new Promise<{ code: number | null; timedOut: boolean }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", loader, bootstrap], { cwd, windowsHide: true, stdio: ["ignore", "ignore", "ignore"] });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+    child.once("error", (error) => { clearTimeout(timer); reject(error); }).once("close", (code) => { clearTimeout(timer); resolve({ code, timedOut }); });
+  });
+}
+
+async function grantBuiltinUsersRead(target: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("icacls.exe", [target, "/grant", "*S-1-5-32-545:(RX)"], { windowsHide: true, stdio: ["ignore", "ignore", "ignore"] });
+    child.once("error", reject).once("close", (code) => code === 0 ? resolve() : reject(new Error("Unable to broaden the fixture ACL.")));
   });
 }
 
@@ -313,21 +335,24 @@ test("REMOTE-NR-001: a v1 state with one approved subject and no refresh records
   assert.equal(await auth.authenticate(`Bearer ${issued.access_token}`), `google:${subject.iss}:${subject.sub}`);
 });
 
-test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protected MCP tools", async () => {
+test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, and REMOTE-NR-008: loopback HTTP flow reaches actual protected MCP tools", async () => {
   const f = await fixture();
   let server: ReturnType<ReturnType<typeof createApp>["listen"]> | undefined;
   let client: Client | undefined;
   let publicService: RemoteDesktopService | undefined;
+  const sentinel = "fixture-secret-must-never-reach-public-output";
+  let stateLoads = 0;
+  let state: OAuthState = { version: 1, epoch: 1, allowedSubjects: [subject], refreshes: [], families: {} };
   try {
     await f.service.close();
     publicService = new RemoteDesktopService({
       ...f.service.cfg, baseUrl, users: [], authMode: "google",
-      publicAuth: { baseUrl, tokenSecret: "test-secret-that-is-long-enough", dataDir: f.data, googleClientId: "google-client", googleClientSecret: "not-a-real-secret", googleRedirectUri: `${baseUrl}/google/callback` },
+      publicAuth: { baseUrl, tokenSecret: sentinel, dataDir: f.data, googleClientId: "google-client", googleClientSecret: sentinel, googleRedirectUri: `${baseUrl}/google/callback` },
       publicAuthOptions: {
-        store: memoryStore({ version: 1, epoch: 1, allowedSubjects: [subject], refreshes: [], families: {} }),
+        store: { load: async () => { stateLoads += 1; return structuredClone(state); }, save: async (next) => { state = structuredClone(next); } },
         verifier: {
           authorizationUrl(input) { return `https://accounts.google.com/mock?state=${encodeURIComponent(input.state)}&nonce=${encodeURIComponent(input.nonce)}`; },
-          async exchangeCode(input) { assert.equal(input.code, "google-code"); return subject; },
+          async exchangeCode(input) { if (input.code === "secret-error") throw new Error(sentinel); assert.equal(input.code, "google-code"); return subject; },
         },
         request: async (input) => {
           assert.equal(String(input), CHATGPT_CLIENT_ID);
@@ -358,6 +383,8 @@ test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protecte
     assert.equal(unauthenticated.headers.get("www-authenticate"), `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
     const denied = await fetch(`${local}/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent("https://chatgpt.com/not-the-callback")}&response_type=code&scope=mcp&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
     assert.equal(denied.status, 400, "same-origin redirect lookalikes are rejected");
+    const invalidScope = await fetch(`${local}/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=files&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
+    assert.equal(invalidScope.status, 400, "public authorization rejects a scope other than mcp");
     const begin = await fetch(`${local}/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=mcp&state=chatgpt-state&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
     assert.equal(begin.status, 303);
     assert.equal(begin.headers.get("cache-control"), "no-store");
@@ -382,6 +409,12 @@ test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protecte
     assert.equal(token.status, 200);
     assert.equal(token.headers.get("cache-control"), "no-store");
     const tokenBody = await token.json() as { access_token: string };
+    const rawToolList = await fetch(`${local}/mcp`, { method: "POST", headers: { authorization: `Bearer ${tokenBody.access_token}`, accept: "application/json, text/event-stream", "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" }) });
+    assert.equal(rawToolList.status, 200);
+    const rawToolWire = await rawToolList.text();
+    const rawTools = JSON.parse(/^data: (.+)$/m.exec(rawToolWire)?.[1] ?? rawToolWire) as { result?: { tools?: Array<{ securitySchemes?: unknown }> } };
+    assert.ok(rawTools.result?.tools?.length);
+    for (const tool of rawTools.result?.tools ?? []) assert.deepEqual(tool.securitySchemes, [{ type: "oauth2", scopes: ["mcp"] }], "the tools/list MCP wire response has the protocol top-level OAuth security scheme");
     client = new Client({ name: "public-auth-regression", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${local}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokenBody.access_token}` } } }));
     const listed = await client.listTools();
@@ -399,13 +432,39 @@ test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protecte
     assert.equal(expired.status, 200);
     const expiredBody = await expired.json() as { result?: { isError?: boolean; _meta?: Record<string, unknown> } };
     assert.equal(expiredBody.result?.isError, true);
-    assert.deepEqual(expiredBody.result?._meta?.["mcp/www_authenticate"], [`Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`]);
+    const renewalChallenges = expiredBody.result?._meta?.["mcp/www_authenticate"];
+    assert.ok(Array.isArray(renewalChallenges) && renewalChallenges.length === 1);
+    const renewalChallenge = String(renewalChallenges[0]);
+    assert.match(renewalChallenge, new RegExp(`resource_metadata="${baseUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.well-known/oauth-protected-resource"`));
+    assert.match(renewalChallenge, /error="invalid_token"/);
+    assert.match(renewalChallenge, /error_description="[^"]+"/);
     for (let request = 0; request < 11; request += 1) {
       const flooded = await fetch(`${local}/authorize?client_id=${encodeURIComponent("https://attacker.example/client.json")}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=mcp&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
       if (request === 10) assert.equal(flooded.status, 429);
     }
     const normalAfterFlood = await fetch(`${local}/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=mcp&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
     assert.equal(normalAfterFlood.status, 303, "unknown-client flooding does not consume the fixed ChatGPT bucket");
+    const callbackBegin = await fetch(`${local}/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=mcp&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
+    assert.equal(callbackBegin.status, 303);
+    const callbackCookie = callbackBegin.headers.get("set-cookie") ?? "";
+    const callbackState = new URL(callbackBegin.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    for (let request = 0; request < 31; request += 1) {
+      const floodedCallback = await fetch(`${local}/google/callback?state=forged-${request}&code=google-code`, { redirect: "manual" });
+      if (request === 30) assert.equal(floodedCallback.status, 429);
+    }
+    const callbackAfterFlood = await fetch(`${local}/google/callback?state=${encodeURIComponent(callbackState)}&code=google-code`, { headers: { cookie: callbackCookie } });
+    assert.equal(callbackAfterFlood.status, 200, "invalid callbacks do not consume the existing cookie-bound transaction bucket");
+    const loadsBeforeMcpFlood = stateLoads;
+    const floodedMcp = await Promise.all(Array.from({ length: 32 }, async (_, request) => fetch(`${local}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: request, method: "tools/list" }) })));
+    assert.equal(floodedMcp.filter((response) => response.status === 429).length, 4, "the unknown MCP bucket accounts for the two earlier unauthenticated requests and admits only its configured bounded prefix");
+    assert.ok(stateLoads - loadsBeforeMcpFlood <= 30, "MCP admission limits unknown requests before further persistent-state reads");
+    const secretBegin = await fetch(`${local}/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=mcp&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
+    const secretCookie = secretBegin.headers.get("set-cookie") ?? "";
+    const secretState = new URL(secretBegin.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    const hiddenVerifierError = await fetch(`${local}/google/callback?state=${encodeURIComponent(secretState)}&code=secret-error`, { headers: { cookie: secretCookie }, redirect: "manual" });
+    const malformed = await fetch(`${local}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" });
+    const publicOutputs = [hiddenVerifierError.headers.get("location") ?? "", await hiddenVerifierError.text(), await malformed.text(), await readFile(path.join(f.data, "audit.jsonl"), "utf8")];
+    for (const output of publicOutputs) assert.equal(output.includes(sentinel), false, "fixture secret is absent from HTTP responses, exceptions, and audit records");
     const chunked = await fetch(`${local}/token`, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`grant_type=${"x".repeat(17 * 1024)}`)); controller.close(); } }), duplex: "half",
@@ -417,6 +476,51 @@ test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protecte
     await publicService?.close();
     await f.cleanup();
   }
+});
+
+test("REMOTE-NR-002: startup, CLI, and state loading reject broad existing secret files", { skip: process.platform !== "win32" }, async () => {
+  const base = await mkdtemp(path.join(path.resolve(process.cwd(), "reference", "validation"), "rdmcp-existing-secret-"));
+  const data = path.join(base, "data");
+  const root = path.join(base, "workspace");
+  const stateFile = path.join(data, "oauth-state.json");
+  const envFile = path.join(base, ".env");
+  const sentinel = "fixture-existing-secret-must-not-be-loaded";
+  try {
+    await protectPrivateDirectory(base);
+    await Promise.all([mkdir(data), mkdir(root)]);
+    await protectPrivateDirectory(data);
+    await createPrivateFile(stateFile, JSON.stringify({ version: 1, epoch: 1, allowedSubjects: [], refreshes: [], families: {} }));
+    await grantBuiltinUsersRead(stateFile);
+    await assert.rejects(createFileOAuthStateStore(data).load(), /Private storage ACL/i, "existing OAuth state is checked before its contents are read");
+    await createPrivateFile(envFile, [
+      `BASE_URL=${baseUrl}`, "REMOTE_AUTH_MODE=google", `TOKEN_SECRET=${sentinel}`,
+      "GOOGLE_CLIENT_ID=fixture-client", `GOOGLE_CLIENT_SECRET=${sentinel}`, `GOOGLE_REDIRECT_URI=${baseUrl}/google/callback`,
+      `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${data}`,
+    ].join("\n"));
+    await grantBuiltinUsersRead(envFile);
+    const cli = await runCli(base, ["authorize-google"], 3_000);
+    assert.equal(cli.timedOut, false, "CLI rejects an unsafe existing .env before opening the callback listener");
+    assert.notEqual(cli.code, 0);
+    assert.equal(`${cli.stdout}${cli.stderr}`.includes(sentinel), false);
+    const startup = await runBootstrap(base, 3_000);
+    assert.equal(startup.timedOut, false, "startup rejects an unsafe existing .env before service initialization");
+    assert.notEqual(startup.code, 0);
+  } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test("REMOTE-NR-002: configure creates a strict .env from a safe ordinary checkout parent", { skip: process.platform !== "win32" }, async () => {
+  const base = await mkdtemp(path.join(path.resolve(process.cwd(), "reference", "validation"), "rdmcp-safe-parent-"));
+  const root = path.join(base, "workspace");
+  const data = path.join(base, "data");
+  const clientFile = path.join(base, "google-client.json");
+  try {
+    await protectPrivateDirectory(base);
+    await grantBuiltinUsersRead(base);
+    await Promise.all([mkdir(root), writeFile(clientFile, JSON.stringify({ web: { client_id: "fixture-client", client_secret: "fixture-client-secret" } }))]);
+    const configured = await runCli(base, ["configure", clientFile, "--base-url", baseUrl, "--root", root, "--data-dir", data]);
+    assert.equal(configured.code, 0);
+    await assertPrivateFile(path.join(base, ".env"));
+  } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
 test("RA-09: configure writes only a new isolated .env and never prints the Google secret", async () => {

@@ -9,8 +9,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node --env-file=.env dist/index.js",
-    "dev": "tsx --env-file=.env watch src/index.ts",
+    "start": "node dist/bootstrap.js",
+    "dev": "tsx watch src/bootstrap.ts",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "user:hash": "tsx src/hash-password.ts",

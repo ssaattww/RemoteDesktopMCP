@@ -29,14 +29,21 @@ REMOTE-NR-002 / P1 に対応する Windows ACL と保存領域の検査を実装
 - POSIX ではディレクトリを 0700、ファイルを 0600 にし、現在の `UID` 所有を確認する。
 - 既存のファイル、保存用ディレクトリ、親ディレクトリを検査する。親が安全でない場合は、新しいファイルへ内容を書き込む前に拒否する。新規ファイルは空のファイルを保護・再検査してから内容を書き込む。
 - 一時ファイルを保護した状態で作り、名前変更後もファイルを再検査できる API を提供する。
+- 親ディレクトリ用の `assertSafePrivateParent` を分けた。親は一般利用者が読めてもよいが、一般利用者に書込み、削除、作成、アクセス規則変更、所有者変更の許可がある場合は拒否する。root と repository のアクセス規則は変更しない。
 
-`test/private-storage.test.ts` は `reference/validation` 内の空の専用ディレクトリを実際に保護してから、Windows のアクセス規則による新規作成、既存ファイルの広い許可拒否、広い親ディレクトリ拒否、一時ファイルの名前変更後再検査を確認する。POSIX の同じ契約は POSIX 実行時に走る。
+`test/private-storage.test.ts` は `reference/validation` 内の空の専用ディレクトリを実際に保護してから、Windows のアクセス規則による新規作成、既存ファイルの広い許可拒否、読み取り専用の一般親での作成成功、書込み可能な一般親の拒否、一時ファイルの名前変更後再検査を確認する。POSIX の同じ契約は POSIX 実行時に走る。
+
+| 対象 | helper の契約 | Windows 実測 |
+| --- | --- | --- |
+| 秘密を持つ leaf | 現在の利用者、`SYSTEM`、`Administrators` だけを許可し、所有者と継承なしを再検査する。 | 新規作成と名前変更後を確認し、読み取り許可を追加した既存ファイルを拒否。 |
+| 一般親 | 一般利用者の読み取り専用を許容する。 | 読み取り許可を追加した親で、新規 leaf を保護してから内容を書き込めることを確認。 |
+| 危険な親 | 一般利用者の書込み、削除、作成、アクセス規則変更、所有者変更を拒否する。 | 書込み可能な ACL を追加した親で、秘密を持つファイルの作成を拒否。 |
 
 既存の HTTP fixture も、秘密を書き込む前の空の `DATA_DIR` を `protectPrivateDirectory` で保護してから `RemoteDesktopService` を初期化するようにした。この変更は親の明示許可で `test/fixture.ts` に限定した。
 
 限定確認（Windows / PowerShell / `C:\Users\donabe\Project\RemoteDesktopMCP`）:
 
-- `npx.cmd tsx --test test/private-storage.test.ts`: Windows 1件成功、POSIX 1件省略。
+- `npx.cmd tsx --test test/private-storage.test.ts`: Windows 1件成功、POSIX 1件省略。読み取り専用親と書込み可能親を Windows ACL で実測した。
 - `npx.cmd eslint src/private-storage.ts test/private-storage.test.ts test/fixture.ts`: 成功。
 - `npx.cmd tsc -p tsconfig.json --noEmit`: 成功。
 

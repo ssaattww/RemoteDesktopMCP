@@ -33,4 +33,14 @@ refresh token は原文を保存せずハッシュ・family・対象・client・
 
 Desktop Commander 子プロセスには Google client secret、トークン署名鍵、認証設定を渡さない。公開モードで password 認証を使おうとすると設定時に拒否される。`node_list` はファイルの絶対パスを出さずに利用可能な `root_ids` を返す。
 
-focused check: `npm run check` と `npm run lint:ts` は成功。`npx tsx --test test/public-auth.test.ts` は 9/9 成功した。全体 `npm test` は 32/33 成功し、既存の `NR003 and NR004` だけが `C:\Program` を未引用で起動する portable-process ケースとして失敗した。Desktop Commander 子環境を旧全継承へ一時的に戻しても同じ単独失敗を再現したため、公開認証の差分ではない。Google OAuth credential はまだ作成されていないため、実 Google ログイン、Tailscale Funnel 経由の ChatGPT 接続、restart 後 refresh の実運用確認は未実施である。
+初回実装時点の focused check: `npm run check` と `npm run lint:ts` は成功。`npx tsx --test test/public-auth.test.ts` は 9/9 成功した。全体 `npm test` は 32/33 成功し、既存の `NR003 and NR004` だけが `C:\Program` を未引用で起動する portable-process ケースとして失敗した。Desktop Commander 子環境を旧全継承へ一時的に戻しても同じ単独失敗を再現したため、公開認証の差分ではない。この初回時点では Google OAuth credential はまだ作成されておらず、実 Google ログイン、Tailscale Funnel 経由の ChatGPT 接続、restart 後 refresh の実運用確認は未実施だった。
+
+## 通常レビュー修正の追記
+
+`REMOTE-NR-002` に対し、OAuth state は既存ファイルの ACL を確認してから読む。`npm start` と `npm run dev` は Node の `--env-file` を使わず、`src/bootstrap.ts` が `.env` の親の置換権限とファイル ACL を確認してから環境を読み込む。CLI の本人登録も同じ順序にし、configure は許可していない主体が書込み・削除できる親を拒否し、一般主体の読取りだけを許す親では作成できる storage helper を使う。既存の実 `.env`、Google credential、OAuth state は読まず変更していない。
+
+`REMOTE-NR-003` では、現行 MCP SDK が `tools/list` を組み直して top-level field を落とすため、同じ SDK の元 handler を tool list だけ包み、各 tool の wire descriptor に OAuth `securitySchemes` を追加した。互換用の `_meta` aliases も残す。失効 Bearer による `tools/call` は HTTP 401 discovery と区別して、`invalid_token` と説明を含む `mcp/www_authenticate` runtime challenge を返す。
+
+`REMOTE-NR-006` では、公開 MCP の永続 state 読込み前に admission を行う。自サーバー署名済みの access token は token ごとの固定 bucket を使い、未署名または不正な入力は別の固定 bucket を使う。Google callback も cookie と state が一致する未使用 transaction を別 bucket にする。したがって無効入力の連続送信が進行中の正規 transaction を同じ bucket で枯渇させない。送信元 IP や `X-Forwarded-For` には依存しないため、匿名の新規無効入力に公平な可用性を保証するものではない。
+
+この追記時点の focused source check は `npm run check`、`npm run lint:ts`、`npm run build` が成功した。公開サービス起動、ChatGPT 接続、Funnel 経由の実 refresh は実施していない。Google のローカル本人登録は別途成功しているが、その実 state は本実装確認で開いていない。

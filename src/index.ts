@@ -7,10 +7,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
 import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
-import { assertPrivateFile, createPrivateFile, ensurePrivateDirectory } from "./private-storage.js";
+import { assertPrivateFile, createPrivateFile, ensurePrivateDirectory, protectPrivateFile } from "./private-storage.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
@@ -429,7 +430,7 @@ export class RemoteDesktopService {
     await this.untrackOwnedUpload(item.temp);
   }
   private async fail(item: Transfer, reason: string): Promise<void> { item.state = reason === "expired" || reason === "session_expired" ? "expired" : "failed"; await this.cleanup(item); this.rememberTerminal(item); await this.audit("transfer.failed", { transferId: item.id, direction: item.direction, reason }); }
-  private async privateSnapshot(source: string, destination: string) { await copyFile(source, destination); const bytes = await readFile(destination); return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") }; }
+  private async privateSnapshot(source: string, destination: string) { await copyFile(source, destination); await protectPrivateFile(destination); const bytes = await readFile(destination); return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") }; }
   private async verifyNoReplaceCapability(directory: string): Promise<void> {
     const token = makeId();
     const probe = path.join(directory, `.__rdmcp_${token}.probe`);
@@ -483,6 +484,14 @@ export class RemoteDesktopService {
   private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>) => Promise<unknown>) { return async (args: z.infer<z.ZodObject<T>>) => { try { return result(await fn(args)); } catch (error) { const message = error instanceof Error ? error.message : "Operation failed."; const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error"; await this.audit("operation.rejected", { user, reason }); const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot)/.test(message) ? message : "Operation failed."; return failure(publicMessage); } }; }
   server(user: string): McpServer {
     const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" });
+    type RequestHandler = (...args: unknown[]) => unknown;
+    const underlying = server.server as unknown as { setRequestHandler: (schema: unknown, handler: RequestHandler) => unknown };
+    const setRequestHandler = underlying.setRequestHandler.bind(underlying);
+    underlying.setRequestHandler = (schema, handler) => setRequestHandler(schema, schema === ListToolsRequestSchema ? async (...args: unknown[]) => {
+      const listed = await handler(...args) as { tools?: Array<Record<string, unknown>> };
+      if (!Array.isArray(listed.tools)) return listed;
+      return { ...listed, tools: listed.tools.map((tool) => ({ ...tool, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })) };
+    } : handler);
     const intercept = server as unknown as { registerTool: (name: string, config: { _meta?: Record<string, unknown> }, handler: unknown) => unknown };
     const originalRegisterTool = intercept.registerTool.bind(server);
     intercept.registerTool = (name, config, handler) => originalRegisterTool(name, { ...config, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
@@ -628,8 +637,11 @@ export function createApp(service: RemoteDesktopService): Express {
   });
   app.get("/google/callback", async (req, res) => {
     if (!service.publicAuth) return res.status(404).send("Not found.");
-    if (!rate.allow("google_callback", 30)) return res.status(429).send("Too many requests.");
-    const outcome = await service.publicAuth.googleCallback({ state: typeof req.query.state === "string" ? req.query.state : "", code: typeof req.query.code === "string" ? req.query.code : undefined, error: typeof req.query.error === "string" ? req.query.error : undefined, cookie: readCookie(req.header("cookie"), AUTH_COOKIE) });
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    const cookie = readCookie(req.header("cookie"), AUTH_COOKIE);
+    const admission = service.publicAuth.googleCallbackAdmission({ state, cookie });
+    if (!rate.allow(`google_callback:${admission ?? "invalid"}`, 30)) return res.status(429).send("Too many requests.");
+    const outcome = await service.publicAuth.googleCallback({ state, code: typeof req.query.code === "string" ? req.query.code : undefined, error: typeof req.query.error === "string" ? req.query.error : undefined, cookie });
     res.setHeader("Cache-Control", "no-store");
     if (outcome.redirect) return res.redirect(303, outcome.redirect);
     if (outcome.transaction) return res.type("html").send(`<!doctype html><meta charset="utf-8"><title>Remote Desktop MCP</title><p>Allow ChatGPT to read and change files only within the configured file roots, and to start arbitrary commands as this Windows user's OS account?</p><form method="post" action="/authorize/consent"><input type="hidden" name="transaction" value="${outcome.transaction}"><button name="allow" value="yes" type="submit">Allow</button><button name="allow" value="no" type="submit">Deny</button></form>`);
@@ -642,8 +654,9 @@ export function createApp(service: RemoteDesktopService): Express {
     if (outcome.redirect) return res.redirect(303, outcome.redirect);
     return res.status(400).type("html").send("Authorization could not be completed.");
   });
-  app.all("/mcp", async (req: Request, res: Response) => { if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }); const user = service.publicAuth ? await service.publicAuth.authenticate(req.header("authorization")) : service.authenticate(req.header("authorization")); if (!user) { if (!rate.allow("mcp_unauth", 30)) return res.status(429).json({ jsonrpc: "2.0", error: { code: -32029, message: "Too many unauthenticated requests." }, id: null }); await service.audit("mcp.rejected", { reason: "authentication" }); const challenge = `Bearer resource_metadata="${service.cfg.baseUrl}/.well-known/oauth-protected-resource"`; const rpc = req.body as { method?: unknown; id?: unknown } | undefined; if (req.header("authorization") && rpc?.method === "tools/call") return res.status(200).json({ jsonrpc: "2.0", result: { isError: true, content: [{ type: "text", text: "Authorization expired. Reconnect to continue." }], _meta: { "mcp/www_authenticate": [challenge] } }, id: rpc.id ?? null }); res.setHeader("WWW-Authenticate", challenge); return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null }); } const server = service.server(user); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); let cleaned = false; const cleanup = () => { if (!cleaned) { cleaned = true; void transport.close(); void server.close(); } }; res.once("finish", cleanup); req.once("aborted", cleanup); try { await server.connect(transport); await transport.handleRequest(req, res, req.body); } catch { await service.audit("mcp.failed", { user }); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null }); } });
+  app.all("/mcp", async (req: Request, res: Response) => { if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }); const authorization = req.header("authorization"); if (service.publicAuth && !rate.allow(`mcp:${service.publicAuth.mcpAdmissionKey(authorization) ?? "unknown"}`, 30)) return res.status(429).json({ jsonrpc: "2.0", error: { code: -32029, message: "Too many unauthenticated requests." }, id: null }); const user = service.publicAuth ? await service.publicAuth.authenticate(authorization) : service.authenticate(authorization); if (!user) { await service.audit("mcp.rejected", { reason: "authentication" }); const discoveryChallenge = `Bearer resource_metadata="${service.cfg.baseUrl}/.well-known/oauth-protected-resource"`; const renewalChallenge = `${discoveryChallenge}, error="invalid_token", error_description="Access token is invalid or expired."`; const rpc = req.body as { method?: unknown; id?: unknown } | undefined; if (authorization && rpc?.method === "tools/call") return res.status(200).json({ jsonrpc: "2.0", result: { isError: true, content: [{ type: "text", text: "Authorization expired. Reconnect to continue." }], _meta: { "mcp/www_authenticate": [renewalChallenge] } }, id: rpc.id ?? null }); res.setHeader("WWW-Authenticate", discoveryChallenge); return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null }); } const server = service.server(user); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); let cleaned = false; const cleanup = () => { if (!cleaned) { cleaned = true; void transport.close(); void server.close(); } }; res.once("finish", cleanup); req.once("aborted", cleanup); try { await server.connect(transport); await transport.handleRequest(req, res, req.body); } catch { await service.audit("mcp.failed", { user }); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null }); } });
   app.use((error: unknown, _req: Request, res: Response, next: unknown) => { void next; void service.audit("http.failed", { route: "authentication" }).catch(() => undefined); if (!res.headersSent) { const status = typeof error === "object" && error !== null && "status" in error && (error as { status?: unknown }).status === 413 ? 413 : 500; res.status(status).type("text").send(status === 413 ? "Request is too large." : "Request could not be completed."); } });
   return app;
 }
-if (process.argv[1] === fileURLToPath(import.meta.url)) { const service = new RemoteDesktopService(configFromEnv()); await service.initialize(); createApp(service).listen(service.cfg.port, "127.0.0.1", () => console.log(`Remote Desktop MCP listening on ${service.publicAuth ? service.cfg.baseUrl : `http://127.0.0.1:${service.cfg.port}`}/mcp (${service.publicAuth ? "google" : "local-development"})`)); }
+export async function startFromEnvironment(): Promise<void> { const service = new RemoteDesktopService(configFromEnv()); await service.initialize(); createApp(service).listen(service.cfg.port, "127.0.0.1", () => console.log(`Remote Desktop MCP listening on ${service.publicAuth ? service.cfg.baseUrl : `http://127.0.0.1:${service.cfg.port}`}/mcp (${service.publicAuth ? "google" : "local-development"})`)); }
+if (process.argv[1] === fileURLToPath(import.meta.url)) await startFromEnvironment();

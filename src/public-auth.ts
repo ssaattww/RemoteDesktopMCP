@@ -50,7 +50,7 @@ export function createFileOAuthStateStore(dataDir: string): OAuthStateStore {
   return {
     async load() {
       await ensurePrivateDirectory(dataDir);
-      try { const raw = await readFile(file, "utf8"); const state: unknown = JSON.parse(raw); if (!isState(state)) throw new Error("OAuth state is invalid."); return state; }
+      try { await assertPrivateFile(file); const raw = await readFile(file, "utf8"); const state: unknown = JSON.parse(raw); if (!isState(state)) throw new Error("OAuth state is invalid."); return state; }
       catch (error) { if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT") return freshState(); throw error; }
     },
     async save(state) {
@@ -149,6 +149,22 @@ export class PublicAuthService {
   }
   cookie(transaction: string) { const sig = createHmac("sha256", this.cfg.tokenSecret).update(transaction).digest("base64url"); return `${transaction}.${sig}`; }
   validCookie(value: string | undefined, transaction: string) { return Boolean(value && same(value, this.cookie(transaction))); }
+  /** Returns a bounded-rate key only for a token signed by this authorization server.
+   * It deliberately does not consult persistent grants; callers use it before the
+   * full authentication path to keep anonymous floods away from disk state. */
+  mcpAdmissionKey(header?: string): string | undefined {
+    if (!header?.startsWith("Bearer ")) return undefined;
+    const raw = header.slice(7); const token = this.verify(raw);
+    if (!token || token.type !== "access" || token.iss !== this.cfg.baseUrl || token.aud !== `${this.cfg.baseUrl}/mcp` || token.client_id !== CHATGPT_CLIENT_ID || token.scope !== "mcp" || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.epoch !== "number" || typeof token.family !== "string" || typeof token.iat !== "number" || typeof token.nbf !== "number" || typeof token.exp !== "number") return undefined;
+    return digest(raw);
+  }
+  /** Classifies only an existing, cookie-bound Google transaction without
+   * exchanging the code or reading persistent authorization state. */
+  googleCallbackAdmission(input: { state: string; cookie?: string }): string | undefined {
+    this.clean(); const transaction = [...this.transactions.values()].find((item) => item.googleState === input.state);
+    if (!transaction || transaction.subject || transaction.googleCallbackStarted || !this.validCookie(input.cookie, transaction.id)) return undefined;
+    return digest(transaction.id);
+  }
   async begin(input: { clientId: string; redirectUri: string; resource: string; state?: string; challenge: string }): Promise<{ redirect: string; cookie: string }> {
     if (this.clientMetadataExpires <= this.now()) await this.verifyChatGptClientMetadata();
     this.clean(); const transaction: Transaction = { id: this.makeId(), googleState: this.makeId(), nonce: this.makeId(), ...input, expires: this.now() + TRANSACTION_TTL }; this.transactions.set(transaction.id, transaction);

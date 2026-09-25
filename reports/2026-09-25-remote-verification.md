@@ -44,3 +44,5 @@ Markdown lint は48ファイル、指摘0件。これらは製品コードの合
 親担当が Windows / Node 24 で `npx.cmd tsx --test test/public-auth.test.ts test/private-storage.test.ts` を実行した。16件中15件成功、POSIX 専用1件スキップ、失敗0件、終了コード0、実行時間34946ms。公開認証14件と実 Windows ACL をまとめて確認した。
 `npm.cmd run lint` も終了コード0。コード lint、Markdown 51ファイル、設計文書の用語検査が成功した。
 対象は初回実装 HEAD `2e6ecefef8b0b2b4e0903565a7496b8050e5a443` からの修正差分であり、次の通常修正確認用コミットへ含める。全体 Node 22 gate と公開 ChatGPT 接続は未実施。
+
+通常修正確認1の `a08343014ac8214e5efeb62156b46fceb5d81e13` では4項目の不足が残った。追加修正後、親が同じ公開認証と ACL のまとめ試験を完了まで待ち、終了コード0、18件中17件成功、POSIX 専用1件スキップ、失敗・中断0件、51961.5453msを確認した。既存秘密ファイルの起動前拒否、通常の親フォルダでの安全な設定作成、生の HTTP 応答の tool metadata と再認可情報、過剰要求の制限、秘密の非出力を追加確認している。

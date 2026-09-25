@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/pro
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { assertPrivateDirectory, assertPrivateFile, createPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory, protectPrivateDirectory } from "../src/private-storage.js";
+import { assertPrivateDirectory, assertPrivateFile, assertSafePrivateParent, createPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory, protectPrivateDirectory } from "../src/private-storage.js";
 
 const execFileAsync = promisify(execFile);
 const workspace = path.resolve(process.cwd());
@@ -37,6 +37,14 @@ async function grantBroadRead(target: string) {
   await chmod(target, 0o755);
 }
 
+async function grantBroadWrite(target: string) {
+  if (process.platform === "win32") {
+    await execFileAsync("icacls.exe", [target, "/grant", "*S-1-5-32-545:(OI)(CI)(M)"], { windowsHide: true });
+    return;
+  }
+  await chmod(target, 0o733);
+}
+
 async function runPrivateStorageChecks() {
   const base = await privateBase();
   try {
@@ -58,14 +66,27 @@ async function runPrivateStorageChecks() {
     await grantBroadRead(state);
     await assert.rejects(assertPrivateFile(state), /Private storage/);
 
-    const broadParent = path.join(base, "broad-parent");
-    await ensurePrivateDirectory(broadParent);
-    await grantBroadRead(broadParent);
-    await assert.rejects(createPrivateFile(path.join(broadParent, "must-not-contain-secret"), "secret"), /Private storage/);
+    const readonlyParent = path.join(base, "readonly-parent");
+    await ensurePrivateDirectory(readonlyParent);
+    await grantBroadRead(readonlyParent);
+    await assertSafePrivateParent(readonlyParent);
+    const readonlyDirectory = path.join(readonlyParent, "safe-new-directory");
+    await ensurePrivateDirectory(readonlyDirectory);
+    await assertPrivateDirectory(readonlyDirectory);
+    const readonlyChild = path.join(readonlyParent, "safe-new-secret");
+    await createPrivateFile(readonlyChild, "secret");
+    await assertPrivateFile(readonlyChild);
+
+    const unsafeParent = path.join(base, "unsafe-parent");
+    await ensurePrivateDirectory(unsafeParent);
+    await grantBroadWrite(unsafeParent);
+    const rejected = path.join(unsafeParent, "must-not-contain-secret");
+    await assert.rejects(createPrivateFile(rejected, "secret"), /Private storage/);
+    await assert.rejects(lstat(rejected), /ENOENT/);
   } finally {
     await cleanup(base);
   }
 }
 
-test("REMOTE-NR-002: Windows ACLs protect new files, rename results, and reject broad existing ACLs", { skip: process.platform !== "win32" }, runPrivateStorageChecks);
-test("REMOTE-NR-002: POSIX permissions protect new files, rename results, and reject broad existing modes", { skip: process.platform === "win32" }, runPrivateStorageChecks);
+test("REMOTE-NR-002: Windows ACLs protect private leaves, allow readonly parents, and reject untrusted writes", { skip: process.platform !== "win32" }, runPrivateStorageChecks);
+test("REMOTE-NR-002: POSIX permissions protect private leaves, allow readonly parents, and reject untrusted writes", { skip: process.platform === "win32" }, runPrivateStorageChecks);

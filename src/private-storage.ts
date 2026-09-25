@@ -38,6 +38,16 @@ try {
     Set-Acl -LiteralPath $request.path -AclObject $acl
     $item = Get-Item -LiteralPath $request.path -Force
   }
+  if ($request.operation -eq 'assert-parent') {
+    $stage = 'verify'
+    $unsafe = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $rules = @((Get-Acl -LiteralPath $request.path).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    foreach ($rule in $rules) {
+      if ($allowed -notcontains $rule.IdentityReference.Value -and $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $unsafe) -ne 0) { throw 'untrusted parent write access' }
+    }
+    [Console]::Out.Write('{"ok":true}')
+    exit 0
+  }
   $stage = 'verify'
   $acl = Get-Acl -LiteralPath $request.path
   if (-not $acl.AreAccessRulesProtected) { throw 'inherited access rules' }
@@ -60,7 +70,7 @@ try {
 }
 `;
 
-async function windowsAcl(target: string, operation: "protect" | "assert"): Promise<void> {
+async function windowsAcl(target: string, operation: "protect" | "assert" | "assert-parent"): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", windowsAclScript], {
       env: allowedChildEnvironment(),
@@ -112,6 +122,18 @@ export async function assertPrivateFile(file: string): Promise<void> {
   await assertPrivate(file, "file");
 }
 
+/** The parent may be readable by ordinary users, but they must not be able to
+ * replace, delete, create, or re-permission a private child before it is read. */
+export async function assertSafePrivateParent(directory: string): Promise<void> {
+  if (await kind(directory) !== "directory") throw new Error("Private storage path type is invalid.");
+  if (process.platform === "win32") {
+    await windowsAcl(directory, "assert-parent");
+    return;
+  }
+  const info = await lstat(directory);
+  if ((info.mode & 0o022) !== 0 || info.uid !== process.getuid?.()) throw new Error("Private storage parent permissions are unsafe.");
+}
+
 export async function ensurePrivateDirectory(directory: string): Promise<void> {
   try {
     await assertPrivateDirectory(directory);
@@ -119,7 +141,7 @@ export async function ensurePrivateDirectory(directory: string): Promise<void> {
   } catch (error) {
     if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error;
   }
-  await assertPrivateDirectory(path.dirname(directory));
+  await assertSafePrivateParent(path.dirname(directory));
   await mkdir(directory, { mode: 0o700 });
   await protectPrivate(directory, "directory");
 }
@@ -133,7 +155,7 @@ export async function protectPrivateDirectory(directory: string): Promise<void> 
 }
 
 export async function createPrivateFile(file: string, contents: string | Uint8Array): Promise<void> {
-  await assertPrivateDirectory(path.dirname(file));
+  await assertSafePrivateParent(path.dirname(file));
   const handle = await open(file, "wx", 0o600);
   await handle.close();
   try {

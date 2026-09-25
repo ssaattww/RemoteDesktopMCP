@@ -8,7 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { configFromEnv } from "./index.js";
 import { GoogleOidcClient, PublicAuthService } from "./public-auth.js";
-import { assertPrivateDirectory, createPrivateFile, ensurePrivateDirectory } from "./private-storage.js";
+import { assertPrivateFile, assertSafePrivateParent, createPrivateFile, ensurePrivateDirectory } from "./private-storage.js";
 
 const LOCAL_CALLBACK = "http://localhost:8765/callback";
 const current = process.cwd();
@@ -35,12 +35,12 @@ async function configure(source: string) {
     `GOOGLE_CLIENT_ID=${(client as { client_id: string }).client_id}`, `GOOGLE_CLIENT_SECRET=${(client as { client_secret: string }).client_secret}`, `GOOGLE_REDIRECT_URI=${baseUrl}/google/callback`, `GOOGLE_LOCAL_REDIRECT_URI=${LOCAL_CALLBACK}`,
     `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${dataDir}`, "LOCAL_NODE_ID=local", "LOCAL_NODE_LABEL=This PC", "TRANSFER_CHUNK_BYTES=131072",
   ];
-  await assertPrivateDirectory(path.dirname(envPath)); await createPrivateFile(envPath, `${lines.join("\n")}\n`);
+  await createPrivateFile(envPath, `${lines.join("\n")}\n`);
   console.log("Created .env with Google mode. Keep the Google client JSON and .env outside the permitted workspace.");
 }
 
 async function authorizeGoogle() {
-  process.loadEnvFile(path.join(current, ".env")); const cfg = configFromEnv();
+  const envPath = path.join(current, ".env"); await assertSafePrivateParent(path.dirname(envPath)); await assertPrivateFile(envPath); process.loadEnvFile(envPath); const cfg = configFromEnv();
   const publicAuth = cfg.publicAuth; if (!publicAuth) throw new Error("REMOTE_AUTH_MODE=google is required.");
   const callback = process.env.GOOGLE_LOCAL_REDIRECT_URI ?? LOCAL_CALLBACK;
   if (callback !== LOCAL_CALLBACK) throw new Error(`GOOGLE_LOCAL_REDIRECT_URI must be ${LOCAL_CALLBACK}.`);
