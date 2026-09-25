@@ -112,3 +112,36 @@ finding completeness matrix は初回指摘のため未適用。実装担当の�
 `document_wording_review` は同じ reviewer が fix scope で実施。対象は `doc/remote-setup.md:43-57` の元の「表示された画面」から新しい URL fallback への全文脈、`reports/2026-09-25-remote-{context,implementation,tests,verification,storage}.md` の変更箇所と新規 storage 報告全体、`tasks/tasks-status.md:31-39`。Skill 本文と decision examples は初回に実読し、今回も本文を再読。意味/同定/承認語の用法/読みやすさのうち、手順の NR009 は各 `checked_no_finding` で修正確認済み。新たな用語承認変更はない。試験表の実測より広い主張と F01a 件数は意味・識別の `checked_finding` REMOTE-NR-008。mechanical lint は親の `npm run lint` success と分離し、wording result は `fail`。policy conflict はなく、歴史的な「調査時点」と現在の実本人登録を区別した表現は保持されている。
 
 次は同一指摘の未解消4件だけを実装・試験担当へ戻し、修正 matrix の不足セルと新たな immutable HEAD がそろってから同じ reviewer で再確認する。severity と finding identity は維持。normal review には独立最終レビュー用の report-attestation allowlist は該当せず、`report_attestation_allowed=false`。unexplored は実 ChatGPT UI の挙動であり、F03 の実環境確認に所有させる。
+
+### 同一担当の修正確認 2
+
+- mode: normal fix verification。reviewer: `/root/remote_normal_review`。初回実装 HEAD `2e6ecefef8b0b2b4e0903565a7496b8050e5a443`、前回候補 `a08343014ac8214e5efeb62156b46fceb5d81e13`、今回の immutable reviewed implementation HEAD `3d676b89d0268c9d41f78251d7a351f232ad4f6f`。base/branch は初回記録どおり。元の要求 profile Sol / high、実際の runtime profile は非公開で観測不能。application status: `reused_existing_agent_profile`。実装・試験変更も他 agent への分解もしていない。
+- finding completeness: **complete**。`reports/2026-09-25-remote-tests.md` の NR001〜009 の各行で元 required action、production path、実際の合成 fixture、focused 結果を照合した。前回不足の NR002/003/006/008 と、それらが直接変更した ACL・MCP wire・認可・報告 prose を確認した。他5件は前回の確認結果を維持し、今回の直接影響を調べた。元 severity の変更はない。
+- verdict: **fail**。`REMOTE-NR-002 / P1` の親 ACL 境界に必須の未解消が1件ある。NR001/003〜009 は当該 finding の closure として `closed`。この verdict は今回の固定実装 HEAD に限る。実 Google 本人登録の成功は別証拠であり、ChatGPT 経由の公開接続が完了したという判定ではない。
+
+| ID / source severity | required action・production path・composition・focused evidence の確認 | closure |
+| --- | --- | --- |
+| REMOTE-NR-001 / P1 | 7日 rotation・replay・期限清掃の前回確認を維持。今回の直接変更なし。 | `closed` |
+| REMOTE-NR-002 / P1 | `src/bootstrap.ts` と `src/remote-auth-cli.ts` は既存 `.env` の ACL を load 前に検査し、`src/public-auth.ts` の file store は既存 state を read 前に検査する。Windows 実 ACL fixture は広い既存 leaf を拒否し、Users RX の親から strict `.env` を作成する。`test/private-storage.test.ts` は read-only 親と broad write 親を分け、focused 18件中の該当例は成功。ただし `src/private-storage.ts` の `assert-parent` は親の Allow ACE だけを列挙し、親の owner を検査しない。別の非許可主体が owner の場合、見かけ上 read-only の DACL でも owner が権限を変更して `.env` を置換できる。POSIX 側は uid を検査し、実 Windows 作業フォルダの owner も別途修正済みだが、一般コードの親条件は未完成。 | `open`。Windows の親 owner を current user / SYSTEM / Administrators に限定し、非許可 owner を持つ見かけ上安全な親の拒否を実 ACL fixture で確認する。元 P1 を維持。[Microsoft の owner 権限説明](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/take-ownership-of-files-or-other-objects) による。 |
+| REMOTE-NR-003 / P1 | `src/index.ts` の MCP `tools/list` handler は全 tool の protocol top-level `securitySchemes` を出し、互換 `_meta` も保持。署名失効 `tools/call` は `resource_metadata`、`error="invalid_token"`、`error_description` を含む challenge を返す。port 0 の生 HTTP `tools/list` と失効 `tools/call` を検査し、初期 HTTP 401 discovery と区別した。SDK client が未知の top-level field を parse 後に落とすため、生 wire assertion が必要であり今回追加された。 | `closed` |
+| REMOTE-NR-004 / P1 | 1人制約・明示置換・旧 grant 失効の前回確認を維持。今回の直接変更なし。 | `closed` |
+| REMOTE-NR-005 / P2 | code 交換前の主体/epoch と binding 拒否の前回確認を維持。今回の直接変更なし。 | `closed` |
+| REMOTE-NR-006 / P2 | `mcpAdmissionKey` は署名済み access だけを token 別 key にし、不正/匿名入力を固定 unknown key にまとめる。`/mcp` は `authenticate()` の永続 state load 前に admission を実施。Google callback は既存未使用 transaction の state と cookie を照合して別 key にする。port 0 fixture は unknown MCP 32件の 429 と state load 上限、無効 callback 31件の後の正規 callback 200、unknown client 11件後の固定 client 成功、chunked 17 KiB の 413 を確認。固定 client 名を秘密とは扱わず、匿名新規要求の完全な可用性保証は残余リスクとする。 | `closed` |
+| REMOTE-NR-007 / P2 | access claim 型・時間・固定 client・最大寿命の前回確認を維持。今回の直接変更なし。 | `closed` |
+| REMOTE-NR-008 / P2 | file store restart/save 失敗、同時 refresh と code binding の前回試験に、誤 scope の HTTP 400、Google verifier 例外の secret sentinel 非出力、malformed body、監査 file の非出力 assertion を加えた。RA-10 の表現は実際の固定 Google token/JWKS と CIMD に限定し、F01a を公開16件へ同期した。 | `closed` |
+| REMOTE-NR-009 / P1 | 認可 URL fallback、ローカル待受、本人ログイン/明示承認、CLI exit 0 の前回実証を維持。CLI の既存 `.env` 検査と通常親からの configure は NR002 の直接影響として別途確認した。 | `closed` |
+
+#### coverage、wording、held
+
+| criterion | disposition / evidence |
+| --- | --- |
+| finding 9件の対応と変更の直接影響 | `checked_finding` NR002、他8件 `checked_no_finding`。今回の差分は `src/bootstrap.ts`、`src/{index,private-storage,public-auth,remote-auth-cli}.ts`、試験、設定 script、report/task の変更を照合。初回の全 criteria を再網羅していない。 |
+| Windows private storage・設定・失敗診断 | `checked_finding` NR002。既存 leaf 拒否、通常 checkout の Users RX 親許可は成立。親 owner の暗黙の権限変更能力が残る。実 `.env`、外部 `DATA_DIR`、Google JSON 内容は読んでいない。 |
+| MCP metadata/HTTP challenge/rate/body | `checked_no_finding` NR003/006 の限定修正範囲。固定容量と60秒回復は前回確認済み。匿名新規要求を固定公認 client 名だけで保護できないことは残余制約。 |
+| 永続 token・単一主体・code/claim の回帰 | `checked_no_finding` NR001/004/005/007/008 の限定修正範囲。今回の合成と前回の focused 証拠を区別した。 |
+| 文書・task・試験表の整合 | `checked_no_finding`。NR008 の過大主張と F01a 件数は修正された。P4 は単一 PC 公開を先に置き、F02 複数PCを後続と明記。F03 未完了を保持。 |
+| current-HEAD local gate / CI / 実公開 | `held`。親の Windows focused は18件中17 pass、POSIX 1 skip、0 fail/0 cancel、exit 0、`npm run check`・`lint:ts`・`build` 成功。同一 HEAD の Node22 全体 gate は別担当が実行中、CI は未 push のため不在。実 Google 本人登録は成功したが公開サービス・Funnel・ChatGPT 実接続・再起動後の実 refresh は F03 所有で未実施。 |
+
+`document_wording_review`: mode normal fix verification、reader `/root/remote_normal_review`、Windows runtime_local。`skills/document-wording-review/SKILL.md` を今回も実読し、decision examples は初回に実読済み。文書 target は今回 HEAD、before は `a08343014ac8214e5efeb62156b46fceb5d81e13`、新規 `reports/2026-09-25-remote-full-gate.md` は `baseline_absent_new_file`。`reports/2026-09-25-remote-{context,implementation,tests,verification}.md`、`tasks/{phases,tasks}-status.md` の変更文脈、normal-review の前回報告、新規 full-gate 報告を読んだ。`package.json` と code/test の識別子・fixture 名のみの行は prose 対象外。意味・識別・承認済み用語の用法・読みやすさは各 `checked_no_finding`。歴史的な初回時点の Google credential 未作成と現在の本人登録成功を区別し、試験表は mock と実証を分ける。前回 wording finding NR009 は閉じたまま。新たな用語承認変更・policy conflict・不足 evidence なし。親の `npm run lint` 成功は機械検査 evidence であり wording 判定とは別。wording result: `pass`。
+
+remaining risk / next action: NR002 の parent owner 条件を実装・Windows ACL fixture で修正し、同じ担当がその finding と直接影響のみを再確認する。Node22 全体 gate と F03 実運用は別工程。unexplored: 実 ChatGPT UI の linking・refresh、Funnel 公開経路。通常 review に independent-final-review の report-attestation allowlist は該当せず、`report_attestation_allowed=false`。

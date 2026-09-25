@@ -45,6 +45,12 @@ async function grantBroadWrite(target: string) {
   await chmod(target, 0o733);
 }
 
+async function setUntrustedOwner(target: string) {
+  if (process.platform === "win32") {
+    await execFileAsync("icacls.exe", [target, "/setowner", "*S-1-5-32-545"], { windowsHide: true });
+  }
+}
+
 async function runPrivateStorageChecks() {
   const base = await privateBase();
   try {
@@ -77,6 +83,17 @@ async function runPrivateStorageChecks() {
     await createPrivateFile(readonlyChild, "secret");
     await assertPrivateFile(readonlyChild);
 
+    const foreignOwnerParent = path.join(base, "foreign-owner-parent");
+    await ensurePrivateDirectory(foreignOwnerParent);
+    await grantBroadRead(foreignOwnerParent);
+    await setUntrustedOwner(foreignOwnerParent);
+    const foreignOwnerChild = path.join(foreignOwnerParent, "must-not-contain-secret");
+    if (process.platform === "win32") {
+      await assert.rejects(assertSafePrivateParent(foreignOwnerParent), /Private storage/);
+      await assert.rejects(createPrivateFile(foreignOwnerChild, "secret"), /Private storage/);
+      await assert.rejects(lstat(foreignOwnerChild), /ENOENT/);
+    }
+
     const unsafeParent = path.join(base, "unsafe-parent");
     await ensurePrivateDirectory(unsafeParent);
     await grantBroadWrite(unsafeParent);
@@ -88,5 +105,5 @@ async function runPrivateStorageChecks() {
   }
 }
 
-test("REMOTE-NR-002: Windows ACLs protect private leaves, allow readonly parents, and reject untrusted writes", { skip: process.platform !== "win32" }, runPrivateStorageChecks);
+test("REMOTE-NR-002: Windows ACLs protect private leaves, allow readonly parents, and reject untrusted writes or owners", { skip: process.platform !== "win32" }, runPrivateStorageChecks);
 test("REMOTE-NR-002: POSIX permissions protect private leaves, allow readonly parents, and reject untrusted writes", { skip: process.platform === "win32" }, runPrivateStorageChecks);

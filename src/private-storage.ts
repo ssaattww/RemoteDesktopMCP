@@ -41,7 +41,9 @@ try {
   if ($request.operation -eq 'assert-parent') {
     $stage = 'verify'
     $unsafe = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-    $rules = @((Get-Acl -LiteralPath $request.path).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $acl = Get-Acl -LiteralPath $request.path
+    if ($allowed -notcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { throw 'untrusted parent owner' }
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
     foreach ($rule in $rules) {
       if ($allowed -notcontains $rule.IdentityReference.Value -and $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $unsafe) -ne 0) { throw 'untrusted parent write access' }
     }
