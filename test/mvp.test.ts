@@ -8,6 +8,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { hashPassword } from "../src/hash-password.js";
 import { RemoteDesktopService, configFromEnv, createApp, type RuntimeConfig } from "../src/index.js";
+import { protectPrivateDirectory } from "../src/private-storage.js";
 
 async function fixture(): Promise<{ service: RemoteDesktopService; root: string; cleanup: () => Promise<void> }> {
   const workspace = path.resolve(process.cwd());
@@ -20,6 +21,7 @@ async function fixture(): Promise<{ service: RemoteDesktopService; root: string;
   if (!relativeBase || relativeBase.startsWith("..") || path.isAbsolute(relativeBase)) throw new Error("MVP fixture escaped its validation directory.");
   const root = path.join(base, "files"); const data = path.join(base, "data");
   await mkdir(root); await mkdir(data);
+  await protectPrivateDirectory(data);
   const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
   const service = new RemoteDesktopService(cfg);
   try { await service.initialize(); }
@@ -39,10 +41,17 @@ async function mcp(service: RemoteDesktopService, user = "owner@example.test") {
   return { call, close: async () => { await client.close(); await server.close(); } };
 }
 
-test("configuration fails before Desktop Commander for protected root overlap", () => {
-  const env = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]), FILE_ROOTS_JSON: JSON.stringify([{ id: "r", path: "data" }]) };
-  const cfg = configFromEnv(env); const service = new RemoteDesktopService(cfg);
-  return assert.rejects(service.initialize(), /must not overlap/);
+test("configuration fails before Desktop Commander for protected root overlap", async () => {
+  const validation = path.resolve(process.cwd(), "reference", "validation");
+  await mkdir(validation, { recursive: true });
+  const base = await mkdtemp(path.join(validation, "rdmcp-overlap-"));
+  const data = path.join(base, "data");
+  try {
+    await mkdir(data); await protectPrivateDirectory(data);
+    const env = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]), FILE_ROOTS_JSON: JSON.stringify([{ id: "r", path: data }]), DATA_DIR: data };
+    const cfg = configFromEnv(env); const service = new RemoteDesktopService(cfg);
+    await assert.rejects(service.initialize(), /must not overlap/);
+  } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
 test("OAuth authorization code is PKCE-bound and one use", async () => {

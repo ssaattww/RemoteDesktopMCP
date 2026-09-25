@@ -145,3 +145,19 @@ finding completeness matrix は初回指摘のため未適用。実装担当の�
 `document_wording_review`: mode normal fix verification、reader `/root/remote_normal_review`、Windows runtime_local。`skills/document-wording-review/SKILL.md` を今回も実読し、decision examples は初回に実読済み。文書 target は今回 HEAD、before は `a08343014ac8214e5efeb62156b46fceb5d81e13`、新規 `reports/2026-09-25-remote-full-gate.md` は `baseline_absent_new_file`。`reports/2026-09-25-remote-{context,implementation,tests,verification}.md`、`tasks/{phases,tasks}-status.md` の変更文脈、normal-review の前回報告、新規 full-gate 報告を読んだ。`package.json` と code/test の識別子・fixture 名のみの行は prose 対象外。意味・識別・承認済み用語の用法・読みやすさは各 `checked_no_finding`。歴史的な初回時点の Google credential 未作成と現在の本人登録成功を区別し、試験表は mock と実証を分ける。前回 wording finding NR009 は閉じたまま。新たな用語承認変更・policy conflict・不足 evidence なし。親の `npm run lint` 成功は機械検査 evidence であり wording 判定とは別。wording result: `pass`。
 
 remaining risk / next action: NR002 の parent owner 条件を実装・Windows ACL fixture で修正し、同じ担当がその finding と直接影響のみを再確認する。Node22 全体 gate と F03 実運用は別工程。unexplored: 実 ChatGPT UI の linking・refresh、Funnel 公開経路。通常 review に independent-final-review の report-attestation allowlist は該当せず、`report_attestation_allowed=false`。
+
+### 同一担当の修正確認 3
+
+- mode: normal fix verification。reviewer `/root/remote_normal_review`。初回 reviewed implementation HEAD `2e6ecefef8b0b2b4e0903565a7496b8050e5a443`、前回 `3d676b89d0268c9d41f78251d7a351f232ad4f6f`、今回の immutable reviewed implementation HEAD `75197bb42085e87e340df6fa5982aab54073014e`。同じ指摘の同じ担当を継続。元の要求 profile Sol / high、runtime profile は非公開で観測不能、application status `reused_existing_agent_profile`。実装・試験・commit・push は行っていない。
+- finding completeness: **complete**。前回の NR001〜009 matrix と NR002 の残存 required action を引き継ぎ、今回の `src/private-storage.ts`、`test/private-storage.test.ts`、`reports/2026-09-25-remote-storage.md` の全差分と直接依存を確認した。新規親所有 `reports/2026-09-25-remote-handoff.md` と前回通常報告の収録も読んだ。変更 code は親 owner の判定だけで、他8件の production path は変更されていない。severity reclassification はない。
+- `REMOTE-NR-002 / P1`: **closed**。Windows `assertSafePrivateParent` の `assert-parent` は同じ ACL object から owner SID を取得し、現在の利用者・SYSTEM・Administrators 以外なら、ACE が読み取り専用でも拒否する (`src/private-storage.ts:41-52`)。これにより前回の、非許可 owner が ACL を変更して秘密 leaf を置換できる境界を閉じた。既存の read-only Users 親は許容し、broad write 親は拒否する sibling case を維持。今回の fixture は `Users` SID を実 owner にした親で `assertSafePrivateParent` と `createPrivateFile` の拒否、leaf 非作成を検査 (`test/private-storage.test.ts:86-96`)。`reports/2026-09-25-remote-storage.md` は Windows focused 1 pass / POSIX 1 skip、exit 0、TypeScript check と対象 ESLint 成功を記録。親の報告では Markdown lint と `git diff --check` も成功。実 `.env` や外部 `DATA_DIR` の内容は読んでいない。
+- other findings: REMOTE-NR-001/003〜009 は前回 `closed` を維持。今回差分による再開条件を認めない。通常 reviewer の今回の **code review verdict: pass_with_held**。必須コード finding は0件。これは公開運用の完了判定ではない。
+
+| criterion | disposition / evidence |
+| --- | --- |
+| NR002 の required action、production path、fixture、focused validation | `checked_no_finding`。Windows の所有者境界と普通の checkout の読み取り専用親許容を区別し、helper API 変更なしを確認。 |
+| 変更の直接影響、設定・秘密・失敗診断 | `checked_no_finding`。親 owner 判定は `bootstrap`、CLI configure/authorize、state store の既存呼出に適用される。PowerShell の診断は具体的 SID/secret を出さない既存固定文面。 |
+| report/task prose と wording | `checked_no_finding`。`document_wording_review` は同じ reviewer が fix scope で実施。reader は Windows runtime_local、Skill は前回までに実読済み。対象は storage 報告の一般親/別 owner 行と新規 handoff の全文。意味・識別・承認済み用語の用法・読みやすさは各 `checked_no_finding`。storage の親条件を正しく伝える。新規 handoff は非最終の途中記録で、固定 HEAD `3d676b8` の検証進行と記す点は最終 handoff 時の同期対象として親へ連絡済み。mechanical lint は親の記録と分ける。wording result: `pass`。 |
+| current-HEAD full gate、CI、F03 | `held`。全体 Node22 gate は前 HEAD で開始され継続中であり、今回 HEAD の全件成功に読み替えない。CI は未 push のためなし。実 Google 本人登録は成功済みだが、公開サービス・Funnel・ChatGPT 実操作と実 refresh は未実施。 |
+
+unexplored は実 ChatGPT UI/Funnel の F03 経路。次工程は新 HEAD に対する全体 gate の結果と、利用者の実公開接続を別途記録すること。通常レビューに独立最終レビューの report-attestation allowlist は該当せず、`report_attestation_allowed=false`。

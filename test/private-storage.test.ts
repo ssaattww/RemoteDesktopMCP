@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/pro
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { assertPrivateDirectory, assertPrivateFile, assertSafePrivateParent, createPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory, protectPrivateDirectory } from "../src/private-storage.js";
+import { assertPrivateAuditStorage, assertPrivateDirectory, assertPrivateFile, assertSafePrivateParent, createPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory, protectPrivateDirectory } from "../src/private-storage.js";
 
 const execFileAsync = promisify(execFile);
 const workspace = path.resolve(process.cwd());
@@ -72,6 +72,21 @@ async function runPrivateStorageChecks() {
     await grantBroadRead(state);
     await assert.rejects(assertPrivateFile(state), /Private storage/);
 
+    const auditDirectory = path.join(base, "audit-directory");
+    const auditFile = path.join(auditDirectory, "audit.jsonl");
+    await ensurePrivateDirectory(auditDirectory);
+    await createPrivateFile(auditFile, "audit");
+    await assertPrivateAuditStorage(auditDirectory, auditFile);
+    await grantBroadRead(auditFile);
+    await assert.rejects(assertPrivateAuditStorage(auditDirectory, auditFile), /Private storage/);
+
+    const broadAuditDirectory = path.join(base, "broad-audit-directory");
+    const broadAuditFile = path.join(broadAuditDirectory, "audit.jsonl");
+    await ensurePrivateDirectory(broadAuditDirectory);
+    await createPrivateFile(broadAuditFile, "audit");
+    await grantBroadRead(broadAuditDirectory);
+    await assert.rejects(assertPrivateAuditStorage(broadAuditDirectory, broadAuditFile), /Private storage/);
+
     const readonlyParent = path.join(base, "readonly-parent");
     await ensurePrivateDirectory(readonlyParent);
     await grantBroadRead(readonlyParent);
@@ -105,5 +120,5 @@ async function runPrivateStorageChecks() {
   }
 }
 
-test("REMOTE-NR-002: Windows ACLs protect private leaves, allow readonly parents, and reject untrusted writes or owners", { skip: process.platform !== "win32" }, runPrivateStorageChecks);
-test("REMOTE-NR-002: POSIX permissions protect private leaves, allow readonly parents, and reject untrusted writes", { skip: process.platform === "win32" }, runPrivateStorageChecks);
+test("REMOTE-NR-002: Windows ACLs protect audit pairs, private leaves, and reject untrusted writes or owners", { skip: process.platform !== "win32" }, runPrivateStorageChecks);
+test("REMOTE-NR-002: POSIX permissions protect audit pairs, private leaves, and reject untrusted writes", { skip: process.platform === "win32" }, runPrivateStorageChecks);

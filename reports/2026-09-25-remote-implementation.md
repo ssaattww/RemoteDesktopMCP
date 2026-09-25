@@ -44,3 +44,25 @@ Desktop Commander 子プロセスには Google client secret、トークン署�
 `REMOTE-NR-006` では、公開 MCP の永続 state 読込み前に admission を行う。自サーバー署名済みの access token は token ごとの固定 bucket を使い、未署名または不正な入力は別の固定 bucket を使う。Google callback も cookie と state が一致する未使用 transaction を別 bucket にする。したがって無効入力の連続送信が進行中の正規 transaction を同じ bucket で枯渇させない。送信元 IP や `X-Forwarded-For` には依存しないため、匿名の新規無効入力に公平な可用性を保証するものではない。
 
 この追記時点の focused source check は `npm run check`、`npm run lint:ts`、`npm run build` が成功した。公開サービス起動、ChatGPT 接続、Funnel 経由の実 refresh は実施していない。Google のローカル本人登録は別途成功しているが、その実 state は本実装確認で開いていない。
+
+## 全体 gate 失敗の追跡
+
+2026-09-25 20:42 JST に、ACL 統合後の Node 22 全体 gate 失敗への修正を開始した。失敗ログは `reference/validation/remote-full-gate-3d676b89d0268c9d41f78251d7a351f232ad4f6f/05-test.stdout.txt` にあり、42 件中 8 件が失敗した。MVP の 3 件は保護していない isolated `DATA_DIR` を使う fixture の不備で、試験担当が fixture を修正した。残る process watcher と MCP timeout は、private audit の directory と file の Windows ACL 検査が tool 呼出ごとに複数の PowerShell child を待つことによる待ち時間と、終了状態を audit 完了前に公開する競合が原因だった。
+
+strict ACL 検査を弱めず、storage helper の `assertPrivateAuditStorage` で strict `DATA_DIR` と直下の audit file を一つの PowerShell 呼出で検査するよう変更した。初期化で `DATA_DIR` は検査済みであり、audit file がないときだけ protected file として作成してから同じ一括検査を行う。append 後に同じ ACL を再検査する重複は除去した。終了は `process.exit` audit の永続化成功後にだけ `finished` として公開し、audit が失敗すれば次回観測で再試行する。termination timeout 後に Desktop Commander session が残る間、watcher は output を読まず `terminating` を維持する。`process_start` は audit 失敗時にも `finally` で watcher を開始するため、開始済み process を無監視にはしない。
+
+修正後、`npx tsx --test --test-name-pattern='same PID reuse' test/independent-fixes.test.ts` は成功した。`npx tsx --test --test-name-pattern='IFR-004' test/independent-fixes.test.ts` も 2 件とも成功した（24.3 秒）。NR003/004/005 の focused regression は試験担当へ依頼済みで、全体 gate は親担当がこの修正後に一度だけ実行する。
+
+同じ focused regression で、timeout 解消後に streaming `file_search` のページ境界不備を確認した。Desktop Commander 0.2.51 の `get_more_search_results` は実際に返した slice を `Showing results start-end` として出力する。結果配列が成長中に pagination hint を先に採用すると中間 range を飛ばす場合があったため、表示された inclusive range の末尾を次の offset として優先するよう修正した。この欠落は ACL のデータ破損ではなく、待ち時間が縮んで既存の streaming 境界を再現できたことで観測された。`NR003 and NR004` は連続 2 回成功（13.2 秒、13.0 秒）、`NR005` は 14.0 秒で成功した。`npm run check`、`npm run lint:ts`、`npm run build` も成功した。ここで source を凍結し、以後の全体 gate は親担当が実行する。
+
+## F01c 全体 gate 修正の証跡
+
+| 失敗群 | 原因 | 修正箇所 | focused 証跡 |
+| --- | --- | --- | --- |
+| IFR-001 | stale 操作の audit 待機中に後継 logical process の watcher が同じ PID を読んだ。 | `src/index.ts` の start audit 後 watcher 開始。試験は old/new watcher を区別して検査。 | `same PID reuse` 成功、12.9 秒。 |
+| IFR-004 | exit audit より先に `finished` を公開し、fixture cleanup と非同期 append が競合した。termination timeout 中も active session を読む余地があった。 | `src/index.ts` の `auditExit`、`observe`、`finishWhenRootIsGone`、`watchProcess`。 | IFR-004 2 件成功、24.3 秒。 |
+| NR003/004/005 timeout | audit ごとに strict directory、file の pre/post ACL を別 PowerShell child で確認していた。 | `src/private-storage.ts` の strict 一括 audit assertion と `src/index.ts` の `audit` 呼出。 | NR003/004 連続 2 回成功、NR005 成功。 |
+| NR003 page omission | streaming 検索で pagination hint を先に採用した。 | `src/index.ts` の `search` offset 選択。 | 全 115 hit を確認。 |
+| MVP ACL fixture 3 件 | isolated fixture `DATA_DIR` が strict storage 前提を満たしていなかった。 | 試験担当の fixture 準備のみ。production ACL は緩和しない。 | overlap 0.84 秒、OAuth 12.25 秒、snapshot 14.60 秒。 |
+
+`process_start` は start audit が失敗しても `finally` で watcher を開始する。そのため監査保存が fail-closed になっても、既に開始した process を無監視で残さない。実 `.env`、Google credential、実 OAuth state は本修正で読まず変更していない。

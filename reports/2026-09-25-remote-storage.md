@@ -30,6 +30,8 @@ REMOTE-NR-002 / P1 に対応する Windows ACL と保存領域の検査を実装
 - 既存のファイル、保存用ディレクトリ、親ディレクトリを検査する。親が安全でない場合は、新しいファイルへ内容を書き込む前に拒否する。新規ファイルは空のファイルを保護・再検査してから内容を書き込む。
 - 一時ファイルを保護した状態で作り、名前変更後もファイルを再検査できる API を提供する。
 - 親ディレクトリ用の `assertSafePrivateParent` を分けた。親は一般利用者が読めてもよいが、一般利用者に書込み、削除、作成、アクセス規則変更、所有者変更の許可がある場合は拒否する。root と repository のアクセス規則は変更しない。
+- `assertPrivateAuditStorage` は audit directory と直接の audit file を、一つの PowerShell 実行で検査する。両方に current owner、継承なし、current SID・`SYSTEM`・`Administrators` だけの完全制御を求める。保存した検査結果は使わない。
+- audit の追記はこの検査の直後に行う。同じ OS 利用者が任意の command を実行できる既存の信頼境界では、追記の直後に同じ ACL を再検査しても隔離を強めないため、次の追記前に再検査する。
 
 `test/private-storage.test.ts` は `reference/validation` 内の空の専用ディレクトリを実際に保護してから、Windows のアクセス規則による新規作成、既存ファイルの広い許可拒否、読み取り専用の一般親での作成成功、書込み可能な一般親の拒否、一時ファイルの名前変更後再検査を確認する。POSIX の同じ契約は POSIX 実行時に走る。
 
@@ -39,6 +41,7 @@ REMOTE-NR-002 / P1 に対応する Windows ACL と保存領域の検査を実装
 | 一般親 | 現在の利用者、`SYSTEM`、`Administrators` のいずれかが所有し、一般利用者の読み取り専用を許容する。 | 読み取り許可を追加した親で、新規 leaf を保護してから内容を書き込めることを確認。 |
 | 危険な親 | 一般利用者の書込み、削除、作成、アクセス規則変更、所有者変更を拒否する。 | 書込み可能な ACL を追加した親で、秘密を持つファイルの作成を拒否。 |
 | 別の所有者を持つ親 | 読み取り専用の許可規則でも、許可主体外の owner を拒否する。 | `Users` SID へ実際に owner を変更した親で、親検査と秘密ファイル作成を拒否。 |
+| audit directory と audit file | 二つを一回の検査で厳密な private leaf として確認する。 | directory の許可を広げた場合と file の許可を広げた場合を別々に拒否。 |
 
 既存の HTTP fixture も、秘密を書き込む前の空の `DATA_DIR` を `protectPrivateDirectory` で保護してから `RemoteDesktopService` を初期化するようにした。この変更は親の明示許可で `test/fixture.ts` に限定した。
 

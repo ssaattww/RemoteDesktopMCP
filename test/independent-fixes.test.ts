@@ -11,6 +11,12 @@ const configPath = (data: string) => path.join(data, "desktop-commander-home", "
 const openSession = async (api: Awaited<ReturnType<typeof mcp>>) => (await api.call("session_open", {})).session_id as string;
 const auditEvents = async (data: string) => (await readFile(path.join(data, "audit.jsonl"), "utf8")).split("\n").flatMap((line) => { try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; } });
 
+function pauseProcessWatchers(service: RemoteDesktopService) {
+  const watchers = (service as unknown as { processWatchers: Map<string, NodeJS.Timeout> }).processWatchers;
+  for (const watcher of watchers.values()) clearInterval(watcher);
+  watchers.clear();
+}
+
 async function processService(adapter: ProcessAdapter) {
   const f = await fixture();
   await f.service.close();
@@ -191,6 +197,7 @@ test("RDMCP-MVP-IFR-001: same PID reuse never lets an old logical process delega
     const second = await api.call("process_start", { session_id: session, command: "logical-b", timeout_ms: 100 });
     const secondId = second.process_id as string;
     assert.notEqual(firstId, secondId);
+    pauseProcessWatchers(service);
     const afterReplacement = calls.length;
     await assert.rejects(api.call("process_output", { session_id: session, process_id: firstId }));
     await assert.rejects(api.call("process_status", { session_id: session, process_id: firstId }));
@@ -208,6 +215,7 @@ test("RDMCP-MVP-IFR-001: same PID reuse never lets an old logical process delega
     const fourthPending = api.call("process_start", { session_id: session, command: "logical-d", timeout_ms: 100 });
     releaseRead!(); await outputBeforeReplacement;
     const fourth = await fourthPending; const fourthId = fourth.process_id as string;
+    pauseProcessWatchers(service);
     const afterQueuedReplacement = calls.length;
     await assert.rejects(api.call("process_output", { session_id: session, process_id: thirdId }));
     await assert.rejects(api.call("process_status", { session_id: session, process_id: thirdId }));

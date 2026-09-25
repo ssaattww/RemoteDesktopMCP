@@ -38,6 +38,22 @@ try {
     Set-Acl -LiteralPath $request.path -AclObject $acl
     $item = Get-Item -LiteralPath $request.path -Force
   }
+  function Assert-PrivateAcl($candidate) {
+    $acl = Get-Acl -LiteralPath $candidate.FullName
+    if (-not $acl.AreAccessRulesProtected) { throw 'inherited access rules' }
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value) { throw 'unexpected owner' }
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    if ($rules.Count -ne 3) { throw 'unexpected access rule count' }
+    $seen = @{}
+    foreach ($rule in $rules) {
+      $sid = $rule.IdentityReference.Value
+      if ($allowed -notcontains $sid -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { throw 'unexpected access principal' }
+      if (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne [Security.AccessControl.FileSystemRights]::FullControl) { throw 'insufficient private access rule' }
+      if ($seen.ContainsKey($sid)) { throw 'duplicate access rule' }
+      $seen[$sid] = $true
+    }
+    foreach ($sid in $allowed) { if (-not $seen.ContainsKey($sid)) { throw 'missing private access rule' } }
+  }
   if ($request.operation -eq 'assert-parent') {
     $stage = 'verify'
     $unsafe = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
@@ -50,21 +66,18 @@ try {
     [Console]::Out.Write('{"ok":true}')
     exit 0
   }
-  $stage = 'verify'
-  $acl = Get-Acl -LiteralPath $request.path
-  if (-not $acl.AreAccessRulesProtected) { throw 'inherited access rules' }
-  if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value) { throw 'unexpected owner' }
-  $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-  if ($rules.Count -ne 3) { throw 'unexpected access rule count' }
-  $seen = @{}
-  foreach ($rule in $rules) {
-    $sid = $rule.IdentityReference.Value
-    if ($allowed -notcontains $sid -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { throw 'unexpected access principal' }
-    if (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne [Security.AccessControl.FileSystemRights]::FullControl) { throw 'insufficient private access rule' }
-    if ($seen.ContainsKey($sid)) { throw 'duplicate access rule' }
-    $seen[$sid] = $true
+  if ($request.operation -eq 'assert-audit') {
+    $stage = 'verify'
+    if ([string]::IsNullOrWhiteSpace($request.file)) { throw 'invalid audit file' }
+    $auditFile = Get-Item -LiteralPath $request.file -Force
+    if (-not $item.PSIsContainer -or $auditFile.PSIsContainer) { throw 'invalid audit path type' }
+    Assert-PrivateAcl $item
+    Assert-PrivateAcl $auditFile
+    [Console]::Out.Write('{"ok":true}')
+    exit 0
   }
-  foreach ($sid in $allowed) { if (-not $seen.ContainsKey($sid)) { throw 'missing private access rule' } }
+  $stage = 'verify'
+  Assert-PrivateAcl $item
   [Console]::Out.Write('{"ok":true}')
 } catch {
   [Console]::Error.WriteLine("Private storage ACL operation failed at ${"${stage}"}.")
@@ -72,7 +85,7 @@ try {
 }
 `;
 
-async function windowsAcl(target: string, operation: "protect" | "assert" | "assert-parent"): Promise<void> {
+async function windowsAcl(target: string, operation: "protect" | "assert" | "assert-parent" | "assert-audit", file?: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", windowsAclScript], {
       env: allowedChildEnvironment(),
@@ -87,7 +100,7 @@ async function windowsAcl(target: string, operation: "protect" | "assert" | "ass
       if (code === 0) resolve();
       else reject(new Error(stage ? `Private storage ACL verification failed during ${stage}.` : "Private storage ACL verification failed."));
     });
-    child.stdin.end(JSON.stringify({ path: target, operation }));
+    child.stdin.end(JSON.stringify({ path: target, operation, ...(file ? { file } : {}) }));
   });
 }
 
@@ -122,6 +135,17 @@ export async function assertPrivateDirectory(directory: string): Promise<void> {
 
 export async function assertPrivateFile(file: string): Promise<void> {
   await assertPrivate(file, "file");
+}
+
+export async function assertPrivateAuditStorage(directory: string, file: string): Promise<void> {
+  if (path.dirname(path.resolve(file)) !== path.resolve(directory)) throw new Error("Private audit file must be directly inside its directory.");
+  if (await kind(directory) !== "directory" || await kind(file) !== "file") throw new Error("Private storage path type is invalid.");
+  if (process.platform === "win32") {
+    await windowsAcl(directory, "assert-audit", file);
+    return;
+  }
+  await assertPrivateDirectory(directory);
+  await assertPrivateFile(file);
 }
 
 /** The parent may be readable by ordinary users, but they must not be able to

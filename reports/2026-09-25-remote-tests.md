@@ -70,6 +70,15 @@
 - `npm test`: Node 24 host で 33 件中 32 件成功、既存 `NR003/NR004` の未引用 Windows 実行だけが失敗した。fixture 修正後の `npx tsx --test --test-name-pattern='NR003 and NR004' test/regressions.test.ts` は成功した。修正後の全件 gate は親担当の Node 22 相当環境で実行待ちである。
 - `npm run lint:md -- --files reports/2026-09-25-remote-tests.md`: 成功。用語機械検査は既存の Dispatch profile と新規の実識別子が whitelist 対象外のため失敗し、用語表の編集はこの担当境界外である。
 
+### 全体 gate の follow-up
+
+- 初回の Node 22 full gate は `reference/validation/remote-full-gate-3d676b89d0268c9d41f78251d7a351f232ad4f6f/05-test.stdout.txt` に 42 tests、33 pass、8 fail、1 skip と記録された。`test/mvp.test.ts` の3件は、ACL 統合後に isolated `DATA_DIR` を private 化していなかったため、元 assertion 前に fail-closed となった。
+- 2026-09-25T20:41:15+09:00 に `test/mvp.test.ts` だけを最小修正した。fixture の空 `DATA_DIR` を初期化前に保護し、root/data overlap の case も isolated protected `DATA_DIR` を使う。assertion を弱めず、timeout は増やしていない。focused `configuration fails`、`OAuth authorization code`、`transfer snapshot remains` はそれぞれ pass した。
+- 2026-09-25T20:43:18+09:00 に `test/independent-fixes.test.ts` の `RDMCP-MVP-IFR-001` を最小修正した。新 owner の合法 watcher 呼出と stale owner の拒否を同じ adapter call list で混同していたため、B/D が確立後に watcher を fixture 内で停止して stale A/C の3操作だけが adapter へ委譲しないことを確認する。production と timeout は変えず、focused case は pass した。
+- 同じ full gate で残る `RDMCP-MVP-IFR-004` の2件、`NR003 and NR004`、`NR005` は shared `test/fixture.ts` がすでに protected `DATA_DIR` を渡してから service を初期化している。前者は watcher/audit の非同期観測、後者は MCP request timeout のため、ACL fixture 不足としては扱わず、製品側の調査と Luna の再実行集計を待つ。
+- 監査/watcher の製品側修正後、`RDMCP-MVP-IFR-004` の focused 2件は製品担当が pass を確認した。`NR003 and NR004` は pagination 修正後、製品担当が focused 2連続 pass（13.2 秒、13.0 秒）を確認した。両者は Luna の full gate による独立した再確認待ちである。
+- `NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, and MCP file operations` は audit batch 修正前に開始した focused run では exit 1、73,691.8112 ms だった。`test/regressions.test.ts:472` で MCP `-32001 Request timed out`（SDK timeout 60,000 ms）となった。test timeout を増やさず、製品側が batch 修正を反映した現行 source で再実行した focused run は 13.6 秒、全体 14.0 秒で pass した。これも immutable full gate による独立した再確認待ちである。
+
 ## 文言セルフチェック
 
 `document-wording-review` を新規報告として適用した。対象は本ファイル全体、baseline は新規文書のため不在であり、設計の公開認証契約、通常 review finding matrix、実測した試験結果を比較した。意味、識別、読みやすさに問題は見つからなかった。実 Google 接続未実施と mock 範囲を明記し、access/refresh を必要な token として区別した。用語機械検査の失敗は上記のとおり別記であり、用語承認は行っていない。
