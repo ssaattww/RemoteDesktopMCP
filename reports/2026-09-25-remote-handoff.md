@@ -3,7 +3,7 @@
 ## 対象と完了境界
 
 ChatGPT からこの Windows PC を Google 認証で操作する。複数 PC は後続であり、画面・マウス操作の追加は今回の範囲外。
-Google の本人登録は完了し、既存設定の内容を維持して Windows の保存領域保護を移行した。公開 ChatGPT 操作と再起動後の実認証更新はまだ確認していない。
+Google の本人登録は完了し、既存設定の内容を維持して Windows の保存領域保護を移行した。公開サービスは起動済み。ChatGPT 操作と再起動後の実認証更新はまだ確認していない。
 
 ## 保存と運用
 
@@ -14,7 +14,9 @@ Tailscale Funnel は公開 URL `https://fa780.tail8bf1af.ts.net` を loopback �
 ## 検証と残作業
 
 通常レビューは `reports/2026-09-25-remote-normal-review.md`、試験対応表は `reports/2026-09-25-remote-tests.md`、全体検証は `reports/2026-09-25-remote-full-gate.md`。
-`3d676b89d0268c9d41f78251d7a351f232ad4f6f` の修正レビューと Node 22 全体検証を進めている。公開サービスを起動し、公開認証情報の応答と未認証拒否、ChatGPT で `session_open`、`node_list`、`file_read` を確認する。実操作の結果を得るまで接続完了とは扱わない。
+`96b10cd8b7026e73512de3c294f67894621709bf` は通常コードレビューの必須指摘0件、Node 22 全体43件中42件成功・POSIX1件除外・失敗0件、全必須コマンド成功。公開サービスを起動し、公開 HTTPS の health、Google モード、resource/issuer、CIMD、未認証401を確認した。
+起動時 PID は28532、ログは管理ディレクトリの `service.stdout.log` と `service.stderr.log`。今回の非表示プロセス起動は PC 再起動後の自動起動を設定するものではない。
+利用者へ ChatGPT で `session_open`、`node_list`、`file_read` による `workspace` 内 `remote-connection-check.txt` の読取を依頼した。実操作の結果を得るまで接続完了とは扱わない。
 独立レビュー、最終提出、同一提出 HEAD の CI は未完了。merge は行わない。
 
 ## 作業方法の振り返り

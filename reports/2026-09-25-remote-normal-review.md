@@ -183,3 +183,23 @@ unexplored は実 ChatGPT UI/Funnel の F03 経路。次工程は新 HEAD に対
 `document_wording_review`: mode normal fix verification、同一 reviewer/Windows runtime_local。Skill と decision examples は既読。target は今回 HEAD、before は `75197bb42085e87e340df6fa5982aab54073014e`。implementation の F01c 原因・表、tests の follow-up、storage の監査境界、full-gate の混在 HEAD と42件失敗、task の F01c/F03/F04 行を確認。意味・承認用語・読みやすさは `checked_no_finding`。識別は `checked_finding`: immutable HEAD の `reports/2026-09-25-remote-tests.md` NR002 行は現行の改名済み Windows ACL test と異なる旧名を示す。親には報告済みで、review 後の report-only working tree 修正を確認したが、その未コミット修正を今回 HEAD の証拠に算入しない。wording result は `fail`（report evidence 同定）。mechanical lint 成功は別証拠。
 
 held: この HEAD の Node22 全体 gate は別の同一 Luna 担当が実行中で、終了結果をまだ得ていない。前回の42件中33 pass・8 fail・1 skip は実行中に HEAD が変わった混在 tree の結果で、今回 HEAD の成否ではない。CI は未 push、F03 の実 ChatGPT/Funnel 操作・再起動後実 refresh は未実施。旧 NR001〜009 の code closure 自体は維持するが、新 F01c finding と full gate の未達を隠して公開完了とはしない。unexplored: 実 ChatGPT UI と公開経路。次は REMOTE-NR-010 の product/fixture 修正と current-HEAD full gate の結果を、同じ reviewer が限定確認する。`report_attestation_allowed=false`。
+
+### 同一担当の F01c 修正確認 2
+
+- mode: normal fix verification。reviewer `/root/remote_normal_review`。前回 F01c HEAD `f4b2076d4d026c8710985c0a81f9c9c83617ad41`、今回の immutable reviewed implementation HEAD `96b10cd8b7026e73512de3c294f67894621709bf`。元指摘 REMOTE-NR-010 / P2 を同じ severity のまま追跡し、NR005 timeout と NR006 body deadline は今回の直接影響として確認した。初回 reviewed HEAD と reviewer 独立性・元 profile 観測制約は前節どおり。application status `reused_existing_agent_profile`。実装・試験・commit・push は行っていない。
+- closure matrix: **complete**。`reports/2026-09-25-remote-verification.md` 末尾で3件それぞれの required action、production path、composition fixture、親の Node22 focused 結果を照合し、`f4b2076..96b10cd` の10変更ファイルと直接依存を確認した。全域の再レビューはしない。`reports/2026-09-25-remote-tests.md` NR002 の現行テスト名も target HEAD で同期済み。
+
+| target / source severity | production path、composition、focused evidence | closure |
+| --- | --- | --- |
+| REMOTE-NR-010 / P2 | `src/index.ts:557` の `process_output` は `process_status` と同じく、終了待ちかつ Desktop Commander session が active なら `observe` を呼ばず、既存出力と `termination_unconfirmed` を返す。IFR-004 fixture は timeout 後に status/output 双方を呼び、adapter read 回数不変と owner 維持を確認し、session 消滅後の `finished` と単一 exit audit まで検査する。親 Node22 focused 成功。 | `closed`。旧 IFR-004 の過去判定は変更しない。 |
+| NR005 timeout の直接修正 | `DesktopCommander.start` は `StdioClientTransport` の stderr pipe に data listener を connect 前に設け、内容を保存・ログ出力せず drain する。1 MiB stderr を書いて drain を待つ stdio MCP stub は initialize、`get_config`、`file_read` を合成し、実 HTTP NR005 も親 Node22 focused 成功。stage 診断は method 名・相対時刻だけで、query/path/token/response は記録しない。 | `closed`。前 HEAD の immutable full gate 42件中40 pass/1 fail/1 POSIX skip の唯一の NR005 timeout 原因に対応。今回 HEAD の全体成功とは別。 |
+| REMOTE-NR-006 受信期限の直接影響 / P2 | `createApp` は受信開始から絶対15秒で遅い request を破棄し、`end`/`aborted`/response `close` で timer を解除する。port 0 公開 HTTP fixture は毎秒少量送る body の15秒拒否と、受信済み body の後に15秒超かかる MCP handler の成功を同じ構成で確認。途中の Accept 不足406は修正後の親 Node22 focused 1 pass/0 fail/exit 0、45,120.7298 ms に置き換えて評価した。 | `closed`。元 NR006 の severity と旧 closure を維持し、新しい timeout 経路のみ確認。 |
+
+| criterion | disposition / evidence |
+| --- | --- |
+| process/HTTP/stdio の直接変更と sibling case | `checked_no_finding`。NR010 の公開 output tool、NR005 の stderr backpressure、NR006 の slow body と長 handler を確認。deadline や MCP SDK timeout を伸ばして試験を回避していない。 |
+| secret・fail-closed・設定境界 | `checked_no_finding`。stderr は非保持で読み捨て、trace は method 名と相対時刻だけ。Google secret・実 `.env`・外部 `DATA_DIR` 内容を読まず、実運用 state を試験へ使わない。 |
+| 試験表・task・文書 wording | `checked_no_finding`。`document_wording_review` は同じ reviewer が fix scope で実施。before は前回 F01c HEAD、target は今回 HEAD。implementation の stderr/timeout 原因、tests の NR005 再現記録、verification の3行 matrix、full-gate の前 HEAD 失敗、task の F01c 行、通常報告の変更を読み、意味・識別・承認用語の用法・読みやすさを各 `checked_no_finding` とした。前回の旧 test 名は target HEAD で一致する。親の Markdown lint 成功は wording 判定と別。wording result: `pass`。 |
+| current-HEAD 全体 gate / CI / F03 | `held`。同じ Luna 担当が固定 HEAD の Node22 全体 gate を並行実行中で、終了結果は今回のコード判定へ転用しない。CI は未 push。Google 本人登録は完了、公開 ChatGPT/Funnel 実接続・再起動後の実 refresh は F03 所有で未実施。 |
+
+verdict: **pass_with_held**。REMOTE-NR-010 / P2 の必須修正と F01c の直接関連2件はコード・focused 試験の範囲で解消。旧 NR001〜009 と旧 IFR の履歴を変更しない。全体 Node22 gate、CI、F03 実運用は別証拠であり、公開運用完了とは判定しない。unexplored: 実 ChatGPT UI/Funnel。独立最終レビューは未実施、通常 review で `report_attestation_allowed=false`。

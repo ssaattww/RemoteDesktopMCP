@@ -50,6 +50,9 @@ Google Cloud、JSON、PowerShell、ログイン、プロジェクト、テスト
 個人のメールアドレス、主体 ID、secret、認可コードはこの報告へ転記しない。
 実サービスの公開起動と ChatGPT からの接続はまだ行っていない。
 
+その後、固定実装 `96b10cd8b7026e73512de3c294f67894621709bf` の全体検証に成功し、サービスを非表示のプロセスとして起動した（起動時 PID 28532）。待受は `127.0.0.1:3000` のみ。公開 HTTPS の health、Google モード、resource/issuer、CIMD 対応、未認証 MCP の401と認証案内を確認した。
+確認用の非秘密ファイル `remote-connection-check.txt` を許可フォルダへ新規作成した。利用者へ ChatGPT の接続追加と `session_open`、`node_list`、`file_read` の実行を依頼しており、その結果はまだ未確認。
+
 ## 根拠
 
 - [OpenAI の認証仕様](https://developers.openai.com/plugins/build/auth)

@@ -56,3 +56,20 @@ skipはPOSIX permissions検査1件。Windowsでの実行では対象外のため
 | Node 22 version probe | 0 (`v22.23.3`) |
 
 全テストは42件、40 pass、1 fail、1 skip、所要約235.6秒。唯一の失敗は `regressions.test.ts` の NR005 実HTTP OAuthとMCP操作テストで、約73.5秒後に `MCP error -32001: Request timed out`。skipはPOSIX permissionsテストであり、Linux上の実行結果は未確認。npm auditのinfo/low/moderate/high/critical脆弱性はすべて0。Linux CIも未確認のため、この全体gateは未通過として扱う。
+
+## 追試: 96b10cd8b7026e73512de3c294f67894621709bf
+
+NR005の標準エラーpipe drainと出力上限stub、NR010のoutput guardとbody deadlineを含む修正後のHEADで全体ゲートを実行した。証拠は `reference/validation/remote-full-gate-96b10cd/` に保存した。開始・終了HEADは `96b10cd8b7026e73512de3c294f67894621709bf` で一致。実行前にコード/testの作業差分はなく、終了時に見えた作業差分は親所有レポートだけだった。実行時Nodeは `v24.20.0`、テストはNode `v22.23.3`。
+
+| コマンド | 終了コード |
+| --- | ---: |
+| `npm.cmd ci` | 0 |
+| `npm.cmd run lint` | 0 |
+| `npm.cmd run check` | 0 |
+| `npm.cmd run build` | 0 |
+| `npx.cmd --yes --package=node@22.23.3 node node_modules/tsx/dist/cli.mjs --test test/**/*.test.ts` | 0 |
+| `npm.cmd audit --json` | 0 |
+| `git diff --check` | 0 |
+| Node 22 version probe | 0 (`v22.23.3`) |
+
+テストは43件、42 pass、0 fail、1 skip、所要約153.7秒。skipはPOSIX permissionsテストで、Windows上では未実行。npm auditのinfo/low/moderate/high/critical脆弱性はすべて0。この結果でWindows上の全体ゲートは通過した。Linux CIおよびPOSIX permissionsテストは未確認。
