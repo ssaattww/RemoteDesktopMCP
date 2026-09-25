@@ -203,3 +203,23 @@ held: この HEAD の Node22 全体 gate は別の同一 Luna 担当が実行中
 | current-HEAD 全体 gate / CI / F03 | `held`。同じ Luna 担当が固定 HEAD の Node22 全体 gate を並行実行中で、終了結果は今回のコード判定へ転用しない。CI は未 push。Google 本人登録は完了、公開 ChatGPT/Funnel 実接続・再起動後の実 refresh は F03 所有で未実施。 |
 
 verdict: **pass_with_held**。REMOTE-NR-010 / P2 の必須修正と F01c の直接関連2件はコード・focused 試験の範囲で解消。旧 NR001〜009 と旧 IFR の履歴を変更しない。全体 Node22 gate、CI、F03 実運用は別証拠であり、公開運用完了とは判定しない。unexplored: 実 ChatGPT UI/Funnel。独立最終レビューは未実施、通常 review で `report_attestation_allowed=false`。
+
+### 独立 freeze 前の非最終文書同期確認
+
+- mode: normal fix verification の文書・証拠 delta 限定。reviewer `/root/remote_normal_review`、前回のコード対象 HEAD `96b10cd8b7026e73512de3c294f67894621709bf`、今回の immutable reviewed implementation HEAD `69d504955dd8c21f8af8be8fa58b34d4f7442c5b`。`96b10cd..69d5049` は context/full-gate/handoff/normal-review/phases/tasks の6文書だけで、source/test/config は不変。元 Sol / high の要求と非公開 runtime profile、同一 reviewer 継続を維持。新たな code 網羅レビュー、実装変更、commit、push は行っていない。
+- validation evidence: `reference/validation/remote-full-gate-96b10cd/` の開始・終了 source SHA は双方 `96b10cd8b7026e73512de3c294f67894621709bf`。`05-test.stdout.txt` の Node22 集計は43件、42 pass、0 fail、1 POSIX skip、153,650.9227 ms。test/lint/check/build/audit 各 exit file は0。今回 HEAD は文書差分だけなので、このコード・試験結果を今回の同一 source/test/config に適用できるが、Linux CI と POSIX 専用試験の結果にはならない。
+- public operation evidence: context/handoff は、親が実 Google 本人登録を保持して公開サービスを起動し、起動時 PID28532、loopback `127.0.0.1:3000` と公開 HTTPS の health・Google モード・resource/issuer・CIMD 対応・未認証401案内を確認したと明記。これらは親の運用記録で、通常 reviewer 自身は実資格情報・外部 `DATA_DIR`・公開サービスを操作していない。非秘密の確認ファイルを許可 root に置き、利用者へ ChatGPT の `session_open`、`node_list`、`file_read` を依頼中。結果、再起動後の実 refresh、PC 再起動後の自動起動は未確認と区別されている。
+
+| ID / severity | source・locus | proof / impact | required action |
+| --- | --- | --- | --- |
+| REMOTE-DOC-001 / P3 | `tasks/tasks-status.md:35` の F01 状態と、同ファイル F01c/F04・`tasks/phases-status.md` の今回変更 | F01 は現在も「通常指摘修正中、ChatGPT 認証待ち」と記す。一方 F01c/F04 と phase は今回の固定ソースの通常10件解消、全体 gate 成功を記す。同じ時点の task status として「修正中」は現在の事実と食い違い、独立 reviewer と利用者が未解消 code finding を誤認する。ChatGPT 認証待ちは正しい。 | F01 状態を「実 Google 本人登録成功、通常コード指摘解消、ChatGPT 認証待ち」等の現状に同期する。実 ChatGPT 接続を完了とは記さない。 |
+
+| criterion | disposition / evidence |
+| --- | --- |
+| 6文書の changed prose と前後文脈 | `checked_finding` REMOTE-DOC-001。context は歴史的な未起動記述の後に「その後」で公開起動を追記。full-gate は前 HEAD 失敗と96b成功を分け、handoff は同 HEAD・未完了 F03/独立レビュー/CI を記録。normal-review は前回同一担当 closure を収録。 |
+| code/test/config 差分と実証範囲 | `checked_no_finding`。6文書以外の変更なし。Windows Node22 の全体 gate は実ログで確認し、POSIX skip と未 push CI を明示。公開 endpoint は親の実測記録であり ChatGPT 認証成功に読み替えない。 |
+| secret と権限・運用残作業 | `checked_no_finding`。報告には個人の主体・認可コード・client secret が載らず、`.env` は Git 対象外。handoff はサービスが PC 再起動時に自動起動しないこと、実操作と実 refresh が未確認なことを記す。 |
+| document wording | `checked_finding` REMOTE-DOC-001。`document_wording_review` は同じ reviewer が fix scope で実施。before=`96b10cd...`、target=`69d5049...`、対象は6文書の全変更文脈と影響する F01 行。Skill と decision examples は既読、reader は Windows runtime_local。意味・識別は F01 現在状態の矛盾で `checked_finding`、承認済み語の用法と読みやすさは `checked_no_finding`。新たな用語承認や policy conflict はない。mechanical lint 成功は別。wording result: `fail`。 |
+| F03 / CI / 独立レビュー | `held`。ChatGPT 実操作・実 refresh、Linux CI、POSIX ACL 試験、独立最終レビューは未完了として正しく所有される。 |
+
+verdict: **fail**（この非最終文書同期だけ）。コード review の必須指摘0件・Windows 全体 gate 成功は維持するが、REMOTE-DOC-001 の状態不一致を修正してから独立 freeze に進む。同一担当が次の文書だけの HEAD でこの1件を限定確認できる。`report_attestation_allowed=false`。
