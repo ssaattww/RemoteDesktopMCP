@@ -629,9 +629,10 @@ export function createApp(service: RemoteDesktopService): Express {
     await service.audit("oauth.authorization_granted", { user: user.email, clientId: authorization.clientId }); return res.redirect(303, redirect.toString());
   });
   app.post("/token", async (req, res) => {
-    if (!rate.allow(service.publicAuth ? `token:${req.body?.client_id === CHATGPT_CLIENT_ID ? "chatgpt" : "invalid"}` : "token")) { await service.audit("oauth.rate_limited", {}); return res.status(429).json({ error: "rate_limited" }); }
+    const tokenInput = { grantType: typeof req.body?.grant_type === "string" ? req.body.grant_type : "", code: typeof req.body?.code === "string" ? req.body.code : undefined, verifier: typeof req.body?.code_verifier === "string" ? req.body.code_verifier : undefined, clientId: typeof req.body?.client_id === "string" ? req.body.client_id : "", redirectUri: typeof req.body?.redirect_uri === "string" ? req.body.redirect_uri : undefined, resource: typeof req.body?.resource === "string" ? req.body.resource : undefined, refreshToken: typeof req.body?.refresh_token === "string" ? req.body.refresh_token : undefined };
+    if (!rate.allow(service.publicAuth ? `token:${service.publicAuth.tokenAdmissionKey(tokenInput) ?? "invalid"}` : "token")) { await service.audit("oauth.rate_limited", {}); return res.status(429).json({ error: "rate_limited" }); }
     if (service.publicAuth) {
-      const issued = await service.publicAuth.token({ grantType: typeof req.body?.grant_type === "string" ? req.body.grant_type : "", code: typeof req.body?.code === "string" ? req.body.code : undefined, verifier: typeof req.body?.code_verifier === "string" ? req.body.code_verifier : undefined, clientId: typeof req.body?.client_id === "string" ? req.body.client_id : "", redirectUri: typeof req.body?.redirect_uri === "string" ? req.body.redirect_uri : undefined, resource: typeof req.body?.resource === "string" ? req.body.resource : undefined, refreshToken: typeof req.body?.refresh_token === "string" ? req.body.refresh_token : undefined });
+      const issued = await service.publicAuth.token(tokenInput);
       res.setHeader("Cache-Control", "no-store");
       if ("error" in issued) { await service.audit("oauth.rejected", { reason: "token" }); return res.status(400).json(issued); }
       await service.audit("oauth.token_issued", { clientId: CHATGPT_CLIENT_ID }); return res.json(issued);
@@ -659,8 +660,10 @@ export function createApp(service: RemoteDesktopService): Express {
     return res.status(400).type("html").send("Sign-in could not be completed.");
   });
   app.post("/authorize/consent", async (req, res) => {
-    if (!service.publicAuth || !rate.allow("consent")) return res.status(400).send("Invalid authorization request.");
-    const outcome = await service.publicAuth.consent({ transaction: typeof req.body?.transaction === "string" ? req.body.transaction : "", allow: req.body?.allow === "yes", cookie: readCookie(req.header("cookie"), AUTH_COOKIE) });
+    const consentInput = { transaction: typeof req.body?.transaction === "string" ? req.body.transaction : "", allow: req.body?.allow === "yes", cookie: readCookie(req.header("cookie"), AUTH_COOKIE) };
+    if (!service.publicAuth) return res.status(400).send("Invalid authorization request.");
+    if (!rate.allow(`consent:${service.publicAuth.consentAdmissionKey(consentInput) ?? "invalid"}`)) return res.status(429).send("Too many requests.");
+    const outcome = await service.publicAuth.consent(consentInput);
     res.setHeader("Cache-Control", "no-store"); res.setHeader("Set-Cookie", `${AUTH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
     if (outcome.redirect) return res.redirect(303, outcome.redirect);
     return res.status(400).type("html").send("Authorization could not be completed.");

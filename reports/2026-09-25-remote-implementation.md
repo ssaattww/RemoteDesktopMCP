@@ -78,3 +78,12 @@ Desktop Commander 0.2.51 の `getConfig()` は呼出ごとに stderr へ診断�
 NR006 の body timeout は、socket の idle timeout を handler 実行と keep-alive に残す方式から、受信開始からの絶対 15 秒 deadline に置き換えた。request `end`、`aborted`、response `close` で deadline を解除するため、body を受信し終えた後の MCP handler 実行は切断しない。public HTTP fixture には 15 秒超の `session.open` audit を使う境界確認を追加した。
 
 この時点で IFR-004 focused、stderr capacity fixture は成功し、`npm run check`、`npm run lint:ts`、`git diff --check` は成功した。stderr drain 後の NR005 focused は最初の 2 回が約 12 秒で成功した。長時間の body 境界 fixture と連続 NR005 の完走は親担当の session polling と current-HEAD full gate で確認するため、ここでは成功と断定しない。
+
+## RDMCP-REMOTE-IFR-001 / P2: token と consent の admission 分離
+
+| required action | production path | composition / focused evidence |
+| --- | --- | --- |
+| 無効な `/token` POST が既存の有効 code または refresh の共有 bucket を枯渇させない。 | `src/public-auth.ts` の `tokenAdmissionKey` は persistent state を読まず、ChatGPT client と resource に束縛された未期限 in-memory code、または HMAC 検証済みの構造・期限が妥当な refresh だけを credential digest bucket に分類する。`src/index.ts` はその key を `/token` rate admission に渡す。本体 `token()` は従来どおり reload、epoch、許可 subject、family、rotation/replay を検証する。 | port 0 HTTP fixture は fixed ChatGPT client を装う無効 code/refresh を既定 10 件まで送った後、未使用の有効 code と有効 refresh が各々成功することを検査し、focused は 1 pass / 0 fail、49 秒。 |
+| 無効な consent POST が cookie-bound の有効 consent transaction を阻害しない。 | `src/public-auth.ts` の `consentAdmissionKey` は未期限・subject 済み transaction と HMAC cookie の一致だけを in-memory で確認して transaction digest bucket を返す。`consent()` 本体は serialized reload、現在の許可 subject、cookie、one-use 削除を維持する。`src/index.ts` は invalid と valid bucket を分け、public mode なしは 400、rate exhaustion は 429 とする。 | port 0 HTTP fixture は forged consent 10 件の後、cookie-bound transaction の consent が成功することを検査する。invalid consent の 11 件目は 429 で固定容量を確認する。focused は同じ 1 pass / 0 fail、49 秒。 |
+
+この分類は anonymous new `/authorize` の識別不能性を変更しない。署名済みだが revoke/replay 済みの refresh は credential 固有 bucket になり得るが、発行物を知る相手だけがその bucket を使え、本体の永続 state 検証では必ず拒否される。実 PID、`.env`、Google credential、実 OAuth state は読まず変更していない。`npm run check`、`npm run lint:ts`、`git diff --check` は成功した。ここで source と本報告の編集を停止し、統合 commit と後続 review/full gate は親担当が行う。

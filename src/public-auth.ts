@@ -158,11 +158,33 @@ export class PublicAuthService {
     if (!token || token.type !== "access" || token.iss !== this.cfg.baseUrl || token.aud !== `${this.cfg.baseUrl}/mcp` || token.client_id !== CHATGPT_CLIENT_ID || token.scope !== "mcp" || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.epoch !== "number" || typeof token.family !== "string" || typeof token.iat !== "number" || typeof token.nbf !== "number" || typeof token.exp !== "number") return undefined;
     return digest(raw);
   }
+  /** Classifies a credential that this process minted without reading grant
+   * state. The token endpoint still validates every binding and persistent
+   * authorization condition before issuing a response. */
+  tokenAdmissionKey(input: { grantType: string; code?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string }): string | undefined {
+    if (input.clientId !== CHATGPT_CLIENT_ID || input.resource !== `${this.cfg.baseUrl}/mcp`) return undefined;
+    if (input.grantType === "authorization_code") {
+      const code = input.code ?? ""; const authorization = this.codes.get(code);
+      if (!authorization || authorization.expires <= this.now() || authorization.clientId !== input.clientId || authorization.redirectUri !== input.redirectUri || authorization.resource !== input.resource) return undefined;
+      return `code:${digest(code)}`;
+    }
+    if (input.grantType !== "refresh_token" || !input.refreshToken) return undefined;
+    const token = this.verify(input.refreshToken);
+    if (!token || token.type !== "refresh" || token.iss !== this.cfg.baseUrl || token.aud !== input.resource || token.client_id !== input.clientId || token.scope !== "mcp" || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.epoch !== "number" || typeof token.family !== "string" || typeof token.exp !== "number" || token.exp <= Math.floor(this.now() / 1000)) return undefined;
+    return `refresh:${digest(input.refreshToken)}`;
+  }
   /** Classifies only an existing, cookie-bound Google transaction without
    * exchanging the code or reading persistent authorization state. */
   googleCallbackAdmission(input: { state: string; cookie?: string }): string | undefined {
     this.clean(); const transaction = [...this.transactions.values()].find((item) => item.googleState === input.state);
     if (!transaction || transaction.subject || transaction.googleCallbackStarted || !this.validCookie(input.cookie, transaction.id)) return undefined;
+    return digest(transaction.id);
+  }
+  /** Classifies only the pending cookie-bound consent transaction. Persistent
+   * subject authorization and one-use consumption happen in consent(). */
+  consentAdmissionKey(input: { transaction: string; cookie?: string }): string | undefined {
+    const transaction = this.transactions.get(input.transaction);
+    if (!transaction || transaction.expires <= this.now() || !transaction.subject || !this.validCookie(input.cookie, transaction.id)) return undefined;
     return digest(transaction.id);
   }
   async begin(input: { clientId: string; redirectUri: string; resource: string; state?: string; challenge: string }): Promise<{ redirect: string; cookie: string }> {

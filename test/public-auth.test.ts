@@ -335,7 +335,7 @@ test("REMOTE-NR-001: a v1 state with one approved subject and no refresh records
   assert.equal(await auth.authenticate(`Bearer ${issued.access_token}`), `google:${subject.iss}:${subject.sub}`);
 });
 
-test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, and REMOTE-NR-008: loopback HTTP flow reaches actual protected MCP tools", async () => {
+test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, REMOTE-NR-008, and IFR001/P2: loopback HTTP flow reaches actual protected MCP tools", async () => {
   const f = await fixture();
   let server: ReturnType<ReturnType<typeof createApp>["listen"]> | undefined;
   let client: Client | undefined;
@@ -408,7 +408,8 @@ test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, and REMOTE-NR-00
     const token = await fetch(`${local}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: clientId, redirect_uri: CHATGPT_REDIRECT_URI, resource }) });
     assert.equal(token.status, 200);
     assert.equal(token.headers.get("cache-control"), "no-store");
-    const tokenBody = await token.json() as { access_token: string };
+    const tokenBody = await token.json() as { access_token: string; refresh_token: string };
+    assert.ok(tokenBody.refresh_token);
     const rawToolList = await fetch(`${local}/mcp`, { method: "POST", headers: { authorization: `Bearer ${tokenBody.access_token}`, accept: "application/json, text/event-stream", "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" }) });
     assert.equal(rawToolList.status, 200);
     const rawToolWire = await rawToolList.text();
@@ -454,6 +455,39 @@ test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, and REMOTE-NR-00
     }
     const callbackAfterFlood = await fetch(`${local}/google/callback?state=${encodeURIComponent(callbackState)}&code=google-code`, { headers: { cookie: callbackCookie } });
     assert.equal(callbackAfterFlood.status, 200, "invalid callbacks do not consume the existing cookie-bound transaction bucket");
+    const callbackAfterFloodTransaction = /name="transaction" value="([^"]+)"/.exec(await callbackAfterFlood.text())?.[1];
+    assert.ok(callbackAfterFloodTransaction);
+    for (let request = 0; request < 11; request += 1) {
+      const floodedConsent = await fetch(`${local}/authorize/consent`, {
+        method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie: callbackCookie },
+        body: new URLSearchParams({ transaction: `forged-consent-${request}`, allow: "yes" }),
+      });
+      if (request === 10) assert.equal(floodedConsent.status, 429, "invalid consent requests share only the invalid bucket");
+    }
+    const consentAfterFlood = await fetch(`${local}/authorize/consent`, {
+      method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie: callbackCookie },
+      body: new URLSearchParams({ transaction: callbackAfterFloodTransaction, allow: "yes" }),
+    });
+    assert.equal(consentAfterFlood.status, 303, "invalid consent flooding does not consume the cookie-bound transaction bucket");
+    const issuedAfterConsentFlood = new URL(consentAfterFlood.headers.get("location") ?? "https://invalid.example").searchParams.get("code") ?? "";
+    assert.ok(issuedAfterConsentFlood);
+    for (let request = 0; request < 11; request += 1) {
+      const floodedToken = await fetch(`${local}/token`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grant_type: "authorization_code", client_id: clientId, code: `forged-code-${request}`, code_verifier: verifier, redirect_uri: CHATGPT_REDIRECT_URI, resource }),
+      });
+      if (request === 10) assert.equal(floodedToken.status, 429, "invalid fixed-client token requests share only the invalid bucket");
+    }
+    const issuedAfterTokenFlood = await fetch(`${local}/token`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "authorization_code", client_id: clientId, code: issuedAfterConsentFlood, code_verifier: verifier, redirect_uri: CHATGPT_REDIRECT_URI, resource }),
+    });
+    assert.equal(issuedAfterTokenFlood.status, 200, "invalid token flooding does not consume a valid authorization-code bucket");
+    const refreshedAfterTokenFlood = await fetch(`${local}/token`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "refresh_token", client_id: clientId, refresh_token: tokenBody.refresh_token, resource }),
+    });
+    assert.equal(refreshedAfterTokenFlood.status, 200, "invalid token flooding does not consume a valid signed-refresh bucket");
     const loadsBeforeMcpFlood = stateLoads;
     const floodedMcp = await Promise.all(Array.from({ length: 32 }, async (_, request) => fetch(`${local}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: request, method: "tools/list" }) })));
     assert.equal(floodedMcp.filter((response) => response.status === 429).length, 4, "the unknown MCP bucket accounts for the two earlier unauthenticated requests and admits only its configured bounded prefix");

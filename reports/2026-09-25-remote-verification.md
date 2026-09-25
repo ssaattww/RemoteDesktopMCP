@@ -3,10 +3,10 @@
 ## 実行環境と対象
 
 Windows / PowerShell、作業場所 `C:\Users\donabe\Project\RemoteDesktopMCP`。
-開始 HEAD は `8d72bb8dbc9464e03268bc5be39b72cb929f7e11`。現在は公開認証を実装中の作業ツリー。
+2026年9月25日の作業開始時の HEAD は `8d72bb8dbc9464e03268bc5be39b72cb929f7e11`。以下の初期確認は、公開認証を実装中だった時点の履歴である。
 前回の24件と CI 成功を今回の変更の検証結果として転用しない。
 
-## 実環境の確認
+## 実環境の初期確認（2026年9月25日）
 
 - Tailscale は接続中で、この PC の公開転送先は loopback port 3000。
 - 調査時点では port 3000 の待受なし、`.env` なし。
@@ -26,7 +26,7 @@ Google の実認証を通す本人登録 CLI は、認証 URL の表示を追加
 `doc/design/functional-requirements.md` は利用者の追加要求に合わせ、単一 PC の公開を複数 PC より先に進める順序へ変更した。
 task と作業前提、設計・実装・試験の各報告は新しいスコープとして作成し、旧独立判定を変更していない。
 
-文書作成者による意味・用語・読みやすさの確認は作業中。CLI の引数と実際の動作を照合してから確定する。
+2026年9月25日の初期確認時には、文書作成者による意味・用語・読みやすさの確認と CLI の引数・動作の照合は作業中だった。以降の検証とレビューの結果は後続の節に記録する。
 用語追加は利用者の exact 候補承認後に行った。`doc/remote-setup.md` と変更した要件文書の語彙確認は成功。
 Markdown lint は48ファイル、指摘0件。これらは製品コードの合格や独立レビューを意味しない。
 
@@ -37,7 +37,7 @@ Markdown lint は48ファイル、指摘0件。これらは製品コードの合
 全体試験は32/33で、既存 NR003/NR004 の試験用実行コマンドが Windows の空白入りパスを引用せず失敗した。
 試験担当は Windows の試験用起動を PATH 上の `node` と引用したファイル引数へ修正し、Desktop Commander 経由の当該試験成功を確認した。
 修正後の全件確認は通常レビュー後の最終検証で行う。
-上記は初回通常レビュー前の途中結果である。その後の通常レビューは9件の必須指摘で fail となり、修正を実施した。独立レビューは未実施。
+上記は初回通常レビュー前の途中結果である。その後の通常レビューは9件の必須指摘で fail となり、修正を実施した。この時点では独立レビューは未実施だった。
 
 ## 通常指摘の修正後の確認
 
@@ -60,3 +60,17 @@ Markdown lint は48ファイル、指摘0件。これらは製品コードの合
 | REMOTE-NR-010 / P2 | `src/index.ts` の `process_output` が終了待ちかつ実セッション生存中は `observe` を呼ばない | `test/independent-fixes.test.ts` の termination timeout fixture で status/output の未読取・所有者維持・消滅後の単一終了を確認。親 Node22 focused 成功。 |
 | NR005 timeout の直接修正 | `DesktopCommander.start` が stderr を秘密の保存・出力なしで読み捨てる | `test/regressions.test.ts` の1MiB stderr fixtureと実 HTTP NR005が親 Node22 focused 成功。 |
 | REMOTE-NR-006 の受信期限 | `createApp` の絶対受信期限を end/aborted/close で解除する | `test/public-auth.test.ts` の少量継続送信拒否と長処理成功を同じ実 HTTP 構成で確認。上記45120.7298msの実行で成功。 |
+
+## 独立レビュー後の現在地（2026年9月25日）
+
+固定 HEAD `96b10cd8b7026e73512de3c294f67894621709bf` の全体検証は43件中42件成功、POSIX 専用1件スキップ、失敗0件。全必須コマンドが成功した。詳細は [全体検証記録](2026-09-25-remote-full-gate.md) に保持している。
+その後の文書更新を含む `3ffd783c3fc38b46b54ccbacb97075f8581de41e` を対象に独立レビューを行い、認証要求の制限1件と文書2件の必須指摘を得た。追加修正は再検証中であり、先の全体成功を追加修正の検証として転用しない。
+公開サービスは起動済みで、公開 HTTPS の health、Google モード、resource/issuer、CIMD、未認証401を確認した。ChatGPT の実操作と再起動後の実 refresh は未確認である。
+
+`RDMCP-REMOTE-IFR-002 / P3` に対し、冒頭の作業ツリーと文書確認の「作業中」は2026年9月25日の初期履歴だと明示した。初期失敗の記録と実 ChatGPT 接続の未確認状態は保持する。
+
+| 独立指摘 / 元severity | 必須対応と経路 | 組合せと確認証拠 |
+| --- | --- | --- |
+| RDMCP-REMOTE-IFR-001 / P2 | `src/public-auth.ts` の `tokenAdmissionKey` / `consentAdmissionKey` と `src/index.ts` の対応 endpoint で、発行済みcode・署名済みrefresh・cookie付き同意を無効要求と別枠で制限する。状態の本検証と固定容量は維持する。 | port 0 の公開HTTP試験で、無効token要求11件後に正しいcodeとrefreshが200、無効同意11件後に正しい同意が303。担当のfocused試験1件成功・失敗0件、49,046.3432ms。全体検証は追加修正後に別途行う。 |
+| RDMCP-REMOTE-IFR-002 / P3 | 本報告の冒頭と文書確認を2026年9月25日の初期履歴と明示する。 | 初期失敗、96bの全体成功、公開起動、実ChatGPT未確認を別の時点と証拠で照合。Markdown lint成功。 |
+| RDMCP-REMOTE-IFR-003 / P3 | `remote-tests` 報告のstorage/contextリンクを同じディレクトリからの相対リンクへ修正する。 | 担当がreportsディレクトリ基準で両リンク先の存在を確認。Markdown lint成功。 |
