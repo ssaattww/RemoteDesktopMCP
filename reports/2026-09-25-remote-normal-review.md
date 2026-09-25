@@ -223,3 +223,13 @@ verdict: **pass_with_held**。REMOTE-NR-010 / P2 の必須修正と F01c の直�
 | F03 / CI / 独立レビュー | `held`。ChatGPT 実操作・実 refresh、Linux CI、POSIX ACL 試験、独立最終レビューは未完了として正しく所有される。 |
 
 verdict: **fail**（この非最終文書同期だけ）。コード review の必須指摘0件・Windows 全体 gate 成功は維持するが、REMOTE-DOC-001 の状態不一致を修正してから独立 freeze に進む。同一担当が次の文書だけの HEAD でこの1件を限定確認できる。`report_attestation_allowed=false`。
+
+### REMOTE-DOC-001 の限定解消確認
+
+- mode: normal fix verification、同一 reviewer `/root/remote_normal_review`。前回文書対象 HEAD `69d504955dd8c21f8af8be8fa58b34d4f7442c5b`、今回の immutable reviewed implementation HEAD `ad472320830acf1c31fc0f7781bc374d2fd1b4da`。元 severity P3 を維持し、別の指摘やコードを再レビューしていない。元の要求 profile Sol / high、runtime profile 非公開、application status `reused_existing_agent_profile`。実装・commit・push は行っていない。
+- change identity: 前回 HEAD からの差分は `tasks/tasks-status.md` の F01 状態1行と、前回の当 reviewer 報告の収録だけ。source/test/config は不変。したがって `96b10cd8b7026e73512de3c294f67894621709bf` の Windows Node22 全体43件中42 pass・POSIX1 skip・0 fail、および通常コード指摘0件の証拠範囲は変わらない。新 HEAD の Linux CI 実行を意味しない。
+- REMOTE-DOC-001 / P3: **closed**。F01 は「実 Google 本人登録成功、通常コード指摘解消、ChatGPT 認証待ち」となり、F01c/F04 の通常10件解消・全体 gate 成功、phases の通常レビュー済みと一致。ChatGPT の認証・実操作は待機中と保持し、実 Google 本人登録を実 ChatGPT 接続成功へ読み替えていない。required action、production path=`tasks/tasks-status.md` F01、composition=同表 F01c/F04 と `tasks/phases-status.md`、確認結果の全セルが揃う。
+- `document_wording_review`: mode normal fix verification。target は上記 HEAD、before は前回文書 HEAD。reader は同じ reviewer/Windows runtime_local、Skill と decision examples は既読。F01 原文・修正文と同じ表の F01c/F03/F04、phase の段落を照合した。意味・識別・承認語の用法・読みやすさは各 `checked_no_finding`、policy conflict と missing evidence なし。wording result: `pass`。mechanical lint と別判定。
+- coverage: `checked_no_finding` 文書の状態整合、`not_applicable` 新しい source/test/config、`held` F03 の ChatGPT `session_open`/`node_list`/`file_read` 実結果と再起動後実 refresh、Linux CI/POSIX 専用試験、独立最終レビュー。実 `.env`・Google JSON・外部 `DATA_DIR` の内容は読んでいない。
+
+verdict: **pass_with_held**。今回の非最終文書同期に必須 finding は残らず、通常コードレビューの必須指摘0件と Windows 全体 gate 成功を維持する。独立 reviewer は次の凍結 HEAD に対し独立の判定を行い、実 ChatGPT 操作・実 refresh の未確認を F03 と区別する。通常 review の `report_attestation_allowed=false`。
