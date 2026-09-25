@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -8,6 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { configFromEnv } from "./index.js";
 import { GoogleOidcClient, PublicAuthService } from "./public-auth.js";
+import { assertPrivateDirectory, createPrivateFile, ensurePrivateDirectory } from "./private-storage.js";
 
 const LOCAL_CALLBACK = "http://localhost:8765/callback";
 const current = process.cwd();
@@ -25,7 +26,7 @@ async function configure(source: string) {
   const parsed = new URL(baseUrl); if (parsed.protocol !== "https:") throw new Error("The public BASE_URL must use HTTPS.");
   const requestedRoot = path.resolve(argument("--root") ?? path.join(os.homedir(), "RemoteDesktopWorkspace"));
   const requestedDataDir = path.resolve(argument("--data-dir") ?? path.join(os.homedir(), "RemoteDesktopMCP-data"));
-  await mkdir(requestedRoot, { recursive: true, mode: 0o700 }); await mkdir(requestedDataDir, { recursive: true, mode: 0o700 });
+  await mkdir(requestedRoot, { recursive: true, mode: 0o700 }); await ensurePrivateDirectory(requestedDataDir);
   const root = await realpath(requestedRoot); const dataDir = await realpath(requestedDataDir);
   const envPath = path.join(current, ".env"); const sourcePath = await realpath(path.resolve(source));
   if (overlaps(root, dataDir) || inside(root, envPath) || inside(root, sourcePath)) throw new Error("The permitted workspace must not contain DATA_DIR, .env, or the Google client JSON.");
@@ -34,7 +35,7 @@ async function configure(source: string) {
     `GOOGLE_CLIENT_ID=${(client as { client_id: string }).client_id}`, `GOOGLE_CLIENT_SECRET=${(client as { client_secret: string }).client_secret}`, `GOOGLE_REDIRECT_URI=${baseUrl}/google/callback`, `GOOGLE_LOCAL_REDIRECT_URI=${LOCAL_CALLBACK}`,
     `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${dataDir}`, "LOCAL_NODE_ID=local", "LOCAL_NODE_LABEL=This PC", "TRANSFER_CHUNK_BYTES=131072",
   ];
-  await writeFile(envPath, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await assertPrivateDirectory(path.dirname(envPath)); await createPrivateFile(envPath, `${lines.join("\n")}\n`);
   console.log("Created .env with Google mode. Keep the Google client JSON and .env outside the permitted workspace.");
 }
 
@@ -51,16 +52,20 @@ async function authorizeGoogle() {
       if (handled || url.pathname !== "/callback" || url.searchParams.get("state") !== state || !url.searchParams.get("code")) { res.writeHead(400, { "cache-control": "no-store" }).end("Registration was rejected."); return; }
       handled = true;
       const identity = await oidc.exchangeCode({ code: url.searchParams.get("code")!, redirectUri: callback, state, nonce });
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end("Identity verified. Return to the terminal on this PC and type approve to finish registration.");
       const answer = await ask(`Approve Google subject ${identity.iss} / ${identity.sub} for this PC? Type approve: `);
       if (answer !== "approve") throw new Error("Approval was not confirmed.");
-      const auth = new PublicAuthService(publicAuth); await auth.initialize(); await auth.addAllowedSubject(identity); res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end("Identity verified and approved. Return to the terminal."); console.log("The Google subject was approved. Restart the service before connecting ChatGPT.");
+      const auth = new PublicAuthService(publicAuth); await auth.initialize(); await auth.addAllowedSubject(identity, { replace: process.argv.includes("--replace") }); console.log("The Google subject was approved. Restart the service before connecting ChatGPT.");
       server.close();
     } catch { if (!res.headersSent) res.writeHead(400, { "cache-control": "no-store" }).end("Registration could not be completed."); server.close(); process.exitCode = 1; }
   });
   await new Promise<void>((resolve, reject) => server.once("error", reject).listen(8765, "localhost", resolve));
   const url = oidc.authorizationUrl({ redirectUri: callback, state, nonce });
-  const opened = spawn("explorer.exe", [url], { detached: true, stdio: "ignore", windowsHide: true }); opened.unref();
-  setTimeout(() => { process.exitCode = 1; server.close(); }, 5 * 60_000).unref();
+  console.log(`Open this Google sign-in URL in a browser on this PC:\n${url}`);
+  const opened = spawn("explorer.exe", [url], { detached: true, stdio: "ignore", windowsHide: true });
+  opened.once("error", () => console.warn("Browser did not start automatically. Open the displayed URL manually in a browser on this PC."));
+  opened.unref();
+  setTimeout(() => { if (server.listening) { console.error("Google registration timed out before a verified approval."); process.exitCode = 1; server.close(); } }, 5 * 60_000).unref();
   await new Promise<void>((resolve) => server.once("close", resolve));
 }
 

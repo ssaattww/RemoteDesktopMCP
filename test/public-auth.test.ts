@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import os from "node:os";
@@ -20,6 +20,7 @@ import {
   type OidcVerifier,
 } from "../src/public-auth.js";
 import { configFromEnv, createApp, RemoteDesktopService } from "../src/index.js";
+import { protectPrivateDirectory } from "../src/private-storage.js";
 import { fixture } from "./fixture.js";
 
 const baseUrl = "https://remote.example.test";
@@ -28,6 +29,7 @@ const clientId = CHATGPT_CLIENT_ID;
 const verifier = "v".repeat(43);
 const challenge = createHash("sha256").update(verifier).digest("base64url");
 const subject: GoogleIdentity = { iss: "https://accounts.google.com", sub: "allowed-subject", email: "owner@example.test" };
+const authSecret = "test-secret-that-is-long-enough";
 
 async function runCli(cwd: string, args: string[]) {
   const workspace = path.resolve(process.cwd());
@@ -59,7 +61,7 @@ function memoryStore(initial?: OAuthState): OAuthStateStore {
   };
 }
 
-function publicAuth(options: { verifier?: OidcVerifier; store?: OAuthStateStore; now?: () => number; request?: typeof fetch } = {}) {
+function publicAuth(options: { verifier?: OidcVerifier; store?: OAuthStateStore; now?: () => number; request?: typeof fetch; dataDir?: string; fileStore?: boolean } = {}) {
   const oidc: OidcVerifier = options.verifier ?? {
     authorizationUrl(input) {
       return `https://accounts.google.com/mock?state=${encodeURIComponent(input.state)}&nonce=${encodeURIComponent(input.nonce)}`;
@@ -69,13 +71,24 @@ function publicAuth(options: { verifier?: OidcVerifier; store?: OAuthStateStore;
       return subject;
     },
   };
-  return new PublicAuthService({ baseUrl, tokenSecret: "test-secret-that-is-long-enough", dataDir: "unused", googleClientId: "google-client", googleClientSecret: "not-a-real-secret", googleRedirectUri: `${baseUrl}/google/callback` }, {
-    store: options.store ?? memoryStore(), verifier: oidc, now: options.now,
+  return new PublicAuthService({ baseUrl, tokenSecret: authSecret, dataDir: options.dataDir ?? "unused", googleClientId: "google-client", googleClientSecret: "not-a-real-secret", googleRedirectUri: `${baseUrl}/google/callback` }, {
+    ...(options.store ? { store: options.store } : options.fileStore ? {} : { store: memoryStore() }), verifier: oidc, now: options.now,
     request: options.request ?? (async (input) => {
       assert.equal(String(input), CHATGPT_CLIENT_ID, "only the fixed CIMD URL is requested during initialization");
       return json({ client_id: CHATGPT_CLIENT_ID, redirect_uris: [CHATGPT_REDIRECT_URI], token_endpoint_auth_methods_supported: ["none"] });
     }),
   });
+}
+
+function requireTokens(value: Awaited<ReturnType<PublicAuthService["token"]>>) {
+  assert.ok("access_token" in value && "refresh_token" in value, "a valid grant must issue an access and refresh token");
+  if (!("access_token" in value && "refresh_token" in value)) throw new Error("token was not issued");
+  return value;
+}
+
+function signedAccess(payload: Record<string, unknown>) {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${encoded}.${createHmac("sha256", authSecret).update(encoded).digest("base64url")}`;
 }
 
 async function authorizedCode(auth: PublicAuthService) {
@@ -84,7 +97,7 @@ async function authorizedCode(auth: PublicAuthService) {
   assert.ok(googleState);
   const callback = await auth.googleCallback({ state: googleState, code: "google-code", cookie: begun.cookie });
   assert.ok(callback.transaction);
-  const consent = auth.consent({ transaction: callback.transaction, cookie: begun.cookie, allow: true });
+  const consent = await auth.consent({ transaction: callback.transaction, cookie: begun.cookie, allow: true });
   assert.ok(consent.redirect);
   return new URL(consent.redirect).searchParams.get("code") ?? "";
 }
@@ -166,7 +179,7 @@ test("RA-04 and RA-05: Google callback requires cookie and state, then binds the
   assert.ok(callback.transaction);
   const replay = await auth.googleCallback({ state: googleState, code: "google-code", cookie: begun.cookie });
   assert.match(replay.error ?? "", /invalid|used/i, "a Google callback state is one use");
-  const denied = auth.consent({ transaction: callback.transaction, cookie: "forged-cookie", allow: true });
+  const denied = await auth.consent({ transaction: callback.transaction, cookie: "forged-cookie", allow: true });
   assert.deepEqual(denied, { error: "The authorization request was invalid." });
 });
 
@@ -200,6 +213,104 @@ test("RA-03 and RA-09: an unapproved subject cannot bootstrap access", async () 
   const googleState = new URL(begun.redirect).searchParams.get("state") ?? "";
   assert.equal((await auth.googleCallback({ state: googleState, code: "google-code", cookie: begun.cookie })).redirect?.includes("error=access_denied"), true);
   assert.equal(auth.hasAllowedSubject(), false);
+});
+
+test("REMOTE-NR-001: a seven-day refresh family rotates beyond 256 uses, detects replay, and cleans expired families", async () => {
+  let now = 1_700_000_000_000;
+  const auth = publicAuth({ now: () => now });
+  await auth.initialize();
+  await auth.addAllowedSubject(subject);
+  const initial = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  const firstRefresh = initial.refresh_token;
+  let current = initial;
+  for (let rotation = 0; rotation < 1_008; rotation += 1) {
+    now += 10 * 60_000;
+    current = requireTokens(await auth.token({ grantType: "refresh_token", refreshToken: current.refresh_token, clientId, resource }));
+  }
+  const concurrent = await Promise.all([
+    auth.token({ grantType: "refresh_token", refreshToken: current.refresh_token, clientId, resource }),
+    auth.token({ grantType: "refresh_token", refreshToken: current.refresh_token, clientId, resource }),
+  ]);
+  const successful = concurrent.filter((value) => "access_token" in value);
+  assert.equal(successful.length, 1, "only one concurrent rotation may win");
+  const winner = requireTokens(successful[0]!);
+  assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: firstRefresh, clientId, resource }), { error: "invalid_grant" }, "a historical refresh token revokes its family on replay");
+  assert.equal(await auth.authenticate(`Bearer ${winner.access_token}`), undefined, "replay revocation invalidates the winning access token too");
+  now += 8 * 24 * 60 * 60_000;
+  const replacement = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  assert.equal(await auth.authenticate(`Bearer ${replacement.access_token}`), `google:${subject.iss}:${subject.sub}`, "expired family state is cleaned before a new grant");
+});
+
+test("REMOTE-NR-004 and REMOTE-NR-005: subject replacement revokes old grants and unexchanged codes", async () => {
+  const other: GoogleIdentity = { iss: subject.iss, sub: "replacement-subject" };
+  const auth = publicAuth();
+  await auth.initialize();
+  assert.equal(await auth.addAllowedSubject(subject), "added");
+  await assert.rejects(auth.addAllowedSubject(other), /different Google subject/i);
+  const issued = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  const pending = await authorizedCode(auth);
+  assert.equal(await auth.addAllowedSubject(other, { replace: true }), "replaced");
+  assert.deepEqual(await auth.token({ grantType: "authorization_code", code: pending, verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }), { error: "invalid_grant" });
+  assert.equal(await auth.authenticate(`Bearer ${issued.access_token}`), undefined);
+  assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource }), { error: "invalid_grant" });
+});
+
+test("REMOTE-NR-005 and REMOTE-NR-007: code bindings and signed access claims fail closed", async () => {
+  const auth = publicAuth();
+  await auth.initialize();
+  await auth.addAllowedSubject(subject);
+  const exchange = async (changes: Partial<{ clientId: string; redirectUri: string; resource: string; verifier: string }>) => auth.token({
+    grantType: "authorization_code", code: await authorizedCode(auth), verifier: changes.verifier ?? verifier,
+    clientId: changes.clientId ?? clientId, redirectUri: changes.redirectUri ?? CHATGPT_REDIRECT_URI, resource: changes.resource ?? resource,
+  });
+  assert.deepEqual(await exchange({ clientId: "https://attacker.example/client.json" }), { error: "invalid_grant" });
+  assert.deepEqual(await exchange({ redirectUri: "https://chatgpt.com/other" }), { error: "invalid_grant" });
+  assert.deepEqual(await exchange({ resource: "https://remote.example.test/other" }), { error: "invalid_grant" });
+  assert.deepEqual(await exchange({ verifier: "x".repeat(43) }), { error: "invalid_grant" });
+  const issued = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  const base = JSON.parse(Buffer.from(issued.access_token.split(".")[0]!, "base64url").toString("utf8")) as Record<string, unknown>;
+  for (const malformed of [
+    (() => { const value = { ...base }; delete value.iat; return value; })(),
+    { ...base, nbf: Math.floor(Date.now() / 1000) + 600 },
+    { ...base, iat: Math.floor(Date.now() / 1000) + 600 },
+    { ...base, client_id: "https://attacker.example/client.json" },
+    { ...base, exp: Number(base.iat) + 601 },
+  ]) assert.equal(await auth.authenticate(`Bearer ${signedAccess(malformed)}`), undefined);
+});
+
+test("REMOTE-NR-008: file-state restart preserves a valid grant, while a failed save cannot issue or revive a code", async () => {
+  const base = await mkdtemp(path.join(path.resolve(process.cwd(), "reference", "validation"), "rdmcp-auth-state-"));
+  try {
+    await protectPrivateDirectory(base);
+    const first = publicAuth({ dataDir: base, fileStore: true });
+    await first.initialize(); await first.addAllowedSubject(subject);
+    const issued = requireTokens(await first.token({ grantType: "authorization_code", code: await authorizedCode(first), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+    const restarted = publicAuth({ dataDir: base, fileStore: true });
+    await restarted.initialize();
+    const persisted = await restarted.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource });
+    const savedState = JSON.parse(await readFile(path.join(base, "oauth-state.json"), "utf8")) as { epoch?: unknown; refreshes?: unknown[]; families?: Record<string, { active?: unknown; epoch?: unknown }> };
+    const details = `epoch=${String(savedState.epoch)} refreshes=${String(savedState.refreshes?.length)} families=${Object.values(savedState.families ?? {}).map((family) => `${String(family.active)}:${String(family.epoch)}`).join(",")}`;
+    assert.ok("access_token" in persisted, `a file-backed refresh grant survives restart: ${"error" in persisted ? persisted.error : "unexpected response"}; ${details}`);
+    const failed = publicAuth({ store: { load: async () => ({ version: 1, epoch: 1, allowedSubjects: [subject], refreshes: [], families: {} }), save: async () => { throw new Error("fixture save failure"); } } });
+    await failed.initialize();
+    const begun = await failed.begin({ clientId, redirectUri: CHATGPT_REDIRECT_URI, resource, challenge });
+    const state = new URL(begun.redirect).searchParams.get("state") ?? "";
+    const callback = await failed.googleCallback({ state, code: "google-code", cookie: begun.cookie });
+    assert.ok(callback.transaction);
+    const consent = await failed.consent({ transaction: callback.transaction, cookie: begun.cookie, allow: true });
+    const code = new URL(consent.redirect ?? "https://invalid.example").searchParams.get("code") ?? "";
+    await assert.rejects(failed.token({ grantType: "authorization_code", code, verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }), /fixture save failure/);
+    assert.deepEqual(await failed.token({ grantType: "authorization_code", code, verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }), { error: "invalid_grant" }, "a failed issuance consumes its code rather than reviving it");
+  } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test("REMOTE-NR-001: a v1 state with one approved subject and no refresh records remains usable", async () => {
+  const legacy: OAuthState = { version: 1, epoch: 7, allowedSubjects: [subject], refreshes: [], families: {} };
+  const auth = publicAuth({ store: memoryStore(legacy) });
+  await auth.initialize();
+  assert.equal(auth.hasAllowedSubject(), true);
+  const issued = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  assert.equal(await auth.authenticate(`Bearer ${issued.access_token}`), `google:${subject.iss}:${subject.sub}`);
 });
 
 test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protected MCP tools", async () => {
@@ -236,6 +347,12 @@ test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protecte
     assert.equal(metadataBody.issuer, baseUrl, "metadata identity is configured, not derived from request headers");
     assert.equal(metadataBody.client_id_metadata_document_supported, true);
     assert.deepEqual(metadataBody.grant_types_supported, ["authorization_code", "refresh_token"]);
+    const protectedResource = await fetch(`${local}/.well-known/oauth-protected-resource`);
+    assert.deepEqual(await protectedResource.json(), { resource, authorization_servers: [baseUrl], scopes_supported: ["mcp"] });
+    const rejectedRegistration = await fetch(`${local}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [CHATGPT_REDIRECT_URI] }) });
+    assert.equal(rejectedRegistration.status, 404, "public mode rejects dynamic client registration");
+    const rejectedPassword = await fetch(`${local}/authorize/confirm`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "email=owner%40example.test&password=fixture" });
+    assert.equal(rejectedPassword.status, 404, "public mode has no password authorization endpoint");
     const unauthenticated = await fetch(`${local}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     assert.equal(unauthenticated.status, 401);
     assert.equal(unauthenticated.headers.get("www-authenticate"), `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
@@ -267,11 +384,33 @@ test("RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protecte
     const tokenBody = await token.json() as { access_token: string };
     client = new Client({ name: "public-auth-regression", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${local}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokenBody.access_token}` } } }));
+    const listed = await client.listTools();
+    assert.ok(listed.tools.length > 0);
+    for (const tool of listed.tools as Array<{ _meta?: { securitySchemes?: unknown; "openai/securitySchemes"?: unknown } }>) {
+      assert.deepEqual(tool._meta?.securitySchemes, [{ type: "oauth2", scopes: ["mcp"] }], "every tool exposes OAuth metadata for linking");
+      assert.deepEqual(tool._meta?.["openai/securitySchemes"], [{ type: "oauth2", scopes: ["mcp"] }], "every tool exposes the OpenAI OAuth metadata alias");
+    }
     const opened = await client.callTool({ name: "session_open", arguments: {} });
     const session = JSON.parse(opened.content.find((item) => item.type === "text")?.text ?? "{}") as { session_id: string };
     assert.ok(session.session_id);
     const nodes = await client.callTool({ name: "node_list", arguments: { session_id: session.session_id } });
     assert.equal(nodes.isError, undefined);
+    const expired = await fetch(`${local}/mcp`, { method: "POST", headers: { authorization: "Bearer expired-token", "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "node_list", arguments: {} } }) });
+    assert.equal(expired.status, 200);
+    const expiredBody = await expired.json() as { result?: { isError?: boolean; _meta?: Record<string, unknown> } };
+    assert.equal(expiredBody.result?.isError, true);
+    assert.deepEqual(expiredBody.result?._meta?.["mcp/www_authenticate"], [`Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`]);
+    for (let request = 0; request < 11; request += 1) {
+      const flooded = await fetch(`${local}/authorize?client_id=${encodeURIComponent("https://attacker.example/client.json")}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=mcp&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
+      if (request === 10) assert.equal(flooded.status, 429);
+    }
+    const normalAfterFlood = await fetch(`${local}/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CHATGPT_REDIRECT_URI)}&response_type=code&scope=mcp&resource=${encodeURIComponent(resource)}&code_challenge_method=S256&code_challenge=${challenge}`, { redirect: "manual" });
+    assert.equal(normalAfterFlood.status, 303, "unknown-client flooding does not consume the fixed ChatGPT bucket");
+    const chunked = await fetch(`${local}/token`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`grant_type=${"x".repeat(17 * 1024)}`)); controller.close(); } }), duplex: "half",
+    } as RequestInit);
+    assert.equal(chunked.status, 413, "chunked authentication bodies are bounded even without content-length");
   } finally {
     await client?.close();
     await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()) ?? resolve());
@@ -286,7 +425,9 @@ test("RA-09: configure writes only a new isolated .env and never prints the Goog
   const data = path.join(base, "data");
   const clientFile = path.join(base, "google-client.json");
   const clientSecret = "cli-fixture-secret-must-not-print";
+  await protectPrivateDirectory(base);
   await Promise.all([mkdir(root), mkdir(data), writeFile(clientFile, JSON.stringify({ web: { client_id: "fixture-client", client_secret: clientSecret } }))]);
+  await protectPrivateDirectory(data);
   try {
     const configured = await runCli(base, ["configure", clientFile, "--base-url", baseUrl, "--root", root, "--data-dir", data]);
     assert.equal(configured.code, 0, configured.stderr);

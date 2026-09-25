@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { hashPassword } from "../src/hash-password.js";
 import { RemoteDesktopService, type RuntimeConfig } from "../src/index.js";
+import { protectPrivateDirectory } from "../src/private-storage.js";
 
 export type Fixture = { service: RemoteDesktopService; root: string; data: string; base: string; cleanup: () => Promise<void> };
 
@@ -23,6 +24,7 @@ export async function fixture(): Promise<Fixture> {
   const root = path.join(base, "files");
   const data = path.join(base, "data");
   await Promise.all([mkdir(root), mkdir(data)]);
+  await protectPrivateDirectory(data);
   const cfg: RuntimeConfig = {
     baseUrl: "http://127.0.0.1",
     tokenSecret: "x".repeat(32),

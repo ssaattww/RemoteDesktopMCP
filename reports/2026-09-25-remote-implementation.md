@@ -19,6 +19,7 @@ ChatGPT から単一 Windows PC を操作するための公開認証と設定 CL
 - runtime profile observability: final_profile_hidden.
 - approval: not_required; 利用者が明示指定。
 - fork policy: none. 異なる作業に担当を再利用しないという追加指示に従い新規作成。
+- fix continuity: REMOTE-NR-001〜009 は同じ公開認証実装の指摘修正として /root/remote_auth_implementation を継続。application status は reused_existing_agent_profile、元の実行設定は未観測のまま保持。
 
 ## 結果
 

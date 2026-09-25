@@ -19,10 +19,11 @@
 - runtime profile observability: final_profile_hidden.
 - approval: not_required; 利用者が明示指定。
 - fork policy: none. 異なる作業なので新規担当。
+- fix continuity: REMOTE-NR-001〜009 の同じ試験修正として /root/remote_auth_tests を継続。application status は reused_existing_agent_profile、元の実行設定は未観測のまま保持。
 
 ## 結果
 
-`test/public-auth.test.ts` に公開認証の 9 件を追加した。固定 client metadata、Google ID token の RSA 署名と claim、cookie と state、PKCE、refresh の再利用失効、再起動後の状態、公開 HTTP から MCP tool までの経路、設定 CLI の隔離を扱う。
+`test/public-auth.test.ts` に公開認証の 14 件を追加した。固定 client metadata、Google ID token の RSA 署名と claim、cookie と state、PKCE、refresh の再利用失効、再起動後の状態、公開 HTTP から MCP tool までの経路、設定 CLI の隔離を扱う。永続 state の fixture は `reference/validation` 下の private な一時 directory を使い、実 `.env`、実 OAuth state、実 Google credential は参照しない。
 
 既存 `NR003/NR004` は Windows の既定 `cmd.exe` で `C:\Program Files\nodejs\node.exe` を先頭に引用して渡すと `C:\Program` と分割されて失敗した。fixture の Node 実行を `node "script"` にし、Desktop Commander が修復する PATH 解決を使う形へ直した。これは Node 本体の実行を省略せず、同じ Windows host の `C:\Program Files` 配下の Node を shell が解決する経路である。
 
@@ -45,13 +46,30 @@
 
 実 Google OAuth と ChatGPT 接続画面の確認は、資格情報作成と本人ログイン後の人手検証である。ここで作る mock 試験はその接続を実施済みとは記録しない。
 
+## 通常 review finding matrix
+
+各行は通常 review の required action、実装で通る production path、実際に組み立てた fixture と focused test を対応づける。Google の mock は署名検証、認可交換、HTTP 境界を分けている。実 Google 本人登録の証拠は mock fixture と混同しない。
+
+| finding | required action と production path | actual composition fixture / test | 結果と範囲 |
+| --- | --- | --- | --- |
+| `REMOTE-NR-001` | 7 日間の通常回転を容量で止めず、replay を検知し、期限後 family を清掃する。`src/public-auth.ts` の `PublicAuthService.issue`、`tokenUnlocked`、`clean`、`normalize`。 | memory state、可変 clock、固定 Google/CIMD verifier を組み立てた `REMOTE-NR-001: a seven-day refresh family rotates beyond 256 uses, detects replay, and cleans expired families`。v1 state は `REMOTE-NR-001: a v1 state with one approved subject and no refresh records remains usable`。 | 1,008 回の10分間隔 rotation、同一 refresh の `Promise.all`、最初の token replay、8日後 cleanup、v1 single-subject/empty-refresh state が通過。replay は family と旧 access を無効化する。 |
+| `REMOTE-NR-002` | Windows で state、監査、一時 file、`.env`、`DATA_DIR` の ACL を作成・再読して確認し、広い parent/existing ACL を拒否する。`src/private-storage.ts`、`src/public-auth.ts` の file store、`src/index.ts` と `src/remote-auth-cli.ts` の private-storage 呼出。 | [保存領域保護報告](reports/2026-09-25-remote-storage.md) の実 Windows ACL fixture。`REMOTE-NR-002: Windows ACLs protect new files, rename results, and reject broad existing ACLs`（`test/private-storage.test.ts`）。public HTTP fixture も protected `DATA_DIR` を合成する。 | Windows focused 1件成功、POSIX counterpart は Windows では skip。専任担当の実 ACL 証拠であり、本報告の mock state による代用ではない。 |
+| `REMOTE-NR-003` | 各 MCP tool に OAuth metadata を出し、失効 Bearer の `tools/call` を runtime challenge へ導く。`src/index.ts` の `RemoteDesktopService.server` と `createApp` の `/mcp`。 | protected `DATA_DIR`、injected approved Google identity/CIMD、port 0 loopback server、実 MCP client の `RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protected MCP tools`。 | 全 `tools/list` entry の `securitySchemes` と OpenAI alias、失効 Bearer の `_meta["mcp/www_authenticate"]` を同じ HTTP/MCP composition で確認した。初期 unauthenticated HTTP 401 discovery も同 test で別に確認した。 |
+| `REMOTE-NR-004` | 1人制約を永続 state で強制し、明示 replacement は旧 grant を失効する。`src/public-auth.ts` の `addAllowedSubject`、`authenticateUnlocked`。 | fixed Google identity、memory state、authorization code/refresh を組み立てた `REMOTE-NR-004 and REMOTE-NR-005: subject replacement revokes old grants and unexchanged codes`。 | 別 subject の通常追加は拒否され、`replace: true` 後は旧 access と refresh が拒否される。 |
+| `REMOTE-NR-005` | code exchange 前に subject 許可と epoch を確認し、client/redirect/resource/PKCE に束縛する。`src/public-auth.ts` の `consent`、`tokenUnlocked`。 | replacement 前に発行した code の exchange と、別 client/redirect/resource/verifier をそれぞれ発行済み code に渡す `REMOTE-NR-004 and REMOTE-NR-005: subject replacement revokes old grants and unexchanged codes` および `REMOTE-NR-005 and REMOTE-NR-007: code bindings and signed access claims fail closed`。 | 未交換 code と全 binding 不一致は `invalid_grant` になり、削除済み主体への新 grant を発行しない。 |
+| `REMOTE-NR-006` | 固定容量の期限付き rate limiter、callback/MCP 上限、body size/timeout を設定し、unknown client が正規 client を恒常的に塞がないようにする。`src/index.ts` の `RateLimit` と `createApp` の public routes。 | port 0 loopback composition の `RA-01, RA-02, RA-04, and RA-06: loopback HTTP flow reaches actual protected MCP tools`。unknown client 11回、固定 ChatGPT client、chunked 17 KiB `/token` body を順に送る。 | unknown bucket の11回目は 429、続く fixed client は 303、chunked body は 413。fixture は外部 port/Funnel を使わない。 |
+| `REMOTE-NR-007` | 署名済み access の `iat`/`nbf`、固定 client ID、最大 TTL を認証時に検査する。`src/public-auth.ts` の `authenticateUnlocked`。 | HMAC を test token secret で作る fixture の `REMOTE-NR-005 and REMOTE-NR-007: code bindings and signed access claims fail closed`。iat 欠落、future iat/nbf、別 client、過大 TTL を生成する。 | 署名が正しくても必須 claim または寿命が不正な token はすべて拒否される。 |
+| `REMOTE-NR-008` | 実 file store で restart を確認し、save 失敗では token を出さず code を復活させない。`src/public-auth.ts` の `createFileOAuthStateStore`、`persist`、`tokenUnlocked`。 | `reference/validation` の private temporary `DATA_DIR` で実 file store を再生成し、別 fixture store の `save` を throw する `REMOTE-NR-008: file-state restart preserves a valid grant, while a failed save cannot issue or revive a code`。 | 保存済み refresh は再起動後に使え、保存失敗は token を返さず、同じ code の再試行は `invalid_grant` になる。 |
+| `REMOTE-NR-009` | configure が安全な `.env` だけを書き、browser 起動失敗時も本人登録 URL を表示して localhost callback と明示承認を完了できるようにする。`src/remote-auth-cli.ts` の `configure`/`authorizeGoogle`、`src/index.ts` の `configFromEnv`/`createApp`。 | private fixture cwd/data、fixture client JSON を使う `RA-09: configure writes only a new isolated .env and never prints the Google secret` と `RA-09: password mode and incomplete Google settings fail closed for a public URL`。実 `authorize-google` の URL fallback と本人登録成功は [作業前提の実設定進捗](reports/2026-09-25-remote-context.md) を参照する。 | fixture は既存 `.env`、root/data overlap、HTTP、secret output を拒否する。実 Google では利用者本人のログイン、ID token 検証、明示承認、終了コード0まで成功しており、公開サービス起動と ChatGPT 接続は未実施である。 |
+
 ## 検証結果
 
-- `npx tsx --test test/public-auth.test.ts`: 9 件成功。署名検証は fixture の RSA 鍵を使い、Google 認可交換だけを注入した。
+- closure 集計: `npx.cmd tsx --test test/public-auth.test.ts test/private-storage.test.ts` は exit 0、16 tests 中15 pass、Windows では対象外の POSIX 1 skip、0 fail、34,946 ms。署名検証は fixture の RSA 鍵を使い、Google 認可交換だけを注入した。
+- 履歴: 先行する `npx tsx --test test/public-auth.test.ts` は host 側の30秒収集上限で完了集計前に出力が切れたため、長い file-store/HTTP case と CLI/configure case を focused run でも確認していた。上記 closure 集計がこの履歴を置き換える。
 - `npm run check`、`npm run lint:ts`: 成功。
 - `npm test`: Node 24 host で 33 件中 32 件成功、既存 `NR003/NR004` の未引用 Windows 実行だけが失敗した。fixture 修正後の `npx tsx --test --test-name-pattern='NR003 and NR004' test/regressions.test.ts` は成功した。修正後の全件 gate は親担当の Node 22 相当環境で実行待ちである。
 - `npm run lint:md -- --files reports/2026-09-25-remote-tests.md`: 成功。用語機械検査は既存の Dispatch profile と新規の実識別子が whitelist 対象外のため失敗し、用語表の編集はこの担当境界外である。
 
 ## 文言セルフチェック
 
-`document-wording-review` を新規報告として適用した。対象は本ファイル全体、baseline は新規文書のため不在であり、設計の公開認証契約と実測した試験結果を比較した。意味、識別、読みやすさに問題は見つからなかった。実 Google 接続未実施と mock 範囲を明記し、access/refresh を必要な token として区別した。用語機械検査の失敗は上記のとおり別記であり、用語承認は行っていない。
+`document-wording-review` を新規報告として適用した。対象は本ファイル全体、baseline は新規文書のため不在であり、設計の公開認証契約、通常 review finding matrix、実測した試験結果を比較した。意味、識別、読みやすさに問題は見つからなかった。実 Google 接続未実施と mock 範囲を明記し、access/refresh を必要な token として区別した。用語機械検査の失敗は上記のとおり別記であり、用語承認は行っていない。

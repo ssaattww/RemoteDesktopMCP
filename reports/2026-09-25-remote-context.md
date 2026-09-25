@@ -35,6 +35,19 @@
 文書の用語追加は exact 候補と意味を利用者へ提示し、「上記の追加を承認する」と回答を得た。
 Google Cloud、JSON、PowerShell、ログイン、プロジェクト、テストユーザー、ウェブアプリケーション、フォルダ、リポジトリ、クライアントシークレットと別名シークレット、チャット、スリープ、モード、ブラウザを承認された意味で登録した。
 
+## 実設定の進捗
+
+利用者は Google OAuth クライアントを作成し、設定 JSON のローカル保存先だけを共有した。
+親は秘密を出力せず形式を確認し、公開 callback と localhost の本人登録 callback の2件だけを GCP に設定したという利用者の回答を受けた。
+実 JSON から `.env` を作成し、Git の除外対象であることを確認した。
+`.env` と `C:\Users\donabe\RemoteDesktopMCP-data` の ACL を、現在の Windows ユーザー、SYSTEM、管理者だけに限定した。
+ファイル操作の許可先は `C:\Users\donabe\RemoteDesktopWorkspace`、root ID は `workspace`。
+最初の本人登録ではブラウザが開かなかったため停止し、REMOTE-NR-009 として修正対象にした。
+認証 URL を表示する修正後に本人登録を再開した。利用者自身の Google ログインと実 ID token の検証後、ローカル承認を行い、CLI が終了コード0で完了した。
+許可ユーザーは1人、更新トークンは未発行。state の広い共有主体への許可は0件と確認した。
+個人のメールアドレス、主体 ID、secret、認可コードはこの報告へ転記しない。
+実サービスの公開起動と ChatGPT からの接続はまだ行っていない。
+
 ## 根拠
 
 - [OpenAI の認証仕様](https://developers.openai.com/plugins/build/auth)
