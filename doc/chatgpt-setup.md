@@ -109,8 +109,8 @@ ID 未設定ならテンプレートを配布し、設定済みなら接続 ID �
 
 ## 参照資料
 
-- [現行版 README](../README.md)
-- [既存タスクと F01〜F03](../tasks/tasks-status.md)
+- [現行版 README](https://github.com/ssaattww/RemoteDesktopMCP/blob/8d72bb8dbc9464e03268bc5be39b72cb929f7e11/README.md)
+- [既存タスクと F01〜F03](https://github.com/ssaattww/RemoteDesktopMCP/blob/8d72bb8dbc9464e03268bc5be39b72cb929f7e11/tasks/tasks-status.md)
 - [OpenAI: Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt)
 - [OpenAI: Package your plugin](https://developers.openai.com/plugins/build/plugins)
 - [OpenAI: Plugins in ChatGPT and Codex](https://help.openai.com/en/articles/20001256-plugins-in-chatgpt-and-codex)

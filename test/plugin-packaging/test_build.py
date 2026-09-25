@@ -141,7 +141,7 @@ class BuildTests(unittest.TestCase):
         self.build(APP_ID)
         for relative in builder.SOURCE_FILES:
             path = self.root / relative
-            path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+            path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
         other = self.output.with_name("crlf")
         self.build(APP_ID, other)
         self.assertEqual({p.name: p.read_bytes() for p in self.output.iterdir()},
