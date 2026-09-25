@@ -258,3 +258,16 @@ verdict: **pass_with_held**。今回の非最終文書同期に必須 finding �
 | 実サービス・外部検証 | `held`。PID28532 は旧 `96b10cd` 版で稼働中。停止・修正版再起動をまとめた要求は自動承認レビューに実行前拒否され、理由詳細は未提示、操作は未実施。実 Google 本人登録は成功済みだが、修正版の実サービス反映、ChatGPT `session_open`/`node_list`/`file_read`、実 refresh、Linux CI/POSIX 専用試験、同一独立 reviewer の限定解消判定は未確認。 |
 
 closure-readiness: **incomplete**。IFR001 の code/test と IFR003 のリンクは閉じたが、IFR002/P3 と直接証拠 `REMOTE-DOC-002/P3` が残る。verdict: **fail**（この固定 HEAD の限定文書 closure）。コードの新しい必須 finding はない。unexplored は実 ChatGPT UI/Funnel の F03 経路、修正版サービスでの実 refresh、Linux CI。通常 review では `report_attestation_allowed=false`。文書2箇所の時制と matrix 入力数を修正した次 HEAD に限り、同じ reviewer が限定再確認できる。
+
+### RDMCP-REMOTE-IFR-002 と REMOTE-DOC-002 の限定解消確認
+
+- mode: normal fix verification。同一 reviewer `/root/remote_normal_review`、前回対象 `a27f36b33e85abd7688879c5e8588b39029102bc`、今回の immutable reviewed implementation HEAD `14ac3ece0b3fea95989b15e65d87a0a36288f2c2`。元の P3 severity と Sol / high 要求を維持。runtime profile は非公開で観測不能、application status `reused_existing_agent_profile`。差分は当 reviewer の前回報告収録と verification/implementation の文書2件だけで、source/test/config は不変。実装・commit・push はしていない。
+
+| 元指摘・required action | production path / composition | closure |
+| --- | --- | --- |
+| `RDMCP-REMOTE-IFR-002` / P3。独立初回直後の「再検証中」と focused 後の「全体検証予定」を現在の検証状態から区別する。 | `reports/2026-09-25-remote-verification.md:67` は「初回独立レビュー直後には…再検証中だった」と時点付き過去形にし、`:74` は focused 後に `c58352d` の全体検証を行い成功したと明示。`:78` の固定 HEAD 43件中42 pass/1 POSIX skip/0 fail、全コマンド exit 0、旧 `96b` 全体成功、実 ChatGPT 未確認との前後関係を照合。 | **closed**。前回指摘の現在形・未来形の矛盾は解消。 |
+| `REMOTE-DOC-002` / P3。IFR001 の composition cell を実 fixture 入力に一致させる。 | `reports/2026-09-25-remote-implementation.md:86` は固定 ChatGPT client の無効 code 要求11件後に有効 code と refresh が成功すると記す。`test/public-auth.test.ts:474-490` は forged authorization code を11件送り、11件目429、その後に有効 code 200、有効 signed refresh 200を assert。無効 refresh flood の主張を削除した。 | **closed**。試験入力と成果の記述が一致。 |
+
+coverage: 文書の時点・試験証拠の識別は `checked_no_finding`、新しい source/test/config は `not_applicable`。同じ reviewer の `document_wording_review`（normal fix scope、before=`a27f36b...`、target=`14ac3ec...`、reader=Windows runtime_local）は意味・証拠識別・承認済み用語・読みやすさを各 `checked_no_finding`、wording result=`pass` とした。変更文書の Markdown lint は53 file(s)、0 issue(s)、`git diff --check` 成功。前回の固定 `c58352d` Node22 全体 gate は source/test/config 不変の範囲で有効であり、この文書確認を新たな Linux CI や公開サービス実証と混同しない。
+
+held: 稼働中の実サービスは旧 `96b` 版、修正版への再起動は未実施。実 ChatGPT 操作、実 refresh、Linux CI/POSIX 専用試験、同一独立 reviewer の限定解消判定は未確認。実 `.env`・Google JSON・外部 `DATA_DIR` の内容は読んでいない。unexplored: F03 の実公開接続経路。verdict: **pass_with_held**。この2件の必須文書指摘は解消し、前回閉じた IFR001 の code/test と IFR003 のリンク判定を維持する。通常 reviewer は独立最終判定を代行せず、`report_attestation_allowed=false`。
