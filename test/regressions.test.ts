@@ -12,7 +12,9 @@ import { absent, captureProtectedConfigPin, fixture, mcp } from "./fixture.js";
 const sha256 = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const old = () => Date.now() - 31 * 60_000;
 const configFile = (data: string) => path.join(data, "desktop-commander-home", ".claude-server-commander", "config.json");
-const nodeScriptCommand = (file: string) => `${process.execPath} ${file}`;
+const nodeScriptCommand = (file: string) => process.platform === "win32"
+  ? `node "${file.replaceAll("\"", "\"\"")}"`
+  : `'${process.execPath.replaceAll("'", "'\\''")}' '${file.replaceAll("'", "'\\''")}'`;
 const hasAuditEvent = (text: string, event: string, processId: string) => text.split("\n").some((line) => {
   try { const entry = JSON.parse(line) as { event?: unknown; processId?: unknown }; return entry.event === event && entry.processId === processId; } catch { return false; }
 });

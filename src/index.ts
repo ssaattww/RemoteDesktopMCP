@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
+import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
@@ -33,7 +34,7 @@ const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; allowedRedirectOrigins: Set<string>; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
+export type RuntimeConfig = { baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -47,18 +48,27 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   const baseUrl = get(env, "BASE_URL").replace(/\/$/, "");
   const url = new URL(baseUrl);
   if (url.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(url.hostname)) throw new Error("BASE_URL must use HTTPS except for loopback local development.");
+  const authMode = env.REMOTE_AUTH_MODE ?? "password";
+  if (authMode !== "password" && authMode !== "google") throw new Error("REMOTE_AUTH_MODE must be password or google.");
+  if (authMode === "password" && !["localhost", "127.0.0.1"].includes(url.hostname)) throw new Error("Password authentication is limited to loopback local development.");
+  if (authMode === "google" && url.protocol !== "https:") throw new Error("Google authentication requires an HTTPS BASE_URL.");
   const tokenSecret = get(env, "TOKEN_SECRET");
   if (tokenSecret.length < 32) throw new Error("TOKEN_SECRET must contain at least 32 characters.");
-  const users = parse<User[]>(env, "AUTHORIZED_USERS_JSON");
+  const users = authMode === "password" ? parse<User[]>(env, "AUTHORIZED_USERS_JSON") : [];
   const roots = parse<Root[]>(env, "FILE_ROOTS_JSON").map((root) => ({ ...root, path: path.resolve(root.path) }));
-  if (users.length !== 1 || !users[0]?.email || !users[0]?.passwordHash) throw new Error("AUTHORIZED_USERS_JSON must contain exactly one complete local-development user.");
+  if (authMode === "password" && (users.length !== 1 || !users[0]?.email || !users[0]?.passwordHash)) throw new Error("AUTHORIZED_USERS_JSON must contain exactly one complete local-development user.");
   if (!roots.length || roots.some((root) => !root.id || !root.path) || new Set(roots.map((root) => root.id)).size !== roots.length) throw new Error("FILE_ROOTS_JSON must contain unique complete roots.");
   if (env.REMOTE_NODES_JSON || env.NODE_ROLE && env.NODE_ROLE !== "local") throw new Error("This MVP supports one local node only; remote roles are rejected.");
   const chunkBytes = Number(env.TRANSFER_CHUNK_BYTES ?? 128 * 1024);
   if (!Number.isInteger(chunkBytes) || chunkBytes < 1024 || chunkBytes > 512 * 1024) throw new Error("TRANSFER_CHUNK_BYTES must be between 1024 and 524288.");
   const bundled = fileURLToPath(new URL("../node_modules/@wonderwhy-er/desktop-commander/dist/index.js", import.meta.url));
   const allowedRedirectOrigins = new Set((env.ALLOWED_REDIRECT_ORIGINS ?? "https://chatgpt.com").split(",").map((value) => value.trim()).filter(Boolean));
-  return { baseUrl, tokenSecret, users, roots, dataDir: path.resolve(env.DATA_DIR ?? "data"), port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: env.DESKTOP_COMMANDER_COMMAND ?? process.execPath, dcArgs: env.DESKTOP_COMMANDER_COMMAND ? (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean) : [bundled, "--no-onboarding"], allowedRedirectOrigins };
+  const dataDir = path.resolve(env.DATA_DIR ?? "data");
+  const googleClientId = env.GOOGLE_CLIENT_ID;
+  const googleClientSecret = env.GOOGLE_CLIENT_SECRET;
+  const googleRedirectUri = env.GOOGLE_REDIRECT_URI ?? `${baseUrl}/google/callback`;
+  if (authMode === "google" && (!googleClientId || !googleClientSecret || googleRedirectUri !== `${baseUrl}/google/callback`)) throw new Error("Google mode requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI=${BASE_URL}/google/callback.");
+  return { baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: env.DESKTOP_COMMANDER_COMMAND ?? process.execPath, dcArgs: env.DESKTOP_COMMANDER_COMMAND ? (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean) : [bundled, "--no-onboarding"], allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
 }
 
 class Mutex {
@@ -84,7 +94,9 @@ class DesktopCommander {
     await writeFile(config, JSON.stringify({ allowedDirectories: this.allowedDirectories, telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }), { mode: 0o600 });
     await this.configPrepared();
     const drive = path.parse(home).root;
-    const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"), LOCALAPPDATA: path.join(home, "AppData", "Local"), HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) } as Record<string, string>;
+    const blocked = new Set(["TOKEN_SECRET", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "REMOTE_AUTH_MODE", "AUTHORIZED_USERS_JSON"]);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => !blocked.has(key) && value !== undefined)) as Record<string, string>;
+    Object.assign(env, { HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"), LOCALAPPDATA: path.join(home, "AppData", "Local"), HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) });
     this.transport = new StdioClientTransport({ command: this.cfg.dcCommand, args: this.cfg.dcArgs, env, stderr: "pipe", cwd: process.cwd() });
     this.client = new Client({ name: "remote-desktop-mcp", version: "0.1.0" });
     await this.client.connect(this.transport);
@@ -162,8 +174,9 @@ export class RemoteDesktopService {
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
   private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
   private readonly configIdentityLock = new Mutex();
+  readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
-  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; }
+  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
   async initialize(): Promise<void> {
     await mkdir(this.cfg.dataDir, { recursive: true, mode: 0o700 });
     const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
@@ -179,6 +192,7 @@ export class RemoteDesktopService {
     await this.rememberProtectedConfigIdentity(true);
     for (const entry of await readdir(transferDirectory, { withFileTypes: true })) if (entry.isFile() && entry.name.endsWith(".snapshot")) await rm(path.join(transferDirectory, entry.name), { force: true });
     await this.cleanupOwnedUploadArtifacts();
+    if (this.publicAuth) { await this.publicAuth.initialize(); if (!this.publicAuth.hasAllowedSubject()) throw new Error("Google mode requires a locally approved Google subject. Run remote-auth authorize-google."); }
     await this.dc.start();
     await this.rememberProtectedConfigIdentity();
     await this.pruneProtectedConfigIdentities();
@@ -472,7 +486,7 @@ export class RemoteDesktopService {
     server.registerTool("session_open", { description: "Open a local operation session.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); const now = Date.now(); const session: Session = { id: makeId(), user, created: now, touched: now, expires: now + SESSION_TTL, state: "active" }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id }); return { session_id: session.id, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state }; }));
     server.registerTool("session_list", { description: "List the caller's active sessions.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
     server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
-    server.registerTool("node_list", { description: "List the single supported local node.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
+    server.registerTool("node_list", { description: "List the single supported local node and permitted file-root identifiers.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, root_ids: this.cfg.roots.map((root) => root.id), connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
     server.registerTool("file_search", { description: "Search permitted file names through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
     server.registerTool("content_search", { description: "Search permitted file content through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "content"); await this.audit("file.content_search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
     const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500) };
@@ -524,12 +538,23 @@ export class RemoteDesktopService {
 }
 
 class RateLimit { private hits = new Map<string, number[]>(); allow(key: string): boolean { const now = Date.now(); const values = (this.hits.get(key) ?? []).filter((value) => now - value < 60_000); values.push(now); this.hits.set(key, values); return values.length <= 10; } }
+const readCookie = (header: string | undefined, name: string) => header?.split(";").map((value) => value.trim()).find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+const publicAuthorizeRequest = (service: RemoteDesktopService, req: Request) => {
+  const resource = typeof req.query.resource === "string" ? req.query.resource : "";
+  const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
+  const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
+  const challenge = typeof req.query.code_challenge === "string" ? req.query.code_challenge : "";
+  const state = typeof req.query.state === "string" ? req.query.state : undefined;
+  if (clientId !== CHATGPT_CLIENT_ID || redirectUri !== CHATGPT_REDIRECT_URI || resource !== `${service.cfg.baseUrl}/mcp` || req.query.response_type !== "code" || req.query.code_challenge_method !== "S256" || req.query.scope !== "mcp" || (state?.length ?? 0) > 2048 || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return undefined;
+  return { clientId, redirectUri, resource, state, challenge };
+};
 export function createApp(service: RemoteDesktopService): Express {
-  const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use(express.urlencoded({ extended: false })); app.use(express.json({ limit: "1mb" }));
-  app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: "local-development" }));
+  const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => { if (["/authorize", "/authorize/confirm", "/authorize/consent", "/token", "/google/callback"].includes(req.path) && Number(req.header("content-length") ?? 0) > 16 * 1024) return res.status(413).type("text").send("Request is too large."); next(); }); app.use(express.urlencoded({ extended: false })); app.use(express.json({ limit: "1mb" }));
+  app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: service.publicAuth ? "google" : "local-development" }));
   app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json({ resource: `${service.cfg.baseUrl}/mcp`, authorization_servers: [service.cfg.baseUrl], scopes_supported: ["mcp"] }));
-  app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, registration_endpoint: `${service.cfg.baseUrl}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp"] }));
+  app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_response_iss_parameter_supported: Boolean(service.publicAuth), authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, ...(service.publicAuth ? { client_id_metadata_document_supported: true } : { registration_endpoint: `${service.cfg.baseUrl}/register` }), response_types_supported: ["code"], grant_types_supported: service.publicAuth ? ["authorization_code", "refresh_token"] : ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp"] }));
   app.post("/register", async (req, res) => {
+    if (service.publicAuth) return res.status(404).json({ error: "not_found" });
     if (!rate.allow("register")) return res.status(429).json({ error: "rate_limited" });
     const redirect_uris = Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris.filter((item: unknown): item is string => typeof item === "string") : [];
     if (!redirect_uris.length || !redirect_uris.every((uri: string) => service.validRedirect(uri))) return res.status(400).json({ error: "invalid_redirect_uri" });
@@ -538,6 +563,14 @@ export function createApp(service: RemoteDesktopService): Express {
   });
   app.get("/authorize", async (req, res) => {
     if (!rate.allow("authorize")) return res.status(429).send("Too many requests.");
+    if (service.publicAuth) {
+      const request = publicAuthorizeRequest(service, req);
+      if (!request) { await service.audit("oauth.rejected", { reason: "authorize" }); return res.status(400).type("html").send("Invalid OAuth authorization request."); }
+      const flow = await service.publicAuth.begin(request);
+      res.setHeader("Set-Cookie", `${AUTH_COOKIE}=${flow.cookie}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=300`);
+      res.setHeader("Cache-Control", "no-store");
+      return res.redirect(303, flow.redirect);
+    }
     const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
     const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
     const challenge = typeof req.query.code_challenge === "string" ? req.query.code_challenge : "";
@@ -551,6 +584,7 @@ export function createApp(service: RemoteDesktopService): Express {
     return res.type("html").send(`<!doctype html><meta charset="utf-8"><title>Remote Desktop MCP</title><form method="post" action="/authorize/confirm"><input type="hidden" name="transaction_id" value="${transaction}"><label>Email <input name="email" type="email" required></label><label>Password <input name="password" type="password" required></label><button type="submit">Authorize</button></form>`);
   });
   app.post("/authorize/confirm", async (req, res) => {
+    if (service.publicAuth) return res.status(404).json({ error: "not_found" });
     if (!rate.allow("confirm")) return res.status(429).send("Too many requests.");
     const transaction = typeof req.body?.transaction_id === "string" ? req.body.transaction_id : "";
     const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
@@ -564,6 +598,12 @@ export function createApp(service: RemoteDesktopService): Express {
   });
   app.post("/token", async (req, res) => {
     if (!rate.allow("token")) { await service.audit("oauth.rate_limited", {}); return res.status(429).json({ error: "rate_limited" }); }
+    if (service.publicAuth) {
+      const issued = await service.publicAuth.token({ grantType: typeof req.body?.grant_type === "string" ? req.body.grant_type : "", code: typeof req.body?.code === "string" ? req.body.code : undefined, verifier: typeof req.body?.code_verifier === "string" ? req.body.code_verifier : undefined, clientId: typeof req.body?.client_id === "string" ? req.body.client_id : "", redirectUri: typeof req.body?.redirect_uri === "string" ? req.body.redirect_uri : undefined, resource: typeof req.body?.resource === "string" ? req.body.resource : undefined, refreshToken: typeof req.body?.refresh_token === "string" ? req.body.refresh_token : undefined });
+      res.setHeader("Cache-Control", "no-store");
+      if ("error" in issued) { await service.audit("oauth.rejected", { reason: "token" }); return res.status(400).json(issued); }
+      await service.audit("oauth.token_issued", { clientId: CHATGPT_CLIENT_ID }); return res.json(issued);
+    }
     const code = typeof req.body?.code === "string" ? req.body.code : "";
     const verifier = typeof req.body?.code_verifier === "string" ? req.body.code_verifier : "";
     const clientId = typeof req.body?.client_id === "string" ? req.body.client_id : "";
@@ -574,7 +614,23 @@ export function createApp(service: RemoteDesktopService): Express {
     const accessToken = service.sign({ type: "access", iss: service.cfg.baseUrl, sub: authorization.email, aud: `${service.cfg.baseUrl}/mcp`, scope: "mcp", exp: Math.floor(Date.now() / 1000) + 3600 });
     await service.audit("oauth.token_issued", { user: authorization.email, clientId }); return res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 3600, scope: "mcp" });
   });
-  app.all("/mcp", async (req: Request, res: Response) => { if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }); const user = service.authenticate(req.header("authorization")); if (!user) { await service.audit("mcp.rejected", { reason: "authentication" }); res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${service.cfg.baseUrl}/.well-known/oauth-protected-resource"`); return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null }); } const server = service.server(user); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); let cleaned = false; const cleanup = () => { if (!cleaned) { cleaned = true; void transport.close(); void server.close(); } }; res.once("finish", cleanup); req.once("aborted", cleanup); try { await server.connect(transport); await transport.handleRequest(req, res, req.body); } catch { await service.audit("mcp.failed", { user }); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null }); } });
+  app.get("/google/callback", async (req, res) => {
+    if (!service.publicAuth) return res.status(404).send("Not found.");
+    const outcome = await service.publicAuth.googleCallback({ state: typeof req.query.state === "string" ? req.query.state : "", code: typeof req.query.code === "string" ? req.query.code : undefined, error: typeof req.query.error === "string" ? req.query.error : undefined, cookie: readCookie(req.header("cookie"), AUTH_COOKIE) });
+    res.setHeader("Cache-Control", "no-store");
+    if (outcome.redirect) return res.redirect(303, outcome.redirect);
+    if (outcome.transaction) return res.type("html").send(`<!doctype html><meta charset="utf-8"><title>Remote Desktop MCP</title><p>Allow ChatGPT to read and change files only within the configured file roots, and to start arbitrary commands as this Windows user's OS account?</p><form method="post" action="/authorize/consent"><input type="hidden" name="transaction" value="${outcome.transaction}"><button name="allow" value="yes" type="submit">Allow</button><button name="allow" value="no" type="submit">Deny</button></form>`);
+    return res.status(400).type("html").send("Sign-in could not be completed.");
+  });
+  app.post("/authorize/consent", async (req, res) => {
+    if (!service.publicAuth || !rate.allow("consent")) return res.status(400).send("Invalid authorization request.");
+    const outcome = service.publicAuth.consent({ transaction: typeof req.body?.transaction === "string" ? req.body.transaction : "", allow: req.body?.allow === "yes", cookie: readCookie(req.header("cookie"), AUTH_COOKIE) });
+    res.setHeader("Cache-Control", "no-store"); res.setHeader("Set-Cookie", `${AUTH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+    if (outcome.redirect) return res.redirect(303, outcome.redirect);
+    return res.status(400).type("html").send("Authorization could not be completed.");
+  });
+  app.all("/mcp", async (req: Request, res: Response) => { if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }); const user = service.publicAuth ? await service.publicAuth.authenticate(req.header("authorization")) : service.authenticate(req.header("authorization")); if (!user) { await service.audit("mcp.rejected", { reason: "authentication" }); res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${service.cfg.baseUrl}/.well-known/oauth-protected-resource"`); return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null }); } const server = service.server(user); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); let cleaned = false; const cleanup = () => { if (!cleaned) { cleaned = true; void transport.close(); void server.close(); } }; res.once("finish", cleanup); req.once("aborted", cleanup); try { await server.connect(transport); await transport.handleRequest(req, res, req.body); } catch { await service.audit("mcp.failed", { user }); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null }); } });
+  app.use((_error: unknown, _req: Request, res: Response, next: unknown) => { void next; void service.audit("http.failed", { route: "authentication" }); if (!res.headersSent) res.status(500).type("text").send("Request could not be completed."); });
   return app;
 }
-if (process.argv[1] === fileURLToPath(import.meta.url)) { const service = new RemoteDesktopService(configFromEnv()); await service.initialize(); createApp(service).listen(service.cfg.port, "127.0.0.1", () => console.log(`Remote Desktop MCP listening on http://127.0.0.1:${service.cfg.port}/mcp (local development)`)); }
+if (process.argv[1] === fileURLToPath(import.meta.url)) { const service = new RemoteDesktopService(configFromEnv()); await service.initialize(); createApp(service).listen(service.cfg.port, "127.0.0.1", () => console.log(`Remote Desktop MCP listening on ${service.publicAuth ? service.cfg.baseUrl : `http://127.0.0.1:${service.cfg.port}`}/mcp (${service.publicAuth ? "google" : "local-development"})`)); }
