@@ -213,7 +213,7 @@ Funnel URL はインターネット上から誰でも接続を試みられるた
 - エラーレスポンスに秘密情報、ローカルパス、トークン、スタックトレースを含めない。
 - `Host`、`X-Forwarded-*`、接続元 IP は認証判断に使わない。
 - 管理設定を変更する HTTP エンドポイントを公開しない。
-- `DATA_DIR`、認証設定、監査ログは、RemoteDesktopMCP と `@wonderwhy-er/desktop-commander` のどちらの許可ディレクトリにも含めない。
+- `DATA_DIR` と追跡済みの Desktop Commander 設定実体は RemoteDesktopMCP のファイル API から除外する。ファイル API 自体に許可ディレクトリ一覧は設けない。
 - Funnel で RemoteDesktopMCP 以外のローカルサービスを同時公開しない。
 
 Tailscale アカウントや対象ノードの管理権限を持つユーザーは公開設定を変更できる。このため、これらの権限は管理者だけに限定する。Funnel を有効化するノードも必要な対象ノードだけに絞る。

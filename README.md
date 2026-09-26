@@ -19,9 +19,10 @@ npm.cmd ci
 npm.cmd run user:hash -- '12文字以上の固有パスワード'
 ```
 
-生成したハッシュ、ローカルの `FILE_ROOTS_JSON`、十分に長い
-`TOKEN_SECRET` を `.env` に設定します。`DATA_DIR` はファイル root の外に
-置いてください。
+生成したハッシュと十分に長い `TOKEN_SECRET` を `.env` に設定します。
+ファイル操作・転送は、このサービスを起動した OS ユーザーがアクセスできる
+絶対パスを指定します。`DATA_DIR` と、サービスが保護対象として追跡する
+Desktop Commander 設定実体は、MCP のファイル操作 API から除外されます。
 
 ## 起動と確認
 
@@ -35,6 +36,8 @@ npm.cmd run lint
 
 通常のファイル操作とプロセス操作は、固定版
 `@wonderwhy-er/desktop-commander@0.2.51` の stdio MCP 接続へ委譲します。
+Desktop Commander の `allowedDirectories` は空配列に固定し、同版の仕様どおり
+OS ユーザーがアクセスできるファイルシステム全体を対象にします。
 子プロセス用の設定は `DATA_DIR` 内に隔離し、既存ユーザーの Desktop
 Commander 設定を変更しません。`process_start` はこのサーバーと同じ OS
 ユーザーの任意コマンドを起動できるため、その OS アカウントの信頼境界内で

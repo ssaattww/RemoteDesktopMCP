@@ -14,7 +14,7 @@ Google の設定と本人ログインを終えるまで、ChatGPT からの操�
    - `https://fa780.tail8bf1af.ts.net/google/callback`
    - `http://localhost:8765/callback`
 
-5. 作成したクライアントの設定を JSON として保存します。ファイル操作を許可するフォルダと、このリポジトリの外へ保管してください。
+5. 作成したクライアントの設定を JSON として保存します。設定作成後も保持する場合は、Google クライアントシークレットを含むファイルであることを前提に保管してください。
 
 1件目は ChatGPT から接続するときの本人確認、2件目はこの PC 上で自分のアカウントを登録するときに使います。
 Google のクライアントシークレットを ChatGPT の接続設定やチャットへ貼る必要はありません。
@@ -30,17 +30,21 @@ npm.cmd ci
 npm.cmd run build
 ```
 
-設定用コマンドに Google の JSON ファイル、公開 URL、許可フォルダを渡します。
+設定用コマンドに Google の JSON ファイルと公開 URL を渡します。
 次の JSON のパスは、実際に保存したファイルへ置き換えてください。
 
 ```powershell
-npm.cmd run remote-auth -- configure 'C:\Users\donabe\Downloads\google-client.json' --base-url 'https://fa780.tail8bf1af.ts.net' --root 'C:\Users\donabe\RemoteDesktopWorkspace'
+npm.cmd run remote-auth -- configure 'C:\Users\donabe\Downloads\google-client.json' --base-url 'https://fa780.tail8bf1af.ts.net'
 ```
 
-ファイル操作の許可範囲には専用フォルダ `C:\Users\donabe\RemoteDesktopWorkspace` を使うことを推奨します。
-設定や監査を置く `DATA_DIR`、`.env`、Google の設定ファイルを許可範囲へ含めないでください。
-プロセス操作は、このサービスを実行する Windows ユーザーの権限で任意コマンドを実行できます。
-ファイル用の許可フォルダは、プロセス操作に対する隔離機能ではありません。
+ファイル操作とファイル転送では、このサービスを実行する Windows ユーザーが
+アクセスできる絶対パスを指定できます。事前の許可フォルダ設定はありません。
+`DATA_DIR` と、サービスが保護対象として追跡する Desktop Commander 設定実体は
+MCP のファイル操作 API から除外されます。
+
+プロセス操作も、このサービスを実行する Windows ユーザーの権限で任意コマンドを
+実行できます。そのため、ファイル API で除外されるサービス管理ファイルも、
+OS ユーザー自身がアクセスできる限り `process_start` 経由では到達可能です。
 
 次に、この PC で本人登録用コマンドを実行します。
 サービスが既に起動している場合は、先に停止してください。
@@ -98,11 +102,11 @@ ChatGPT の接続画面や開発者モードの利用可否はアカウント設
 
 > 操作セッションを開始して、接続している PC の一覧を表示してください。
 
-次に許可フォルダへ自分で置いたテスト用テキストファイルの読み取りを依頼します。
+次に、この Windows ユーザーがアクセスできる通常のテスト用テキストファイルを
+絶対パスで指定して読み取りを依頼します。
 `session_open`、`node_list`、`file_read` の実行結果を確認して、初めて接続成功とします。
 サービスを再起動した後も、接続を作り直さずに認証を更新して操作できるか確認してください。
-`node_list` の `root_ids` で、ファイル操作に使う `root_id` を確認できます。
-上の設定コマンドで作成する許可フォルダの ID は `workspace` です。
+`node_list` は接続中のノードを返し、ファイル操作用の `root_id` は返しません。
 
 ## 接続できない場合
 
