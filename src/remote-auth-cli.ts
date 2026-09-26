@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
@@ -21,7 +22,7 @@ async function configure(source: string) {
   if (typeof client !== "object" || client === null || typeof (client as { client_id?: unknown }).client_id !== "string" || typeof (client as { client_secret?: unknown }).client_secret !== "string") throw new Error("The Google Web OAuth client JSON is invalid.");
   const baseUrl = (argument("--base-url") ?? process.env.BASE_URL ?? await ask("Public BASE_URL (https://…): ")).replace(/\/$/, "");
   const parsed = new URL(baseUrl); if (parsed.protocol !== "https:") throw new Error("The public BASE_URL must use HTTPS.");
-  const dataDir = path.resolve(argument("--data-dir") ?? path.join(current, "data"));
+  const dataDir = path.resolve(argument("--data-dir") ?? path.join(os.homedir(), "RemoteDesktopMCP-data"));
   await ensurePrivateDirectory(dataDir);
   const envPath = path.join(current, ".env");
   const lines = [

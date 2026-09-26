@@ -273,9 +273,10 @@ RemoteDesktopMCP を起動した OS ユーザーと同等の権限を行使で�
 その OS ユーザーが読み書きできるファイル、設定、環境変数などは、
 任意コマンドからも到達できる可能性がある。
 
-`file_search`、`content_search`、`file_read`、`file_patch` の
-許可ディレクトリはファイル操作ツールの範囲を制限するためのものであり、
-`process_start` から起動する任意コマンドの実行範囲を制限する仕組みではない。
+ファイル操作ツールも `process_start` も、基本となる権限は実行ノードで
+RemoteDesktopMCP を起動した OS ユーザーのアクセス権である。
+ファイル API が `DATA_DIR` と追跡済み設定実体を除外しても、
+`process_start` から起動する任意コマンドの実行範囲を制限する仕組みにはならない。
 
 この権限を許可ユーザーへ与えられないPCでは、
 運用者が RemoteDesktopMCP 自体を必要な範囲まで権限を下げた OS ユーザーで起動する。
@@ -295,10 +296,10 @@ RemoteDesktopMCP を起動した OS ユーザーと同等の権限を行使で�
 
 | RemoteDesktopMCP 公開操作 | 呼び出す Desktop Commander ツール | RemoteDesktopMCP 側の処理 |
 | --- | --- | --- |
-| `file_search` | `start_search` (`searchType="files"`), `get_more_search_results`, `stop_search` | `node_id`、`session_id`、許可ディレクトリを確認し、検索結果を RemoteDesktopMCP の返却形式へ変換する |
-| `content_search` | `start_search` (`searchType="content"`), `get_more_search_results`, `stop_search` | 検索範囲と結果数を制限し、Desktop Commander の検索IDを外部APIの仕様にしない |
-| `file_read` | `read_file` | 許可ディレクトリを確認し、引数と結果を RemoteDesktopMCP の形式へ変換する |
-| `file_patch` | `edit_block` | 書き込み可否を確認し、部分変更だけを許可する |
+| `file_search` | `start_search` (`searchType="files"`), `get_more_search_results`, `stop_search` | `node_id`、`session_id`、絶対検索パスと保護対象除外を確認し、検索結果を RemoteDesktopMCP の返却形式へ変換する |
+| `content_search` | `start_search` (`searchType="content"`), `get_more_search_results`, `stop_search` | 絶対検索パス、保護対象除外、結果数を確認し、Desktop Commander の検索IDを外部APIの仕様にしない |
+| `file_read` | `read_file` | 絶対パスと保護対象除外を確認し、引数と結果を RemoteDesktopMCP の形式へ変換する |
+| `file_patch` | `edit_block` | 絶対パスと保護対象除外を確認し、部分変更だけを許可する |
 | `process_start` | `start_process` | RemoteDesktopMCP の論理プロセスIDと Desktop Commander の PID を対応付ける |
 | `process_status` | `list_sessions`, `read_process_output` | Desktop Commander の状態を RemoteDesktopMCP の状態へ変換する |
 | `process_output` | `read_process_output` | 統合出力、実行状態、取得できる場合は終了コードを RemoteDesktopMCP の形式へ変換する。stdout / stderr の区分は推測しない |
@@ -324,17 +325,18 @@ RemoteDesktopMCP を起動した OS ユーザーと同等の権限を行使で�
 Desktop Commander は、ユーザー認証・認可、`session_id`、`node_id`、監査、各PCの操作制限をすべて確認した後にだけ `callTool()` で呼び出す。
 Desktop Commander のツールをそのまま外部公開せず、上表で定義した RemoteDesktopMCP の操作だけを MCP ツールとして公開する。
 
-Desktop Commander の `allowedDirectories` などローカル設定は対象 PC の管理者がローカルで管理する。
-RemoteDesktopMCP 側の許可ディレクトリと書き込み制限は、Desktop Commander と同じか、より厳しい範囲に設定できる。
-どちらかの制限に違反するリクエストは拒否する。また、RemoteDesktopMCP から `set_config_value` など Desktop Commander の設定変更ツールは公開しない。
+Desktop Commander の `allowedDirectories` は空配列に固定し、固定版
+`@wonderwhy-er/desktop-commander@0.2.51` では全パスへのアクセスを許可として扱う。
+RemoteDesktopMCP 側にもファイル操作用の許可ディレクトリ一覧を設けない。
+RemoteDesktopMCP から `set_config_value` など Desktop Commander の設定変更ツールは公開しない。
 
-Desktop Commander のサーバー設定ファイルは、Desktop Commander と RemoteDesktopMCP の検索許可ディレクトリから分離した場所に置く。
-各実行ノードは設定ファイルの実体パスをローカル設定で保持する。
-起動時と検索設定の変更時には、設定ファイルの親ディレクトリと両者の検索許可ディレクトリを実体パスで比較し、いずれかが他方の親または同一なら構成を拒否する。
-検索要求で指定できる範囲は、検証済みの検索許可ディレクトリ内に限定する。
-これにより Desktop Commander に設定ファイルを含む範囲を渡さず、検索後に結果だけを隠す実装にはしない。
-`file_search`、`content_search`、`file_read`、`file_patch`、`file_transfer_*` は、実体パスが設定ファイルと一致する直接指定も拒否する。
-検索範囲に設定ファイルへ到達する別名が見つかった場合は、その範囲を検索に渡さず拒否する。
+各実行ノードのファイル操作と転送は絶対パスを受け取り、実行ノードの
+OS ユーザーがアクセスできる通常ファイルを対象にする。
+ただし `DATA_DIR` と、ハードリンクで追跡済みの Desktop Commander
+設定実体はファイル API の対象外とする。
+`file_search` と `content_search` は検索対象の配下に保護対象が含まれる場合、
+Desktop Commander に検索を委譲する前に拒否する。
+`file_read`、`file_patch`、`file_transfer_*` も保護対象への直接指定を拒否する。
 この保護対象パスは外部APIや監査ログへ出力しない。
 
 RemoteDesktopMCP が担当する機能は、Desktop Commander が提供しない次のものに限定する。
@@ -463,14 +465,12 @@ RemoteDesktopMCP 再起動前の `transfer_id` は再利用しない。
 
 ### パス制限
 
-ファイル転送には、その実行ノードのファイル操作と同じ許可ディレクトリを適用する。
-パスを正規化し、シンボリックリンク等を解決した実体パスで許可範囲を確認する。
+ファイル転送の転送元・転送先は、その実行ノード上の絶対パスで指定する。
+事前登録した許可ディレクトリは使用せず、OS ユーザーがアクセスできる通常ファイルを扱う。
 
-Desktop Commander のサーバー設定ファイルは、
+`DATA_DIR` と、追跡済みの Desktop Commander 設定実体は、
 通常の `file_*` とファイル転送の両方から明示的に除外する。
-設定ファイルの実体パスは各実行ノードのローカル設定で保持し、
-検索許可ディレクトリと設定ファイルの親ディレクトリが親子関係にある構成を拒否する。
-直接指定された実体パスも設定ファイルと一致する場合は拒否する。
+直接指定された実体パスが保護対象と一致する場合は拒否する。
 
 この除外は RemoteDesktopMCP のファイル操作と転送APIに適用する。
 同じ OS ユーザー権限で動く `process_start` の任意コマンドからのアクセスまで
@@ -660,14 +660,14 @@ RemoteDesktopMCP のセッションが終了または期限切れになっても
 
 ## ファイル操作の制約
 
-許可ディレクトリ、書き込み可否、検索対象などのファイル操作制限は、各実行ノードのローカル設定で管理する。
-
-統括ノードからのリクエストであっても、実行ノード側のローカル設定で許可していない操作は実行しない。
+ファイル操作は各実行ノード上の絶対パスを指定し、事前登録した許可ディレクトリは使わない。
+アクセス可否は、その実行ノードで RemoteDesktopMCP を起動した OS ユーザーの権限に従う。
+`DATA_DIR` と追跡済み設定実体はファイル API から除外し、OS が拒否したアクセスは失敗として返す。
 
 同じパスが複数PCに存在しても、同じファイルとは扱わない。
-ファイルは `node_id` とローカルパスの組で識別する。
+ファイルは `node_id` と絶対ローカルパスの組で識別する。
 
-ファイル転送も同じパス制限を使用する。
+ファイル転送も同じ絶対パスと保護対象除外を使用する。
 Desktop Commander のサーバー設定ファイルは、通常のファイル操作とファイル転送の対象外とする。
 
 ## ログ
@@ -730,7 +730,7 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 8. 同じ操作を統括ノードと実行ノードの監査ログで追跡できる。
 9. 実行ノードの起動時に `listTools()` で必要な Desktop Commander ツールを確認し、必要なツールがない操作は利用できないと通知する。
 10. `file_*` と `process_*` の実行が Desktop Commander の `callTool()` を経由し、RemoteDesktopMCP 内の同等処理へ自動的に切り替わらない。
-11. RemoteDesktopMCP が拒否するパスや操作は Desktop Commander が許可していても実行されず、Desktop Commander のローカル設定が拒否する操作も実行されない。
+11. `DATA_DIR` や追跡済み設定実体など RemoteDesktopMCP が保護するパスは Desktop Commander がアクセス可能でも実行されず、OS が拒否するパスも操作失敗になる。
 12. Desktop Commander の設定変更ツールや初期版で許可していないツールが外部 MCP へ公開されない。
 13. 現在の `src/index.ts` にある直接探索と直接 `spawn` を Desktop Commander の MCP ツール呼び出しへ置き換え、既存の単発ダウンロードを `file_transfer_*` へ置き換えることを確認する。通常の検索、編集、プロセス操作を RemoteDesktopMCP 側へ重複実装しない。
 
@@ -738,9 +738,10 @@ RemoteDesktopMCP は再接続または Desktop Commander の再起動を試み�
 
 初期版の基本構成として、RemoteDesktopMCP と Desktop Commander を同じ OS ユーザーで起動し、`process_start` が利用できることを確認する。
 
-テスト用に、ファイル操作ツールの許可ディレクトリ外に、同じ OS ユーザーから読み取れる検証用ファイルを置く。
-`file_read` ではそのファイルを拒否し、`process_start` から起動したコマンドでは同じファイルへアクセスできることを確認する。
-これにより、ファイル操作ツールの許可ディレクトリが任意コマンドの実行範囲を制限するものではないことを確認する。
+テスト用に、従来の許可フォルダ相当の作業ディレクトリ外へ、同じ OS ユーザーから
+読み取れる通常ファイルを置く。`file_read` でその絶対パスを読み取れることを確認する。
+別途 `DATA_DIR` のファイルはファイル API で拒否される一方、
+`process_start` は同じ OS ユーザー権限で動くことを確認する。
 
 別 OS ユーザーや OS のアクセス権による追加隔離を導入した環境では、その隔離に固有の試験を別途行ってよい。
 ただし、その追加隔離は初期版の合格条件には含めない。
