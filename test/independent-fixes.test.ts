@@ -334,3 +334,45 @@ test("RDMCP-MVP-IFR-005: process start audit binds redacted command, PID, sessio
     assert.equal(audit.includes(configuredSecret), false, "configured token secret must not enter process audit"); assert.equal(audit.includes(configuredHash), false, "configured password hash must not enter process audit");
   } finally { await api.close(); await service.close(); await f.cleanup(); }
 });
+
+test("operation rejection audit records the tool and sanitized error diagnostics", async () => {
+  const f = await fixture();
+  await f.service.close();
+
+  const secret = "s".repeat(40);
+  const privatePath = process.platform === "win32" ? "C:\\Users\\secret\\private.txt" : "/home/secret/private.txt";
+  const failure = Object.assign(new Error(`adapter failed at ${privatePath} token=${secret}`), { code: "EADAPTER" });
+  const adapter: ProcessAdapter = {
+    start: async () => { throw failure; },
+    read: async () => "Reading 0 new lines (total: 0 lines)",
+    terminate: async () => "Successfully initiated termination of session",
+    sessions: async () => "",
+  };
+
+  const service = new RemoteDesktopService({ ...f.service.cfg, processAdapter: adapter });
+  await service.initialize();
+  const api = await mcp(service);
+  try {
+    const session = (await api.call("session_open", {})).session_id as string;
+    await assert.rejects(
+      api.call("process_start", { session_id: session, command: "failing-command", timeout_ms: 100 }),
+      /Operation failed/,
+    );
+
+    const events = await auditEvents(f.data);
+    const rejected = events.findLast((entry) => entry.event === "operation.rejected");
+    assert.ok(rejected, "operation.rejected must be audited");
+    assert.equal(rejected.tool, "process_start");
+    assert.equal(rejected.reason, "error");
+    assert.equal(rejected.errorName, "Error");
+    assert.equal(rejected.errorCode, "EADAPTER");
+    assert.equal(typeof rejected.detail, "string");
+    assert.match(rejected.detail as string, /adapter failed at \[path\] token=\[redacted\]/);
+    assert.doesNotMatch(rejected.detail as string, /private\.txt/);
+    assert.doesNotMatch(rejected.detail as string, new RegExp(secret));
+  } finally {
+    await api.close();
+    await service.close();
+    await f.cleanup();
+  }
+});
