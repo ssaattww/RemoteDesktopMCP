@@ -106,21 +106,33 @@ No run for another SHA is used as evidence.
 - Impact: no product-runtime effect, but the committed diff fails Git's standard whitespace check.
 - Required action: remove the extra blank line at EOF.
 
+### RDMCP-I3-NR-004 / Medium - DATA_DIR exclusion can be bypassed through an external hardlink alias
+
+- Origin: `pre_existing`; PR #5 retains and documents the `DATA_DIR` file-API exclusion.
+- Location: `src/index.ts:388-403` (`safePath()`) and `src/index.ts:494` (`file_read`).
+- Contract: files below `DATA_DIR` remain excluded from the file APIs even after the allowlist is removed.
+- Cause: `safePath()` protects `DATA_DIR` by comparing the resolved pathname with the real `DATA_DIR` pathname. A hardlink created outside `DATA_DIR` has a different pathname, and unlike tracked Desktop Commander configuration identities, arbitrary `DATA_DIR` files have no file-identity check.
+- Composition reproduction on the exact reviewed implementation HEAD `a803cf0bfbf6d4a8abd2fc10530ea03504b95f53`: create a hardlink outside `DATA_DIR` to `DATA_DIR/audit.jsonl`, open a real MCP session, and call `file_read` on the external hardlink.
+- Result: `AUDIT_HARDLINK=ALLOWED`; the file API returned live audit records from `DATA_DIR/audit.jsonl`.
+- Evidence: `hardlink-audit-a803.mjs`, `hardlink-audit-a803.stdout.log`, `hardlink-audit-a803.stderr.log`, and `hardlink-audit-a803.result.txt` in the external evidence directory. The result file records `exit_code=0`.
+- Impact: the documented `DATA_DIR` exclusion is pathname-based rather than object-identity-based. Service audit data, and any other service-state file that can be hardlinked to an external path, can be read through the file API. This does not add OS-user privilege beyond the accepted `process_start` model, but it violates the explicit file-API protection contract.
+- Required action: make the `DATA_DIR` exclusion resistant to hardlink aliases (or use an equivalent object-identity protection mechanism) and add a composed regression fixture that proves an external hardlink to a service-state file is rejected.
+
 ## Required coverage
 
 | Criterion | Disposition | Evidence |
 | --- | --- | --- |
-| Requirement and design conformance | `checked_finding` | NR-001 violates retained protected-config exclusion; NR-002 conflicts with unrestricted absolute-path search for ordinary accessible content. |
-| Correctness and edge cases | `checked_finding` | Both alias cases were reproduced against the actual MCP composition. |
+| Requirement and design conformance | `checked_finding` | NR-001 violates retained protected-config exclusion; NR-002 conflicts with unrestricted absolute-path search for ordinary accessible content; NR-004 violates the retained `DATA_DIR` exclusion. |
+| Correctness and edge cases | `checked_finding` | The protected-config alias, benign search-link, and `DATA_DIR` hardlink cases were reproduced against the actual MCP composition. |
 | Scope discipline and unrelated changes | `checked_no_finding` | Changed paths are limited to Issue #3 implementation, tests, configuration example, documents, and implementation report. |
 | Changed files and direct dependencies | `checked_finding` | All 14 changed paths plus Desktop Commander 0.2.51 filesystem semantics were inspected. |
 | API, data, configuration, workflow, compatibility | `checked_finding` | Absolute-path API migration is consistent, but alias handling has the findings above. Diagnostic workflow requirements are already satisfied. |
 | Error handling and failure diagnostics | `checked_no_finding` | OS/path failures remain fail-closed; review-execution failures were retained separately from product-test evidence. |
-| Security and secret handling | `checked_finding` | NR-001 bypasses the documented file-API protection for tracked Desktop Commander config identities. |
-| Tests and validation adequacy | `checked_finding` | Existing tests pass but omit the two composition cases that reproduce NR-001 and NR-002. |
+| Security and secret handling | `checked_finding` | NR-001 bypasses tracked-config protection and NR-004 bypasses the documented `DATA_DIR` file-API exclusion. |
+| Tests and validation adequacy | `checked_finding` | Existing tests pass but omit the composition cases that reproduce NR-001, NR-002, and NR-004. |
 | Current-HEAD CI evidence | `checked_no_finding` | Run `36211648548` matches the reviewed HEAD and both OS jobs succeed. |
 | Report, tracking, documentation accuracy | `checked_no_finding` | Documents accurately state the intended unrestricted path model and retained protection; defects are in implementation coverage. |
-| Regression and maintainability risk | `checked_finding` | Alias handling has two uncovered behavior classes; the changed test file also has an EOF whitespace defect. |
+| Regression and maintainability risk | `checked_finding` | Alias handling has three uncovered behavior classes; the changed test file also has an EOF whitespace defect. |
 
 Held items: none.
 
@@ -130,7 +142,7 @@ Unexplored areas: none material to this verdict. `process_start` was not treated
 
 **fail** on reviewed implementation HEAD `a803cf0bfbf6d4a8abd2fc10530ea03504b95f53`.
 
-The main allowlist-removal path, absolute-path read/patch/transfer API migration, Desktop Commander unrestricted configuration, existing full suite, and exact-head Ubuntu/Windows CI pass. The retained protected-config boundary is nevertheless bypassable through a symlink-to-hardlink alias, and search rejects ordinary symlink-containing trees under the new unrestricted absolute-path contract. The EOF blank line is an additional low-severity diff issue.
+The main allowlist-removal path, absolute-path read/patch/transfer API migration, Desktop Commander unrestricted configuration, existing full suite, and exact-head Ubuntu/Windows CI pass. The retained protected-config boundary is nevertheless bypassable through a symlink-to-hardlink alias, the `DATA_DIR` exclusion is bypassable through an external hardlink alias, and search rejects ordinary symlink-containing trees under the new unrestricted absolute-path contract. The EOF blank line is an additional low-severity diff issue.
 
 No implementation, test, configuration, workflow, task-tracking, or product fix was performed by this reviewer. No merge was performed.
 
@@ -143,6 +155,7 @@ Reuse this same normal-review chat for fix verification.
 | RDMCP-I3-NR-001 / Medium | validate resolved target identity and reject protected aliases without breaking ordinary symlinks | `identityForPath`, `safePath`, affected `file_*` callers | protected config inode -> hardlink alias -> symlink -> real MCP file API rejection | focused test on fix HEAD plus full local suite |
 | RDMCP-I3-NR-002 / Medium | stop rejecting every benign symlink/junction while still excluding protected aliases | `guardSearchPath` and search delegation | benign link in search tree succeeds; protected alias in search tree fails | focused search tests on fix HEAD plus full local suite |
 | RDMCP-I3-NR-003 / Low | remove EOF whitespace error | `test/regressions.test.ts` | not applicable | `git diff --check` passes |
+| RDMCP-I3-NR-004 / Medium | make `DATA_DIR` exclusion hardlink-alias resistant | `safePath` and affected direct file APIs | `DATA_DIR/audit.jsonl` -> external hardlink -> real MCP `file_read` rejection | focused alias test on fix HEAD plus full local suite |
 
 For any fix HEAD, rerun the local equivalence gate and use only a pull-request workflow run whose `head_sha` matches the new PR current HEAD. The successful run for `a803cf0b...` must not be reused after an implementation HEAD change.
 
