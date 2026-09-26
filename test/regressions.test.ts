@@ -163,7 +163,7 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     // usage tracker may otherwise atomically replace the file between our rename and
     // a direct alias link, which would test an unobserved inode rather than history B.
     await api.close(); await service.close();
-    await writeFile(replacement, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
+    await writeFile(replacement, JSON.stringify({ allowedDirectories: [], telemetryEnabled: false }));
     await replaceConfigWithRetry(replacement, protectedPath);
 
     const currentAlias = path.join(f.root, "config-current-alias.json");
@@ -240,7 +240,7 @@ test("DR003: a config replacement during pin linking preserves known history and
           replacedDuringPin = true;
           await link(existingPath, racedAlias);
           const staged = `${existingPath}.pin-race`;
-          await writeFile(staged, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
+          await writeFile(staged, JSON.stringify({ allowedDirectories: [], telemetryEnabled: false }));
           await replaceConfigWithRetry(staged, existingPath);
         }
         await link(existingPath, pinPath);

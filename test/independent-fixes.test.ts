@@ -54,7 +54,7 @@ test("RDMCP-MVP-IFR-002: live config history prunes past 64 versions without los
     const capture = (f.service as unknown as { rememberProtectedConfigIdentity: () => Promise<void> }).rememberProtectedConfigIdentity.bind(f.service);
     for (let version = 0; version < 70; version++) {
       const staged = `${protectedConfig}.version-${version}`;
-      await writeFile(staged, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false, fixtureVersion: version }));
+      await writeFile(staged, JSON.stringify({ allowedDirectories: [], telemetryEnabled: false, fixtureVersion: version }));
       await replaceConfigWithRetry(staged, protectedConfig);
       await capture();
     }
@@ -87,7 +87,7 @@ test("RDMCP-MVP-IFR-002: real pin-link replacements settle or fail closed within
         if (!capturedB) { await link(pinPath, aliasB); capturedB = true; }
         if (settledReplacements < 5) {
           const staged = `${existingPath}.settle-${settledReplacements}`;
-          await writeFile(staged, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false, retryVersion: settledReplacements }));
+          await writeFile(staged, JSON.stringify({ allowedDirectories: [], telemetryEnabled: false, retryVersion: settledReplacements }));
           await replaceConfigWithRetry(staged, existingPath);
           settledReplacements += 1;
         }
@@ -111,7 +111,7 @@ test("RDMCP-MVP-IFR-002: real pin-link replacements settle or fail closed within
       linkProtectedConfig: async (existingPath: string, pinPath: string) => {
         await link(existingPath, pinPath);
         const staged = `${existingPath}.never-stable-${unboundedReplacements}`;
-        await writeFile(staged, JSON.stringify({ allowedDirectories: [unstableFixture.root], telemetryEnabled: false, retryVersion: unboundedReplacements }));
+        await writeFile(staged, JSON.stringify({ allowedDirectories: [], telemetryEnabled: false, retryVersion: unboundedReplacements }));
         await replaceConfigWithRetry(staged, existingPath);
         unboundedReplacements += 1;
       },
