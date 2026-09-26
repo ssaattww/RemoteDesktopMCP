@@ -1,0 +1,168 @@
+schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: initial_review
+  generated_at: 2026-09-25T00:00:47+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: null
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  current_head: 6bb19be01aee5179a9c33af456cd7fcaa6253729
+  reviewed_head: 72a3414ed25304840f29160dee3d4ce037aa9f38
+  commit_range: 95ec1874e6fe82d92d2d77253cfe83a6ccbf1865..72a3414ed25304840f29160dee3d4ce037aa9f38
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  connection: available
+  os: Windows
+  shell: PowerShell
+  working_directory: 'C:\Users\donabe\Project\RemoteDesktopMCP-pr1-delta-reviewed-head'
+  repository: ssaattww/RemoteDesktopMCP
+  branch: detached
+  head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38
+  source_state: clean
+  source_fingerprint: null
+  ownership: current_task
+  writable_paths: ['C:\Users\donabe\Project\RemoteDesktopMCP-pr1-delta-review\doc\report']
+  dependencies:
+    - {name: node, status: available, evidence: "npm.cmd validation completed"}
+    - {name: npm, status: available, evidence: "npm.cmd validation completed"}
+  evidence:
+    - Exact reviewed HEAD pinned in detached worktree.
+    - Validation stdout/stderr stored outside reviewed source.
+verification:
+  capability: local_execution_available
+  capability_evidence: ["FA780 executed exact-reviewed-HEAD validation."]
+  technical_head: 72a3414ed25304840f29160dee3d4ce037aa9f38
+  administrative_parent: 6bb19be01aee5179a9c33af456cd7fcaa6253729
+  commit: {state: commit_pending, review_target_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38}
+  push: {state: push_pending, head_sha: unknown}
+  ci_wait: {state: unavailable, required_for: not_required}
+  full_local_equivalence_gate: {state: passed, candidate_head: 72a3414ed25304840f29160dee3d4ce037aa9f38, invalidated_runs: []}
+  final_publication: {sequence: not_applicable, pr_action: update}
+authoritative_requirements:
+  - {source: user_instruction, reference: current chat, summary: "Review changed design and exhaust findings."}
+  - {source: repository_instruction, reference: Project Instruction, summary: "Use uploaded Skills, RDC git, persist report/handoff, comment PR, no merge."}
+development_policy: {method: validation-only, testing_order: review then validate, governing_source: uploaded project Skills}
+validation_plan:
+  commands: ["npm.cmd ci", "npm.cmd run lint", "npm.cmd run check", "npm.cmd run build", "npm.cmd audit --audit-level=low", "git diff --check"]
+  required_failure_diagnostics: ["Preserve stdout/stderr outside reviewed source."]
+blocked: []
+authorized_actions: [read_repository, write_report, write_handoff, commit, push, comment_pr]
+write_boundary:
+  allowed:
+    - {path_or_operation: doc/report/2026-09-24-pr1-file-transfer-design-review.md, reason: review report}
+    - {path_or_operation: doc/report/2026-09-25-pr1-file-transfer-design-review-handoff.yaml, reason: review handoff}
+  forbidden:
+    - {path_or_operation: product/design fixes, reason: reviewer boundary}
+    - {path_or_operation: merge, reason: user boundary}
+scope:
+  - File transfer design and direct Connector/protected-config impacts.
+non_goals: [implement findings, merge]
+files:
+  changed:
+    - {path: doc/report/2026-09-24-pr1-file-transfer-design-review.md, purpose: detailed report}
+    - {path: doc/report/2026-09-25-pr1-file-transfer-design-review-handoff.yaml, purpose: handoff}
+  inspected:
+    - {path: doc/design/functional-requirements.md, purpose: requirements}
+    - {path: doc/design/multi-pc-architecture.md, purpose: transfer and path design}
+    - {path: doc/design/tailscale-funnel-architecture.md, purpose: exposure}
+    - {path: tools/lint/markdown-whitelist.yaml, purpose: terminology}
+    - {path: .github/workflows/lint.yml, purpose: diagnostics}
+  intentionally_untouched:
+    - {path_or_area: product/design implementation, reason: reviewer does not fix}
+commands:
+  - {command: "npm.cmd ci", purpose: dependencies, exit_code: 0, result: passed, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, evidence: external logs, execution_environment: null, source_fingerprint: null}
+  - {command: "npm.cmd run lint", purpose: lint, exit_code: 0, result: passed, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, evidence: external logs, execution_environment: null, source_fingerprint: null}
+  - {command: "npm.cmd run check", purpose: check, exit_code: 0, result: passed, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, evidence: external logs, execution_environment: null, source_fingerprint: null}
+  - {command: "npm.cmd run build", purpose: build, exit_code: 0, result: passed, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, evidence: external logs, execution_environment: null, source_fingerprint: null}
+  - {command: "npm.cmd audit --audit-level=low", purpose: audit, exit_code: 0, result: passed, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, evidence: "0 vulnerabilities", execution_environment: null, source_fingerprint: null}
+  - {command: "git diff --check", purpose: whitespace, exit_code: 0, result: passed, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, evidence: clean, execution_environment: null, source_fingerprint: null}
+tests:
+  - {name: repository validation, phase: verification, result: passed, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, evidence: exact-head local gate}
+ci: {required: false, workflow: lint, run_id: null, head_sha: 72a3414ed25304840f29160dee3d4ce037aa9f38, conclusion: unknown, artifacts: []}
+implementation:
+  outcome: not_applicable
+  final_head: 72a3414ed25304840f29160dee3d4ce037aa9f38
+  commits: []
+  addressed_findings: []
+  failure_diagnostics:
+    - {type: standard_error, location: initial PowerShell attempt, summary: "npm.ps1 blocked; npm.cmd rerun succeeded"}
+  blocked_items: []
+  summary: [review only]
+review:
+  mode: initial_review
+  reviewed_head: 72a3414ed25304840f29160dee3d4ce037aa9f38
+  reviewer:
+    identity: "current PR #1 normal review chat"
+    role: normal_reviewer
+    continuity: {previous_reviewer_identity: "current PR #1 normal review chat", changed: false, reason: null}
+    independence: {implemented_change: false, implemented_review_fix: false, served_as_normal_reviewer: true, inherited_conversation: false, evidence: ["did not implement delta"]}
+  verdict: fail
+  required_coverage:
+    - {criterion: requirement and design conformance, disposition: checked_finding, evidence: RDMCP-DR-003}
+    - {criterion: correctness and edge cases, disposition: checked_finding, evidence: "RDMCP-DR-001/002"}
+    - {criterion: scope discipline and unrelated changes, disposition: checked_no_finding, evidence: accepted delta only}
+    - {criterion: changed files and direct dependency impact, disposition: checked_finding, evidence: RDMCP-DR-003}
+    - {criterion: API data configuration workflow compatibility, disposition: checked_finding, evidence: "RDMCP-DR-002/003"}
+    - {criterion: error handling and failure diagnostics, disposition: checked_no_finding, evidence: failure states defined}
+    - {criterion: security and secret handling, disposition: checked_finding, evidence: "RDMCP-DR-001/002"}
+    - {criterion: tests and validation adequacy, disposition: checked_finding, evidence: missing race fixtures}
+    - {criterion: current-HEAD CI evidence, disposition: unexplored, evidence: no matching run}
+    - {criterion: report tracking documentation accuracy, disposition: checked_finding, evidence: "RDMCP-DR-003; task file absent"}
+    - {criterion: regression and maintainability risks, disposition: checked_finding, evidence: concurrency and config ambiguity}
+  independent_closure: {initial_independent_reviewed_head: null, closure_reviewed_heads: [], reviewer_continuity: null, closure_scope: [], completeness_matrix: []}
+  validation_assessment:
+    - {item: exact-head local validation, result: supported, evidence: all local gates passed}
+    - {item: exact-head CI, result: unavailable, evidence: no matching run}
+  reserved_report_paths: []
+  report_attestation: {allowed: not_applicable, reviewed_implementation_head: null, allowed_paths: [], required_first_parent: null, maximum_commits_after_reviewed_head: null, forbidden_path_classes: [], no_later_commits_required: not_applicable, validation_status: not_applicable, validation_evidence: []}
+  summary: [three required findings]
+report:
+  report_type: review_report
+  outcome: updated
+  persistence_mode: repository_file
+  paths: [doc/report/2026-09-24-pr1-file-transfer-design-review.md]
+  reviewed_head: 72a3414ed25304840f29160dee3d4ce037aa9f38
+  attestation_head: null
+  pr_comments: []
+  summary: [full delta review]
+findings:
+  - {id: RDMCP-DR-001, severity: high, origin: introduced_by_change, location: file-transfer download, description: "begin hash not guaranteed to match all bytes returned under concurrent changes", impact: mixed download may succeed, evidence: size/mtime only, required_action: "fix file identity or full transmitted hash and add race fixture"}
+  - {id: RDMCP-DR-002, severity: medium, origin: introduced_by_change, location: file-transfer upload, description: "overwrite=false lacks atomic no-replace commit", impact: concurrent file may be overwritten, evidence: replace after verification, required_action: "atomic no-replace plus race fixture"}
+  - {id: RDMCP-DR-003, severity: medium, origin: introduced_by_change, location: protected-config policy, description: "requirements allow per-file exclusion while architecture forbids containing search ranges", impact: implementation contract ambiguous, evidence: conflicting design statements, required_action: "choose one contract and align docs/tests"}
+held:
+  - {item: MCP message-size limit and chunk size, reason: live integration needed, owner: implementation validation, remaining_risk: 256 KiB may need reduction, verdict_impact: non-blocking}
+unexplored:
+  - {area: GitHub Actions reviewed HEAD, blocker: no matching run, remaining_risk: CI-only failure, verdict_impact: non-blocking local route}
+unknown:
+  - {field_or_fact: tasks/tasks-status.md, reason: absent}
+not_applicable:
+  - {field_or_area: independent final attestation, reason: normal failing review}
+  - {field_or_area: merge, reason: user boundary}
+remaining_risks: [transfer concurrency must be fixed, protected-config policy must be unambiguous]
+source_payloads:
+  - {source_skill: work-context-manager, output_contract_version: uploaded-project-skill, content_type: text/plain, payload: "Exact reviewed HEAD 72a3414e on FA780 detached worktree; local execution available; matching CI absent; report/handoff-only writes."}
+  - {source_skill: review-worker, output_contract_version: uploaded-project-skill, content_type: text/plain, payload: "Coverage complete. DR-001 High; DR-002 Medium; DR-003 Medium. Verdict fail. Exact-head local validation passed."}
+  - {source_skill: report-writer, output_contract_version: uploaded-project-skill, content_type: text/plain, payload: "Detailed report path doc/report/2026-09-24-pr1-file-transfer-design-review.md; reviewed HEAD 72a3414e; verdict fail."}
+extensions: []
+next_action:
+  type: design_rework
+  target_skill: chat-implementation-worker
+  mode: review_followup
+  summary: Address DR-001 through DR-003 then return to this chat for fix verification.
+  instructions:
+    - Preserve finding identities and severities.
+    - Provide required-action/design-path/actual-race-fixture/focused-evidence matrix per finding.
+  required_attachments_or_references:
+    - doc/report/2026-09-24-pr1-file-transfer-design-review.md
+    - doc/report/2026-09-25-pr1-file-transfer-design-review-handoff.yaml
+  requested_authorized_actions: [read_repository, edit_documentation, write_report, write_handoff, commit, push, comment_pr]
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-25-pr1-file-transfer-design-review-handoff.yaml
+  packet_url: null
+  transport_note: Next chat must re-resolve environment and permissions.

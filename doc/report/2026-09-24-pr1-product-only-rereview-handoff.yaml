@@ -1,0 +1,138 @@
+schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: independent_final_closure
+  generated_at: 2026-09-24T21:37:10+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-IFR-001
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  current_head: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+  reviewed_head: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+  initial_independent_reviewed_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+  commit_range: 99f2fd2a084156951db5f036d4bf01f79aded3e5..1cefa9c701a683c054e0718bab1e009ab6ec32dd
+
+authoritative_requirements:
+  - source: user_instruction
+    reference: current chat
+    summary: Review only whether the product/design has a problem; do not use development-method/process issues as product findings.
+  - source: previous_independent_review
+    reference: RDMCP-IFR-001
+    summary: Protect management secrets and control boundary from process_start commands and descendants.
+
+scope:
+  - Product and design correctness only.
+  - Recheck RDMCP-IFR-001 against current design.
+  - Recheck product impact of RDMCP-R8 and current delta.
+non_goals:
+  - Treat normal-review sequencing, matrix format, or pending review procedure as a product defect.
+  - Merge PR #1.
+review:
+  mode: independent_final_closure
+  reviewed_head: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+  reviewer:
+    identity: same independent review chat
+    role: independent_final_reviewer
+    continuity:
+      previous_reviewer_identity: same independent review chat
+      changed: false
+      reason: null
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: false
+      inherited_conversation: true
+      evidence:
+        - Same chat issued RDMCP-IFR-001 at 99f2fd2.
+  verdict: fail
+  summary:
+    - Product-only review still finds one High issue.
+    - Development process/readiness gaps are excluded from the product verdict.
+
+findings:
+  - id: RDMCP-IFR-001
+    severity: high
+    origin: introduced_by_change
+    location: doc/design/multi-pc-architecture.md:253-284
+    description: >
+      Management-side secret file isolation is now defined, but the execution worker and
+      process_start commands share the same execution OS identity while the design does not
+      require the management-to-worker control channel itself to reject direct access,
+      impersonation, replacement, or privileged-handle acquisition by arbitrary processes
+      running under that execution identity.
+    impact: >
+      A conforming implementation can allow process_start descendants to bypass the
+      management authentication/session/node/audit gates and invoke or tamper with worker
+      operations, even though management-side files remain protected by OS ACLs.
+    evidence: >
+      The design requires same-PC management/worker communication, configuration protection,
+      and non-inheritance of management handles, but does not define caller authentication or
+      an OS-enforced/cryptographic boundary preventing same-execution-user descendants from
+      opening or impersonating the worker control endpoint. The Windows fixture does not test
+      direct control-channel access or worker impersonation.
+    required_action: >
+      Define a control-channel trust boundary that accepts requests only from authenticated
+      management-side identity/capability; prevent process_start commands and descendants
+      from opening, impersonating, replacing, or acquiring the privileged channel; fail
+      closed when that boundary is unavailable; and add a deployed negative test for direct
+      channel access/impersonation.
+
+validation_assessment:
+  - item: npm run lint
+    result: supported
+    evidence: pass on FA780, current reviewed HEAD
+  - item: npm run check
+    result: supported
+    evidence: pass on FA780, current reviewed HEAD
+  - item: npm run build
+    result: supported
+    evidence: pass on FA780, current reviewed HEAD
+  - item: npm audit --audit-level=low
+    result: supported
+    evidence: 0 vulnerabilities
+  - item: git diff --check
+    result: supported
+    evidence: pass
+ci:
+  required: true
+  workflow: lint
+  run_id: 35998579435
+  head_sha: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+  conclusion: success
+  artifacts:
+    - id: 10806958895
+      name: lint-diagnostics-1cefa9c701a683c054e0718bab1e009ab6ec32dd
+      purpose: exact-head lint diagnostics
+
+report:
+  report_type: review_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-24-pr1-product-only-rereview.md
+    - doc/report/2026-09-24-pr1-product-only-rereview-handoff.yaml
+  reviewed_head: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+  attestation_head: null
+  pr_comments: []
+
+remaining_risks:
+  - Current src/index.ts is explicitly documented as a scaffold and does not yet implement the full target design; known design-difference items were not duplicated as new findings.
+
+next_action:
+  type: implementation
+  target_skill: chat-implementation-worker
+  mode: review-follow-up
+  summary: Fix the worker control-channel isolation requirement for RDMCP-IFR-001.
+  instructions:
+    - Preserve separate management/execution OS-user boundary.
+    - Define and enforce management-to-worker caller authentication/isolation.
+    - Add a negative product test from process_start attempting direct worker-channel access or impersonation.
+    - Do not merge.
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-24-pr1-product-only-rereview-handoff.yaml
+  packet_url: null
+  transport_note: Product-only re-review; process/readiness findings are intentionally excluded from the verdict.

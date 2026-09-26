@@ -1,0 +1,104 @@
+schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: product-only rereview
+  generated_at: 2026-09-24T21:44:38+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: product-trust-model-clarification
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  product_content_head: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+  current_head_at_review_start: 89ecd4a60d8db8438a1749af6d8cd50324a456a1
+  previous_independent_head: 99f2fd2a084156951db5f036d4bf01f79aded3e5
+
+authoritative_requirements:
+  - source: user_instruction
+    reference: current chat
+    summary: Review only whether the product has problems; development-method findings are not product defects.
+  - source: user_instruction
+    reference: current chat
+    summary: process_start may run with the same OS-user permissions as the MCP server process.
+  - source: user_instruction
+    reference: current chat
+    summary: Developing a new sandbox or mandatory isolation layer is excessive.
+
+scope:
+  - Reassess security findings under the clarified trust model.
+  - Inspect product/design behavior only.
+  - Do not count review-process or development-method gaps as product findings.
+review:
+  mode: product_only_rereview
+  reviewer:
+    identity: same independent review chat
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: false
+  verdict: fail
+  summary:
+    - RDMCP-IFR-001 is resolved because its privilege-boundary premise was superseded by explicit user requirements.
+    - The previous control-channel extension of IFR-001 is withdrawn for the same reason.
+    - One product/design mismatch remains: mandatory separate-user isolation contradicts the clarified intended execution model.
+
+severity_records:
+  - finding_id: RDMCP-IFR-001
+    source_severity: high
+    new_severity: null
+    reason: Authoritative user requirement now explicitly allows process_start to exercise the MCP server OS user's permissions; same-user reachability is not privilege escalation under this trust model.
+    approved_by: user
+    record_type: resolved_by_requirement_change
+
+findings:
+  - id: RDMCP-IFR-002
+    severity: medium
+    origin: introduced_by_fix
+    location: doc/design/functional-requirements.md and doc/design/multi-pc-architecture.md execution isolation requirements
+    description: The current design mandates a separate execution OS user, Windows service, ACL boundary, and fail-closed process_start behavior even though the clarified product model permits same-user execution.
+    impact: A valid intended deployment can lose process_start unless unnecessary isolation infrastructure is configured, and deployment complexity exceeds product requirements.
+    evidence: Current design requires separate OS identities and disables process_start when the boundary cannot be verified; user explicitly states same MCP-server user permissions are acceptable and new sandbox development is excessive.
+    required_action: Make same-OS-user execution the baseline trust model; document that arbitrary process_start has that user's authority; make separate-user/ACL/sandbox hardening optional rather than mandatory.
+required_coverage:
+  - criterion: OAuth/OIDC and allowed-user identification
+    disposition: checked_no_finding
+  - criterion: RemoteDesktopMCP session model
+    disposition: checked_no_finding
+  - criterion: node selection and node authentication
+    disposition: checked_no_finding
+  - criterion: Desktop Commander delegation and output contract
+    disposition: checked_no_finding
+  - criterion: process identity, PID reuse and concurrent operations
+    disposition: checked_no_finding
+  - criterion: process execution trust boundary
+    disposition: checked_finding
+
+ci:
+  product_content_head:
+    sha: 1cefa9c701a683c054e0718bab1e009ab6ec32dd
+    run_id: 35998579435
+    conclusion: success
+  current_review_record_head:
+    sha: 89ecd4a60d8db8438a1749af6d8cd50324a456a1
+    previous_recorded_run_id: 36000723364
+    previous_recorded_conclusion: success
+
+report:
+  report_type: review_report
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-24-pr1-product-only-rereview-trust-model.md
+    - doc/report/2026-09-24-pr1-product-only-rereview-trust-model-handoff.yaml
+  attestation_head: null
+
+next_action:
+  type: implementation
+  target_skill: chat-implementation-worker
+  mode: review-follow-up
+  summary: Simplify the execution trust model and remove mandatory sandbox-like isolation requirements.
+  instructions:
+    - Preserve Desktop Commander reuse.
+    - Allow process_start under the MCP server OS user's authority.
+    - State that file_* directory restrictions are not a sandbox for arbitrary process_start commands.
+    - Make separate-user and ACL isolation optional hardening.
+    - Do not merge.

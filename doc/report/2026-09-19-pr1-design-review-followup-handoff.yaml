@@ -1,0 +1,423 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: review follow-up
+  generated_at: 2026-09-19T00:00:04+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: null
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  current_head: 24af370bee37890d9a3dd3482757cd80a945c206
+  reviewed_head: 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b
+  commit_range: 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b..24af370bee37890d9a3dd3482757cd80a945c206
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 75840a70-dea0-4d8c-9bb4-fe97c78bc11e
+  connection: available
+  os: Linux
+  shell: /bin/bash
+  working_directory: /home/ibis/CodexProjects/RemoteDesktopMCP
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+  source_state: dirty
+  source_fingerprint: null
+  ownership: current_task
+  writable_paths:
+    - /home/ibis/CodexProjects/RemoteDesktopMCP
+  dependencies:
+    - name: node
+      status: available
+      evidence: npm validation executed successfully with Node.js 22 workflow-compatible toolchain.
+    - name: npm
+      status: available
+      evidence: npm run lint/check/build and npm audit executed successfully.
+  evidence:
+    - Remote origin is https://github.com/ssaattww/RemoteDesktopMCP.git.
+    - Branch tracks origin/feat/tailscale-funnel-design-lint.
+    - Work started from clean HEAD 21407514754c6f34c9e24772aa9f338fe374f3eb.
+    - Technical design-fix HEAD is 24af370bee37890d9a3dd3482757cd80a945c206.
+    - Current dirty state consists of report/handoff publication files only.
+
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - Remote Desktop Commander executed repository validation on the connected ThinkBook.
+  technical_head: 24af370bee37890d9a3dd3482757cd80a945c206
+  administrative_parent: 24af370bee37890d9a3dd3482757cd80a945c206
+  commit:
+    state: commit_pending
+    review_target_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+  push:
+    state: push_pending
+    head_sha: unknown
+  ci_wait:
+    state: ci_wait_pending
+    required_for: final PR publication HEAD
+  full_local_equivalence_gate:
+    state: passed
+    candidate_head: 24af370bee37890d9a3dd3482757cd80a945c206
+    invalidated_runs: []
+  final_publication:
+    sequence: commit report/handoff, run final local gate, push, update PR, then check exact-head workflow run
+    pr_action: update existing PR #1
+
+authoritative_requirements:
+  - source: user_instruction
+    reference: current chat
+    summary: Address PR #1 review findings.
+  - source: review_report
+    reference: doc/report/2026-09-18-pr1-design-review.md
+    summary: Address RDMCP-R1, RDMCP-R2, and RDMCP-R3 without changing their severities.
+  - source: project_instruction
+    reference: current project instructions
+    summary: Use Remote Desktop Commander for git work, preserve diagnostic artifacts, commit/push small logical changes, save a detailed report, comment on the PR, and do not merge.
+
+development_policy:
+  method: validation-only
+  testing_order: Apply each documentation fix, run focused Markdown validation, then run the repository full local gate before final publication.
+  governing_source: repository and project instructions
+validation_plan:
+  commands:
+    - npm run lint
+    - npm run check
+    - npm run build
+    - npm audit --audit-level=low
+    - git diff --check
+  required_failure_diagnostics:
+    - .github/workflows/lint.yml must preserve lint result, stdout, stderr, npm install stdout/stderr, and environment information in an always-uploaded artifact.
+    - Local final-gate stdout/stderr and result files are stored in the task diagnostic directory outside the repository.
+
+authorized_actions:
+  - read_repository
+  - edit_documentation
+  - write_report
+  - write_handoff
+  - commit
+  - push
+  - update_pr
+  - comment_pr
+
+write_boundary:
+  allowed:
+    - path_or_operation: doc/design/functional-requirements.md
+      reason: RDMCP-R1 and RDMCP-R3 design corrections.
+    - path_or_operation: doc/design/multi-pc-architecture.md
+      reason: RDMCP-R1, RDMCP-R2, and RDMCP-R3 design corrections.
+    - path_or_operation: doc/report/2026-09-18-pr1-design-review-followup.md
+      reason: Required detailed implementation report.
+    - path_or_operation: doc/report/2026-09-19-pr1-design-review-followup-handoff.yaml
+      reason: Required continuation packet.
+    - path_or_operation: git commit and push on feat/tailscale-funnel-design-lint
+      reason: User requested PR #1 finding follow-up.
+  forbidden:
+    - path_or_operation: merge
+      reason: Merge is reserved for the user.
+    - path_or_operation: unrelated source or design cleanup
+      reason: Outside accepted review-follow-up scope.
+
+scope:
+  - Resolve RDMCP-R1 by defining the application session lifecycle independently of MCP/HTTP transport.
+  - Resolve RDMCP-R2 by defining an implementable node mutual-authentication and replay-prevention scheme.
+  - Resolve RDMCP-R3 by making node targeting independent of connection state.
+  - Persist a detailed report and provide PR follow-up evidence.
+non_goals:
+  - Implement the reviewed design in product code.
+  - Perform the normal reviewer's fix verification.
+  - Redesign unrelated authentication, OAuth, or Tailscale behavior.
+  - Merge PR #1.
+
+files:
+  changed:
+    - path: doc/design/functional-requirements.md
+      purpose: Define explicit RemoteDesktopMCP session lifecycle and deterministic node-selection requirement.
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Define session ownership, node mutual authentication, replay prevention, credential lifecycle, and deterministic routing.
+    - path: doc/report/2026-09-18-pr1-design-review-followup.md
+      purpose: Persist detailed review-follow-up implementation evidence.
+    - path: doc/report/2026-09-19-pr1-design-review-followup-handoff.yaml
+      purpose: Persist continuation state before final publication.
+  inspected:
+    - path: doc/report/2026-09-18-pr1-design-review.md
+      purpose: Source finding identity, severity, impact, and required actions.
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: Confirm session/auth changes do not conflict with public-access design.
+    - path: .github/workflows/lint.yml
+      purpose: Confirm diagnostics artifact contains results, stdout, stderr, and environment data on success or failure.
+    - path: package.json
+      purpose: Resolve repository validation commands.
+    - path: tools/lint/markdown-whitelist.yaml
+      purpose: Preserve terminology policy without broadening the whitelist.
+  intentionally_untouched:
+    - path_or_area: src/
+      reason: Review findings are design findings; product implementation is not part of this follow-up.
+    - path_or_area: .github/workflows/lint.yml
+      reason: Existing workflow already satisfies the required diagnostic artifact policy.
+    - path_or_area: tools/lint/markdown-whitelist.yaml
+      reason: Newly introduced prose was rewritten to fit existing terminology policy instead of expanding the whitelist.
+
+commands:
+  - command: npm run lint:md && npm run lint:md:terms:design && git diff --check
+    purpose: Focused documentation inner-loop validation for each finding.
+    exit_code: 0
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: Final focused runs passed after correcting one trailing-space finding and terminology-lint findings.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: npm run lint
+    purpose: Repository lint gate on technical HEAD.
+    exit_code: 0
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: ESLint, Markdown lint, and design terminology lint all passed.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: npm run check
+    purpose: Type-check repository on technical HEAD.
+    exit_code: 0
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: TypeScript no-emit check completed successfully.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: npm run build
+    purpose: Build repository on technical HEAD.
+    exit_code: 0
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: TypeScript build completed successfully.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: npm audit --audit-level=low
+    purpose: Verify dependency audit on technical HEAD.
+    exit_code: 0
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: 0 vulnerabilities.
+    execution_environment: connected_computer
+    source_fingerprint: null
+  - command: git diff --check
+    purpose: Verify whitespace integrity on technical HEAD.
+    exit_code: 0
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: No whitespace errors.
+    execution_environment: connected_computer
+    source_fingerprint: null
+
+tests:
+  - name: focused Markdown validation
+    phase: verification
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: Markdown lint, design terminology lint, and diff check pass.
+  - name: full local repository gate
+    phase: verification
+    result: passed
+    head_sha: 24af370bee37890d9a3dd3482757cd80a945c206
+    evidence: lint/check/build/audit/diff check pass.
+
+ci:
+  required: true
+  workflow: lint
+  run_id: null
+  head_sha: unknown
+  conclusion: unknown
+  artifacts: []
+
+implementation:
+  outcome: completed
+  final_head: 24af370bee37890d9a3dd3482757cd80a945c206
+  commits:
+    - sha: edfc1d603795127571127ee78c8f81176d80087d
+      purpose: Define application session lifecycle for RDMCP-R1.
+    - sha: df2f3877531d83490cf222c449a0cf7c2eebfa13
+      purpose: Specify node mutual authentication and replay prevention for RDMCP-R2.
+    - sha: 24af370bee37890d9a3dd3482757cd80a945c206
+      purpose: Make node targeting deterministic for RDMCP-R3.
+  addressed_findings:
+    - id: RDMCP-R1
+      reviewed_head: 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b
+      disposition: addressed
+      evidence: Session generation, continuation, close, expiry, listing, restart behavior, and process association are explicitly defined.
+    - id: RDMCP-R2
+      reviewed_head: 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b
+      disposition: addressed
+      evidence: Pairwise 32-byte shared credentials, HMAC challenge-response, HKDF connection keys, sequence/MAC replay protection, storage, rotation, revocation, and failure behavior are defined.
+    - id: RDMCP-R3
+      reviewed_head: 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b
+      disposition: addressed
+      evidence: node_id omission now depends on registered-node count rather than current connection state, with a specific two-registered/one-connected rejection test.
+  failure_diagnostics:
+    - type: standard_output
+      location: current chat Remote Desktop Commander output
+      summary: Focused lint initially detected one trailing-space error and terminology violations for コンテキスト, salt, and オンライン; all were corrected without changing finding scope.
+    - type: artifact
+      location: .github/workflows/lint.yml
+      summary: Final CI will always upload lint result, stdout, stderr, npm install stdout/stderr, and environment information.
+  blocked_items: []
+  summary:
+    - All three review findings have implementation-side design changes committed and pushed.
+    - Normal reviewer fix verification is still required.
+
+review:
+  mode: not_applicable
+  reviewed_head: 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b
+  reviewer:
+    identity: original PR #1 normal review chat
+    role: normal_reviewer
+    continuity:
+      previous_reviewer_identity: null
+      changed: false
+      reason: Fix verification has not yet run.
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: true
+      inherited_conversation: false
+      evidence:
+        - Initial review report exists at doc/report/2026-09-18-pr1-design-review.md.
+  verdict: not_applicable
+  required_coverage: []
+  independent_closure:
+    initial_independent_reviewed_head: null
+    closure_reviewed_heads: []
+    reviewer_continuity: null
+    closure_scope: []
+    completeness_matrix: []
+  validation_assessment: []
+  reserved_report_paths: []
+  report_attestation:
+    allowed: not_applicable
+    reviewed_implementation_head: null
+    allowed_paths: []
+    required_first_parent: null
+    maximum_commits_after_reviewed_head: null
+    forbidden_path_classes: []
+    no_later_commits_required: not_applicable
+    validation_status: not_applicable
+    validation_evidence: []
+  summary:
+    - This packet records implementation follow-up only; it does not issue a fix-verification verdict.
+
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-18-pr1-design-review-followup.md
+  reviewed_head: 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b
+  attestation_head: null
+  pr_comments: []
+  summary:
+    - Detailed PR #1 design-review follow-up report persisted before final publication.
+
+findings:
+  - id: RDMCP-R1
+    severity: high
+    origin: introduced_by_change
+    location: doc/design/functional-requirements.md and doc/design/multi-pc-architecture.md
+    description: MCP transport boundaries did not define the independent RemoteDesktopMCP session lifecycle.
+    impact: Session listing and process ownership were left to implementer interpretation.
+    evidence: Initial review report RDMCP-R1.
+    required_action: Define session generation, continuation, end, expiry, listing, and process association independently of MCP transport.
+  - id: RDMCP-R2
+    severity: high
+    origin: introduced_by_change
+    location: doc/design/multi-pc-architecture.md
+    description: Node mutual authentication was stated but not defined at implementable protocol detail.
+    impact: Credential ownership, replay defense, storage, rotation, revocation, and authentication failure behavior were unspecified.
+    evidence: Initial review report RDMCP-R2.
+    required_action: Define the initial node-authentication protocol and credential lifecycle.
+  - id: RDMCP-R3
+    severity: medium
+    origin: introduced_by_change
+    location: doc/design/functional-requirements.md and doc/design/multi-pc-architecture.md
+    description: node_id omission depended on currently executable/connected node count.
+    impact: The same request could target a different machine after connection-state changes.
+    evidence: Initial review report RDMCP-R3.
+    required_action: Make target-selection rules independent of connection state and test two registered nodes with only one connected.
+
+held: []
+unexplored:
+  - area: Product implementation of the corrected design
+    blocker: Not part of this review-follow-up scope.
+    remaining_risk: Design may expose implementation issues when coding begins.
+    verdict_impact: Normal fix verification can assess design closure, not runtime behavior.
+  - area: ChatGPT CIMD/DCR live interoperability
+    blocker: Live external integration was not executed.
+    remaining_risk: OAuth client interoperability remains to be proven.
+    verdict_impact: Same held area as the initial review.
+unknown:
+  - field_or_fact: tasks/tasks-status.md
+    reason: The repository does not contain this path.
+not_applicable:
+  - field_or_area: merge
+    reason: Merge is reserved for the user.
+remaining_risks:
+  - Normal reviewer fix verification is still required for RDMCP-R1 through RDMCP-R3.
+  - Final exact-head CI evidence must be collected after the report/handoff publication commit is pushed.
+
+source_payloads:
+  - source_skill: work-context-manager
+    output_contract_version: 3
+    content_type: text/plain
+    payload: >-
+      Repository ssaattww/RemoteDesktopMCP, PR #1, branch feat/tailscale-funnel-design-lint,
+      initial reviewed HEAD 4e6a4bac3c8f7823fa24305d2c640f6e0b188b4b, connected-computer execution
+      on ibis-ThinkBook-14-G7-IML, local execution available, write scope limited to the three review findings,
+      report/handoff publication, PR update/comment, and no merge.
+  - source_skill: implementation-worker
+    output_contract_version: 3
+    content_type: text/plain
+    payload: >-
+      Review-follow-up implementation addressed RDMCP-R1 in edfc1d603795127571127ee78c8f81176d80087d,
+      RDMCP-R2 in df2f3877531d83490cf222c449a0cf7c2eebfa13, and RDMCP-R3 in
+      24af370bee37890d9a3dd3482757cd80a945c206. Focused Markdown validation and the technical-head
+      full local gate passed. Product code, workflow, terminology whitelist, and merge were intentionally untouched.
+  - source_skill: report-writer
+    output_contract_version: 3
+    content_type: text/plain
+    payload: >-
+      Implementation report persisted at doc/report/2026-09-18-pr1-design-review-followup.md.
+      It preserves original finding severities, records implementation-side dispositions as addressed pending fix verification,
+      and leaves final publication CI pending for external PR metadata after the publication commit exists.
+
+extensions:
+  - namespace: final-publication
+    payload: >-
+      After this packet is committed, run the full local gate again on the publication candidate, push it,
+      fetch PR #1 current head, and accept only workflow runs whose head_sha exactly matches that head.
+      Record final HEAD, run id, conclusion, diagnostics artifact, report path, and implementation commit list in the PR comment.
+
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Verify RDMCP-R1 through RDMCP-R3 on the final PR #1 HEAD using the same normal reviewer continuity.
+  instructions:
+    - Re-resolve PR #1 current HEAD after the publication commit.
+    - Review only RDMCP-R1 through RDMCP-R3 and any direct regressions introduced by their fixes.
+    - Use only exact-head CI evidence for the current PR HEAD.
+    - Preserve original finding severities unless the authoritative reviewer explicitly reclassifies them.
+  required_attachments_or_references:
+    - doc/report/2026-09-18-pr1-design-review.md
+    - doc/report/2026-09-18-pr1-design-review-followup.md
+    - doc/report/2026-09-19-pr1-design-review-followup-handoff.yaml
+  requested_authorized_actions:
+    - read_repository
+    - review
+    - write_report
+    - comment_pr
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-19-pr1-design-review-followup-handoff.yaml
+  packet_url: null
+  transport_note: Final publication SHA and exact-head CI evidence are recorded externally in the PR comment after this packet is committed and pushed.

@@ -1,0 +1,578 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { link, mkdir, readFile, readdir, rename, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import path from "node:path";
+import test from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { configFromEnv, createApp, RemoteDesktopService, type RuntimeConfig } from "../src/index.js";
+import { absent, captureProtectedConfigPin, fixture, mcp } from "./fixture.js";
+
+const sha256 = (value: Buffer) => createHash("sha256").update(value).digest("hex");
+const old = () => Date.now() - 31 * 60_000;
+const configFile = (data: string) => path.join(data, "desktop-commander-home", ".claude-server-commander", "config.json");
+const nodeScriptCommand = (file: string) => process.platform === "win32"
+  ? `node "${file.replaceAll("\"", "\"\"")}"`
+  : `'${process.execPath.replaceAll("'", "'\\''")}' '${file.replaceAll("'", "'\\''")}'`;
+const hasAuditEvent = (text: string, event: string, processId: string) => text.split("\n").some((line) => {
+  try { const entry = JSON.parse(line) as { event?: unknown; processId?: unknown }; return entry.event === event && entry.processId === processId; } catch { return false; }
+});
+const safeAuditDetail = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const redacted = value.replace(/(?:[A-Za-z]:)?(?:[\\/][^\s"']+)+/g, "[path]").replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]");
+  return redacted.replace(/[^\w .,:()[\]-]/g, "?").slice(0, 240);
+};
+async function safeIdentityTrace(candidate: string): Promise<string> {
+  try {
+    const [numeric, exact] = await Promise.all([stat(candidate), stat(candidate, { bigint: true })]);
+    return `number=${numeric.dev}:${numeric.ino};bigint=${exact.dev}:${exact.ino}`;
+  } catch { return "unavailable"; }
+}
+async function safeDcDiagnostics(data: string, service?: RemoteDesktopService, candidate?: string): Promise<string> {
+  const identity = await safeIdentityTrace(configFile(data));
+  const candidateIdentity = candidate ? await safeIdentityTrace(candidate) : undefined;
+  const identities = (service as unknown as { protectedConfigIdentities?: Map<unknown, unknown> } | undefined)?.protectedConfigIdentities;
+  const identityKeys = identities instanceof Map ? [...identities.keys()].filter((key): key is string => typeof key === "string" && /^\d+:\d+$/.test(key)).sort() : [];
+  const pinDirectory = path.join(data, "transfers", "protected-config-pins");
+  const pinIdentities = await readdir(pinDirectory).then(async (names) => Promise.all(names.map(async (name) => safeIdentityTrace(path.join(pinDirectory, name))))).catch(() => [] as string[]);
+  const manifestIdentities = await readFile(path.join(data, "transfers", "protected-config-identities.json"), "utf8").then((text) => {
+    const value: unknown = JSON.parse(text);
+    return Array.isArray(value) ? value.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const record = entry as { dev?: unknown; ino?: unknown };
+      const exact = typeof record.dev === "string" && /^\d+$/.test(record.dev) && typeof record.ino === "string" && /^\d+$/.test(record.ino);
+      return exact || (Number.isSafeInteger(record.dev) && Number.isSafeInteger(record.ino)) ? [`${record.dev}:${record.ino}`] : [];
+    }) : [];
+  }).catch(() => [] as string[]);
+  const events = await readFile(path.join(data, "audit.jsonl"), "utf8").then((text) => text.split("\n").flatMap((line) => {
+    try {
+      const value = JSON.parse(line) as { event?: unknown; tool?: unknown; reason?: unknown; category?: unknown; detail?: unknown };
+      if (typeof value.event !== "string" || !/^[a-z._-]+$/.test(value.event)) return [];
+      const fields = [value.tool, value.reason, value.category].filter((field): field is string => typeof field === "string" && /^[a-z._-]+$/.test(field));
+      const detail = value.event === "desktop_commander.rejected" ? safeAuditDetail(value.detail) : undefined;
+      return [`${value.event}${fields.length ? `:${fields.join(":")}` : ""}${detail ? `:detail=${detail}` : ""}`];
+    } catch { return []; }
+  }).slice(-8)).catch(() => [] as string[]);
+  return `config_identity=${identity};${candidateIdentity === undefined ? "" : ` candidate_identity=${candidateIdentity};`} protected_identity_count=${identityKeys.length}; protected_identity_keys=${identityKeys.join(",") || "none"}; pin_identities=${pinIdentities.join("|") || "none"}; manifest_identity_keys=${manifestIdentities.join(",") || "none"}; recent_audit_events=${events.join(",") || "none"}`;
+}
+
+async function expectRejected(operation: Promise<unknown>, label: string, data: string, service: RemoteDesktopService, candidate?: string): Promise<void> {
+  try { await operation; }
+  catch { return; }
+  throw new Error(`${label} unexpectedly succeeded; ${await safeDcDiagnostics(data, service, candidate)}`);
+}
+
+async function replaceConfigWithRetry(source: string, destination: string): Promise<void> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try { await rename(source, destination); return; }
+    catch (error) {
+      last = error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "") || attempt === 5) break;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  throw last;
+}
+
+async function openSession(api: Awaited<ReturnType<typeof mcp>>) {
+  return (await api.call("session_open", {})).session_id as string;
+}
+
+async function upload(api: Awaited<ReturnType<typeof mcp>>, session: string, name: string, bytes: Buffer, overwrite = false) {
+  const begun = await api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: name, size: bytes.length, sha256: sha256(bytes), overwrite });
+  return begun.transfer_id as string;
+}
+
+test("DR001: downloads use one immutable multi-chunk snapshot and clean failed snapshots", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    const source = path.join(f.root, "source.bin");
+    const original = Buffer.concat([Buffer.alloc(1024, 0x41), Buffer.alloc(1024, 0x42), Buffer.alloc(333, 0x43)]);
+    await writeFile(source, original);
+    const originalStat = await stat(source);
+    const session = await openSession(api);
+    const begun = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "source.bin" });
+    const id = begun.transfer_id as string;
+    const replacement = path.join(f.root, "replacement.bin");
+    await writeFile(replacement, Buffer.alloc(original.length, 0x5a));
+    await utimes(replacement, originalStat.atime, originalStat.mtime);
+    await rename(replacement, source);
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < original.length; offset += 1024) {
+      const chunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset });
+      chunks.push(Buffer.from(chunk.data as string, "base64"));
+    }
+    assert.deepEqual(Buffer.concat(chunks), original);
+    assert.equal(sha256(Buffer.concat(chunks)), begun.sha256);
+    assert.equal(f.service.transfers.get(id)?.state, "complete", "completed transfers retain only bounded terminal metadata");
+
+    const failing = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "source.bin" });
+    const failedId = failing.transfer_id as string;
+    const failed = f.service.transfers.get(failedId)!;
+    await unlink(failed.snapshot!);
+    await assert.rejects(api.call("file_transfer_download_chunk", { session_id: session, transfer_id: failedId, offset: 0 }));
+    await absent(failed.snapshot!);
+    assert.equal(f.service.transfers.get(failedId)?.state, "failed", "read failures must become terminal and cannot revive");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("DR002: no-replace commit preserves a winner and removes the losing temp", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const session = await openSession(api); const payload = Buffer.from("losing upload");
+    const id = await upload(api, session, "race.bin", payload);
+    const item = f.service.transfers.get(id)!;
+    await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: id, offset: 0, data: payload.toString("base64") });
+    await writeFile(path.join(f.root, "race.bin"), "winner");
+    await assert.rejects(api.call("file_transfer_upload_commit", { session_id: session, transfer_id: id }));
+    assert.equal(await readFile(path.join(f.root, "race.bin"), "utf8"), "winner");
+    await absent(item.temp!);
+    assert.equal(f.service.transfers.get(id)?.state, "failed");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("DR002: upload begin fails safely when the destination lacks atomic no-replace support", async () => {
+  const f = await fixture(); let unsupported: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  try {
+    await f.service.close();
+    const cfg = { ...f.service.cfg, linkNoReplace: async () => { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); } };
+    unsupported = new RemoteDesktopService(cfg); await unsupported.initialize(); api = await mcp(unsupported);
+    const session = await openSession(api);
+    await assert.rejects(upload(api, session, "unsupported.bin", Buffer.from("x")));
+    assert.equal(unsupported.transfers.size, 0, "unsupported storage must fail before creating transfer state");
+    assert.deepEqual((await readdir(f.root)).filter((name) => name.startsWith(".__rdmcp_")), [], "capability probes must clean their own artifacts");
+  } finally { await api?.close(); await unsupported?.close(); await f.cleanup(); }
+});
+
+test("DR003: protected config aliases cannot be read, searched, or reached by a swapped upload temp", async () => {
+  const f = await fixture(); let service = f.service; let api = await mcp(service);
+  try {
+    const session = await openSession(api);
+    const protectedPath = configFile(f.data);
+    const historicalAlias = path.join(f.root, "config-historical-alias.json");
+    const replacement = `${protectedPath}.replacement`;
+    const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
+    await captureProtectedConfigPin(service, f.data, historicalAlias);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the known protected A inode before replacement", f.data, service, historicalAlias);
+
+    // Stop Desktop Commander before manually replacing config.json.  Its asynchronous
+    // usage tracker may otherwise atomically replace the file between our rename and
+    // a direct alias link, which would test an unobserved inode rather than history B.
+    await api.close(); await service.close();
+    await writeFile(replacement, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
+    await replaceConfigWithRetry(replacement, protectedPath);
+
+    const currentAlias = path.join(f.root, "config-current-alias.json");
+    let capturedReplacement = false;
+    service = new RemoteDesktopService({
+      ...f.service.cfg,
+      linkProtectedConfig: async (existingPath: string, pinPath: string) => {
+        await link(existingPath, pinPath);
+        if (!capturedReplacement) {
+          // The alias comes from the exact inode a verified private pin retained.
+          // It remains meaningful even if Commander later rewrites config.json.
+          await link(pinPath, currentAlias);
+          capturedReplacement = true;
+        }
+      },
+    });
+    await service.initialize(); api = await mcp(service);
+    assert.equal(capturedReplacement, true, "the replacement alias must be captured from a successful private pin");
+    const capturedIdentity = await stat(currentAlias, { bigint: true });
+    const pinnedIdentities = await Promise.all((await readdir(pinDirectory)).map(async (name) => stat(path.join(pinDirectory, name), { bigint: true })));
+    assert.ok(pinnedIdentities.some((info) => info.dev === capturedIdentity.dev && info.ino === capturedIdentity.ino), "the replacement alias must retain the exact dev:ino recorded by a private pin");
+    const replacementSession = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: replacementSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the retained config inode", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: replacementSession, root_id: "files", relative_path: "config-current-alias.json" }), "the replacement config inode captured by its private pin", f.data, service, currentAlias);
+    await assert.rejects(api.call("content_search", { session_id: replacementSession, root_id: "files", query: "allowedDirectories" }));
+
+    for (let index = 0; index < 128; index++) {
+      const churn = path.join(f.root, `inode-churn-${index}.txt`);
+      await writeFile(churn, String(index)); await unlink(churn);
+    }
+    await writeFile(path.join(f.root, "ordinary-after-replacement.txt"), "ordinary file remains readable");
+
+    await api.close(); await service.close();
+    service = new RemoteDesktopService(f.service.cfg); await service.initialize(); api = await mcp(service);
+    const restartedSession = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the persisted historical config inode", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "config-current-alias.json" }), "the persisted replacement config inode", f.data, service);
+    assert.match(String((await api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "ordinary-after-replacement.txt" })).output), /ordinary file remains readable/);
+
+    const bytes = Buffer.from("x"); const id = await upload(api, restartedSession, "swap.bin", bytes, true);
+    const item = service.transfers.get(id)!;
+    const stableTargetAlias = path.join(f.root, "config-swap-target-alias.json");
+    await link(protectedPath, stableTargetAlias);
+    const stableTargetDigest = sha256(await readFile(stableTargetAlias));
+    await unlink(item.temp!); await link(stableTargetAlias, item.temp!);
+    await assert.rejects(api.call("file_transfer_upload_chunk", { session_id: restartedSession, transfer_id: id, offset: 0, data: bytes.toString("base64") }));
+    assert.equal(sha256(await readFile(stableTargetAlias)), stableTargetDigest, "a path swap must never write the exact protected inode swapped into the temp path");
+    assert.equal(service.transfers.get(id)?.state, "failed");
+
+    await assert.rejects(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "../data/audit.jsonl" }));
+    await expectRejected(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the historical config inode after all operations", f.data, service);
+  } finally { await api.close(); await service.close(); await f.cleanup(); }
+});
+
+test("DR003: a config replacement during pin linking preserves known history and the final config", async () => {
+  const f = await fixture(); let api: Awaited<ReturnType<typeof mcp>> | undefined; let service: RemoteDesktopService | undefined;
+  try {
+    const protectedPath = configFile(f.data);
+    const knownAlias = path.join(f.root, "config-known-before-race.json");
+    await captureProtectedConfigPin(f.service, f.data, knownAlias);
+    api = await mcp(f.service);
+    const knownSession = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: knownSession, root_id: "files", relative_path: "config-known-before-race.json" }), "the known config inode before the pin-link race", f.data, f.service);
+    await api.close(); api = undefined; await f.service.close();
+
+    let replacedDuringPin = false;
+    const racedAlias = path.join(f.root, "config-raced-during-pin.json");
+    const pinnedVersionAlias = path.join(f.root, "config-version-linked-during-pin.json");
+    let capturedPinVersion = false;
+    const cfg = {
+      ...f.service.cfg,
+      linkProtectedConfig: async (existingPath: string, pinPath: string) => {
+        if (!replacedDuringPin) {
+          replacedDuringPin = true;
+          await link(existingPath, racedAlias);
+          const staged = `${existingPath}.pin-race`;
+          await writeFile(staged, JSON.stringify({ allowedDirectories: [f.root], telemetryEnabled: false }));
+          await replaceConfigWithRetry(staged, existingPath);
+        }
+        await link(existingPath, pinPath);
+        if (!capturedPinVersion) { await link(pinPath, pinnedVersionAlias); capturedPinVersion = true; }
+      },
+    };
+    service = new RemoteDesktopService(cfg); await service.initialize();
+    assert.equal(replacedDuringPin, true, "the deterministic hook must replace config.json between pin stat and link");
+    assert.equal(capturedPinVersion, true, "the deterministic hook must retain the identity actually linked to a private pin");
+    await writeFile(path.join(f.root, "ordinary-after-pin-race.txt"), "ordinary pin-race file");
+    api = await mcp(service);
+    const session = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-known-before-race.json" }), "the known historical config inode after the pin-link race", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-version-linked-during-pin.json" }), "the config inode actually linked during the pin-link race", f.data, service, pinnedVersionAlias);
+    try {
+      assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-after-pin-race.txt" })).output), /ordinary pin-race file/);
+    } catch (error) {
+      throw new Error(`ordinary file after pin-link race was rejected: ${error instanceof Error ? error.message : "unknown"}; ${await safeDcDiagnostics(f.data, service, path.join(f.root, "ordinary-after-pin-race.txt"))}`);
+    }
+  } finally { await api?.close(); await service?.close(); await f.cleanup(); }
+});
+
+test("DR003: exact bigint identity keys distinguish adjacent unsafe ids while preserving ordinary reads", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const identityService = f.service as unknown as {
+      identityFromStats: (info: { dev: bigint; ino: bigint }) => { dev: string; ino: string };
+      identityKey: (identity: { dev: string; ino: string }) => string;
+      protectedConfigIdentities: Map<string, unknown>;
+    };
+    const firstUnsafe = (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString();
+    const secondUnsafe = (BigInt(firstUnsafe) + 1n).toString();
+    assert.equal(Number(firstUnsafe), Number(secondUnsafe), "the deterministic pair must collide after lossy Number conversion");
+    const firstExact = identityService.identityFromStats({ dev: 1n, ino: BigInt(firstUnsafe) });
+    const secondExact = identityService.identityFromStats({ dev: 1n, ino: BigInt(secondUnsafe) });
+    assert.notEqual(identityService.identityKey(firstExact), identityService.identityKey(secondExact), "protected identity keys must retain bigint precision");
+
+    const protectedAlias = path.join(f.root, "config-exact-identity-alias.json");
+    const ordinary = path.join(f.root, "ordinary-exact-identity.txt");
+    const pin = await captureProtectedConfigPin(f.service, f.data, protectedAlias);
+    await writeFile(ordinary, "ordinary bigint identity file");
+    const [pinInfo, ordinaryInfo] = await Promise.all([stat(pin, { bigint: true }), stat(ordinary, { bigint: true })]);
+    const pinIdentity = identityService.identityFromStats(pinInfo);
+    const ordinaryIdentity = identityService.identityFromStats(ordinaryInfo);
+    assert.notEqual(identityService.identityKey(pinIdentity), identityService.identityKey(ordinaryIdentity), "the real ordinary file must not share the protected pin's exact identity");
+    assert.ok(identityService.protectedConfigIdentities.has(identityService.identityKey(pinIdentity)), "the real pin must be stored under its exact identity key");
+    const identityManifest = JSON.parse(await readFile(path.join(f.data, "transfers", "protected-config-identities.json"), "utf8")) as Array<{ dev?: unknown; ino?: unknown }>;
+    assert.ok(identityManifest.length > 0 && identityManifest.every((entry) => typeof entry.dev === "string" && /^\d+$/.test(entry.dev) && typeof entry.ino === "string" && /^\d+$/.test(entry.ino)), "new protected-config manifests must persist exact decimal bigint identities");
+
+    const session = await openSession(api);
+    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-exact-identity-alias.json" }), "the exact pinned alias", f.data, f.service, protectedAlias);
+    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-exact-identity.txt" })).output), /ordinary bigint identity file/);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("DR003: protected identity manifests accept safe legacy values and fail closed on unsafe numeric values", async () => {
+  const f = await fixture(); let rejected: RemoteDesktopService | undefined;
+  try {
+    const identityService = f.service as unknown as {
+      validExactIdentity: (value: unknown) => boolean;
+      validLegacyIdentity: (value: unknown) => boolean;
+    };
+    assert.equal(identityService.validExactIdentity({ dev: "1", ino: "2" }), true);
+    assert.equal(identityService.validExactIdentity({ dev: 1, ino: 2 }), false, "numeric values must never be mistaken for exact persisted identities");
+    assert.equal(identityService.validLegacyIdentity({ dev: 1, ino: 2 }), true, "safe integer records retain a migration path");
+    assert.equal(identityService.validLegacyIdentity({ dev: Number.MAX_SAFE_INTEGER + 1, ino: 2 }), false, "unsafe numeric records are ambiguous and must fail closed");
+
+    const pin = await captureProtectedConfigPin(f.service, f.data);
+    await f.service.close();
+    const manifest = path.join(f.data, "transfers", "protected-config-identities.json");
+    const unsafeManifest = JSON.stringify([{ dev: Number.MAX_SAFE_INTEGER + 1, ino: 2, pin }]);
+    await writeFile(manifest, unsafeManifest);
+    rejected = new RemoteDesktopService(f.service.cfg);
+    await assert.rejects(rejected.initialize(), /Protected config identity history is invalid/);
+    assert.equal(await readFile(manifest, "utf8"), unsafeManifest, "an unsafe legacy manifest must remain available for operator diagnosis");
+    await stat(pin);
+  } finally { await rejected?.close(); await f.cleanup(); }
+});
+
+test("NR009: canonical allowed roots work through a symlink or Windows junction", async (t) => {
+  const f = await fixture(); let service: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  try {
+    await f.service.close();
+    const aliasedRoot = path.join(f.base, "allowed-root-link");
+    try { await symlink(f.root, aliasedRoot, process.platform === "win32" ? "junction" : "dir"); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EACCES") { t.skip(`directory link capability unavailable: ${code}`); return; }
+      throw error;
+    }
+    await writeFile(path.join(f.root, "ordinary.txt"), "ordinary allowed-root content");
+    service = new RemoteDesktopService({ ...f.service.cfg, roots: [{ id: "files", path: aliasedRoot }] });
+    await service.initialize(); api = await mcp(service);
+    const session = await openSession(api);
+    const read = await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary.txt" });
+    assert.match(String(read.output), /ordinary allowed-root content/);
+    const search = await api.call("file_search", { session_id: session, root_id: "files", query: "ordinary" });
+    assert.match(String(search.output), /ordinary\.txt/);
+  } finally { await api?.close(); await service?.close(); await f.cleanup(); }
+});
+
+test("NR002 and NR006: expiry sweeps cancel transfers, clean files, and list session state", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+    const listed = await api.call("session_list", {});
+    const row = (listed.sessions as Array<Record<string, unknown>>).find((value) => value.session_id === session);
+    assert.equal(row?.state, "active"); assert.equal(typeof row?.expires_at, "string");
+    const id = await upload(api, session, "expired.bin", Buffer.from("x"));
+    const item = f.service.transfers.get(id)!; item.touched = old();
+    await f.service.sweepExpired();
+    assert.equal(f.service.transfers.get(id)?.state, "expired"); await absent(item.temp!);
+    assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: id })).state, "expired");
+    await assert.rejects(api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: id, offset: 0, data: "eA==" }));
+
+    const cancellable = await upload(api, session, "cancel.bin", Buffer.from("x"));
+    const cancellableItem = f.service.transfers.get(cancellable)!;
+    await api.call("file_transfer_cancel", { session_id: session, transfer_id: cancellable });
+    await absent(cancellableItem.temp!);
+
+    const session2 = await openSession(api); const id2 = await upload(api, session2, "session-expired.bin", Buffer.from("x"));
+    const item2 = f.service.transfers.get(id2)!;
+    const expiredSession = f.service.sessions.get(session2)!;
+    expiredSession.touched = Date.now() - 25 * 60 * 60_000;
+    expiredSession.expires = Date.now() - 1;
+    await f.service.sweepExpired();
+    assert.equal(f.service.sessions.get(session2)?.state, "expired"); assert.equal(f.service.transfers.get(id2)?.state, "expired"); await absent(item2.temp!);
+    await assert.rejects(api.call("node_list", { session_id: session2 }));
+    assert.equal((await api.call("session_list", {}) as { sessions: Array<{ session_id: string }> }).sessions.some((entry) => entry.session_id === session2), false, "expired sessions must not be listed");
+
+    const closed = await openSession(api);
+    await api.call("session_close", { session_id: closed });
+    assert.equal((await api.call("session_list", {}) as { sessions: Array<{ session_id: string }> }).sessions.some((entry) => entry.session_id === closed), false, "closed sessions must not be listed");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("NR008: startup preserves unowned lookalikes and removes only manifest-owned orphan artifacts", async () => {
+  const f = await fixture();
+  let restarted: RemoteDesktopService | undefined;
+  try {
+    await f.service.close();
+    const snapshot = path.join(f.data, "transfers", "orphan.snapshot");
+    const legitimate = path.join(f.root, ".__rdmcp_legitimate.upload");
+    const owned = path.join(f.root, ".__rdmcp_owned.upload");
+    const manifest = path.join(f.data, "transfers", "owned-uploads.json");
+    await mkdir(path.dirname(snapshot), { recursive: true });
+    await Promise.all([writeFile(snapshot, "orphan"), writeFile(legitimate, "keep me"), writeFile(owned, "remove me")]);
+    const identity = await stat(owned, { bigint: true });
+    await writeFile(manifest, JSON.stringify([{ rootId: "files", path: owned, dev: identity.dev.toString(), ino: identity.ino.toString() }]));
+    restarted = new RemoteDesktopService(f.service.cfg); await restarted.initialize();
+    await Promise.all([absent(snapshot), absent(owned)]);
+    assert.equal(await readFile(legitimate, "utf8"), "keep me");
+  } finally { await restarted?.close(); await f.cleanup(); }
+});
+
+test("NR003 and NR004: searches return every page and portable Node processes retain output/audit", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+    await Promise.all(Array.from({ length: 115 }, (_, index) => writeFile(path.join(f.root, `needle-${index}.txt`), `literal [term] ${index}`)));
+    let files: Record<string, unknown>;
+    try { files = await api.call("file_search", { session_id: session, root_id: "files", query: "needle-" }); }
+    catch { throw new Error(`file_search returned an MCP error; ${await safeDcDiagnostics(f.data, f.service)}`); }
+    const fileHits = new Set([...String(files.output).matchAll(/needle-(\d+)\.txt/g)].map((match) => Number(match[1])));
+    assert.deepEqual([...fileHits].sort((left, right) => left - right), Array.from({ length: 115 }, (_, index) => index));
+    const content = await api.call("content_search", { session_id: session, root_id: "files", query: "[term]" });
+    assert.match(String(content.output), /Pattern: "\[term\]"/);
+    const contentHits = new Set([...String(content.output).matchAll(/needle-(\d+)\.txt/g)].map((match) => Number(match[1])));
+    assert.deepEqual([...contentHits].sort((left, right) => left - right), Array.from({ length: 115 }, (_, index) => index));
+
+    const linesScript = path.join(f.root, "emit-lines.cjs");
+    const naturalScript = path.join(f.root, "natural-exit.cjs");
+    const longScript = path.join(f.root, "long-running.cjs");
+    await Promise.all([
+      writeFile(linesScript, "for (let index = 0; index < 1005; index += 1) console.log(`line-${index}`);"),
+      writeFile(naturalScript, "setTimeout(() => process.exit(7), 150);"),
+      writeFile(longScript, "console.log('ready'); setTimeout(() => process.exit(0), 4_500);"),
+    ]);
+    const natural = await api.call("process_start", { session_id: session, command: nodeScriptCommand(naturalScript), timeout_ms: 10_000 });
+    const naturalId = natural.process_id as string;
+    let autonomousAudit = "";
+    for (let attempt = 0; attempt < 30; attempt++) {
+      autonomousAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      if (hasAuditEvent(autonomousAudit, "process.exit", naturalId)) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(hasAuditEvent(autonomousAudit, "process.exit", naturalId), "natural exit must be audited without process status/output polling");
+
+    const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(linesScript), timeout_ms: 10_000 });
+    const processId = started.process_id as string;
+    let observed = "";
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const output = await api.call("process_output", { session_id: session, process_id: processId }); observed = String(output.output);
+      if (output.state === "finished") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.match(observed, /line-1004/, "the final output page must be returned");
+    const longRunning = await api.call("process_start", { session_id: session, command: nodeScriptCommand(longScript), timeout_ms: 200 });
+    const killedId = longRunning.process_id as string;
+    assert.equal((await api.call("process_status", { session_id: session, process_id: killedId })).state, "running", "the portable process must be alive before termination is requested");
+    const killStarted = Date.now();
+    const killed = await api.call("process_kill", { session_id: session, process_id: killedId });
+    assert.ok(Date.now() - killStarted < 10_000, "kill must be bounded when Desktop Commander cannot confirm a process tree stop");
+    assert.ok(killed.state === "terminating" || killed.state === "finished");
+    let terminationAudit = "";
+    if (killed.state === "finished") {
+      terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      assert.match(terminationAudit, new RegExp(`"event":"process\\.exit"[^\\n]*"processId":"${killedId}"`));
+    } else if (killed.termination_unconfirmed === true) {
+      await new Promise((resolve) => setTimeout(resolve, 4_700));
+      terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      assert.match(terminationAudit, new RegExp(`"event":"process\\.termination_unconfirmed"[^\\n]*"processId":"${killedId}"`));
+    } else {
+      for (let attempt = 0; attempt < 140; attempt++) {
+        terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+        if (hasAuditEvent(terminationAudit, "process.exit", killedId)) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!hasAuditEvent(terminationAudit, "process.exit", killedId)) await api.call("process_status", { session_id: session, process_id: killedId });
+      terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+      assert.match(terminationAudit, new RegExp(`"event":"process\\.exit"[^\\n]*"processId":"${killedId}"`));
+    }
+    const audit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
+    assert.match(audit, /"event":"process\.exit"/);
+    assert.match(audit, new RegExp(`"processId":"${killedId}"`));
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, and MCP file operations", async () => {
+  const f = await fixture(); const app = createApp(f.service); const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+  const port = (server.address() as { port: number }).port; const url = `http://127.0.0.1:${port}`;
+  type Commander = { call: (name: string, args: Record<string, unknown>, timeout?: number) => Promise<string> };
+  const commander = (f.service as unknown as { dc: Commander }).dc;
+  const originalCommanderCall = commander.call;
+  const traceStarted = Date.now(); const dcTrace: string[] = [];
+  const trace = () => dcTrace.join(",") || "none";
+  commander.call = async (name, args, timeout) => {
+    dcTrace.push(`start:${name}@${Date.now() - traceStarted}`);
+    try {
+      const output = await originalCommanderCall.call(commander, name, args, timeout);
+      dcTrace.push(`ok:${name}@${Date.now() - traceStarted}`);
+      return output;
+    } catch (error) {
+      dcTrace.push(`error:${name}@${Date.now() - traceStarted}`);
+      throw error;
+    }
+  };
+  const request = (endpoint: string, init?: RequestInit) => fetch(`${url}${endpoint}`, init);
+  const register = async () => {
+    const response = await request("/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "regression", redirect_uris: ["https://chatgpt.com/callback"] }) });
+    assert.equal(response.status, 201); return response.json() as Promise<{ client_id: string }>;
+  };
+  const authorize = async (clientId: string, verifier = "v".repeat(64), extra = "") => {
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const response = await request(`/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent("https://chatgpt.com/callback")}&response_type=code&code_challenge_method=S256&code_challenge=${challenge}&scope=mcp${extra}`);
+    assert.equal(response.status, 200); const page = await response.text(); const transaction = /value="([^"]+)"/.exec(page)?.[1]; assert.ok(transaction);
+    const confirmation = await request("/authorize/confirm", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ transaction_id: transaction, email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const code = new URL(confirmation.headers.get("location")!).searchParams.get("code"); assert.ok(code); return { code, verifier };
+  };
+  const token = (clientId: string, code: string, verifier: string, redirectUri = "https://chatgpt.com/callback") => request("/token", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: clientId, code, code_verifier: verifier, redirect_uri: redirectUri }) });
+  try {
+    const registered = await register();
+    assert.equal((await request(`/authorize?client_id=${registered.client_id}&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fcallback&response_type=code&code_challenge_method=S256&code_challenge=short&scope=mcp`)).status, 400);
+    assert.equal((await request(`/authorize?client_id=${registered.client_id}&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fcallback&response_type=code&code_challenge_method=S256&code_challenge=${"a".repeat(43)}&scope=wrong`)).status, 400);
+    const badVerifier = await authorize(registered.client_id); assert.equal((await token(registered.client_id, badVerifier.code, "x".repeat(42))).status, 400);
+    const badRedirect = await authorize(registered.client_id); assert.equal((await token(registered.client_id, badRedirect.code, badRedirect.verifier, "https://chatgpt.com/other")).status, 400);
+    const good = await authorize(registered.client_id); const issued = await token(registered.client_id, good.code, good.verifier); assert.equal(issued.status, 200); const accessToken = (await issued.json() as { access_token: string }).access_token;
+    assert.equal((await token(registered.client_id, good.code, good.verifier)).status, 400);
+    for (const claim of [{ aud: "wrong" }, { scope: "other" }, { iss: "wrong" }]) {
+      const response = await request("/mcp", { method: "POST", headers: { authorization: `Bearer ${f.service.sign({ type: "access", sub: "owner@example.test", aud: "http://127.0.0.1/mcp", scope: "mcp", iss: "http://127.0.0.1", exp: Math.floor(Date.now() / 1000) + 60, ...claim })}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+      assert.equal(response.status, 401);
+    }
+    assert.equal((await request("/mcp", { method: "POST", headers: { authorization: "Bearer tampered", "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) })).status, 401);
+    await writeFile(path.join(f.root, "http.txt"), "before");
+    const client = new Client({ name: "http-regression", version: "1" }); const transport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${accessToken}` } } });
+    try { await client.connect(transport); }
+    catch (error) { throw new Error(`NR005 MCP RPC failed at transport connect; DC trace=${trace()}`, { cause: error }); }
+    const call = async (name: string, args: Record<string, unknown>) => {
+      let response;
+      try { response = await client.callTool({ name, arguments: args }); }
+      catch (error) { throw new Error(`NR005 MCP RPC failed at ${name}; DC trace=${trace()}`, { cause: error }); }
+      if (response.isError) throw new Error(`HTTP MCP ${name} returned isError; ${await safeDcDiagnostics(f.data, f.service)}`);
+      return JSON.parse(response.content.find((item) => item.type === "text")?.text ?? "{}") as Record<string, unknown>;
+    };
+    const session = (await call("session_open", {})).session_id as string;
+    assert.match(String((await call("file_read", { session_id: session, root_id: "files", relative_path: "http.txt" })).output), /before/);
+    await call("file_patch", { session_id: session, root_id: "files", relative_path: "http.txt", old_string: "before", new_string: "after" });
+    assert.match(String((await call("content_search", { session_id: session, root_id: "files", query: "after" })).output), /after/);
+    await client.close();
+  } finally { commander.call = originalCommanderCall; await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("Desktop Commander stderr is drained before repeated get_config calls can block MCP", async () => {
+  const f = await fixture(); let service: RemoteDesktopService | undefined;
+  try {
+    await f.service.close();
+    await writeFile(path.join(f.root, "anything.txt"), "anything");
+    const stub = path.join(f.base, "stderr-capacity-stub.mjs");
+    await writeFile(stub, `
+import { once } from "node:events";
+import { readFile } from "node:fs/promises";
+import readline from "node:readline";
+const names = ${JSON.stringify(["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"])};
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") reply(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "stderr-stub", version: "1" } });
+  else if (request.method === "tools/list") reply(request.id, { tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
+  else if (request.method === "tools/call") {
+    if (request.params.name === "get_config") { if (!process.stderr.write("x".repeat(1024 * 1024))) await once(process.stderr, "drain"); const config = JSON.parse(await readFile(process.env.HOME + "/.claude-server-commander/config.json", "utf8")); reply(request.id, { content: [{ type: "text", text: JSON.stringify({ allowedDirectories: config.allowedDirectories }) }] }); }
+    else reply(request.id, { content: [{ type: "text", text: "stub" }] });
+  }
+}
+`);
+    const original = (f.service as unknown as { cfg: RuntimeConfig }).cfg;
+    service = new RemoteDesktopService({ ...original, dcCommand: process.execPath, dcArgs: [stub], allowedRedirectOrigins: new Set(original.allowedRedirectOrigins) });
+    await Promise.race([
+      service.initialize(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stderr drain fixture timed out")), 5_000)),
+    ]);
+    const api = await mcp(service);
+    try {
+      const session = await openSession(api);
+      assert.equal((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "anything.txt" })).output, "stub");
+    } finally { await api.close(); }
+  } finally { await service?.close(); await f.cleanup(); }
+});
+
+test("configuration rejects resolved overlap and traversal aliases", async () => {
+  const f = await fixture();
+  try {
+    const env = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]), FILE_ROOTS_JSON: JSON.stringify([{ id: "r", path: f.data }]), DATA_DIR: f.data };
+    await assert.rejects(new RemoteDesktopService(configFromEnv(env)).initialize(), /must not overlap/);
+  } finally { await f.cleanup(); }
+});

@@ -1,0 +1,256 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: review-follow-up
+  generated_at: 2026-09-22T07:01:12+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-R5-RDMCP-R6
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+target:
+  source_reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  work_start_head: 3b097d7d4dabeed3cdd01b9d0f27c9bca951559d
+  technical_head: d519baa744bcc43d688b9a65f7987263495f5173
+  current_head: d519baa744bcc43d688b9a65f7987263495f5173
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  machine_name: FA780
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: d519baa744bcc43d688b9a65f7987263495f5173
+  source_state: report_handoff_pending
+  source_fingerprint: null
+  ownership: current_task
+  writable_paths:
+    - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  dependencies:
+    - name: node/npm
+      status: available
+      evidence: lint/check/build/audit commands executed locally.
+    - name: Remote Desktop Commander
+      status: available
+      evidence: get_config reported version 0.2.50 on FA780.
+  evidence:
+    - Local worktree matched PR current HEAD 3b097d7d4dabeed3cdd01b9d0f27c9bca951559d before edits.
+    - Worktree was clean before R5/R6 changes.
+    - No active RDC terminal sessions existed when implementation resumed.
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - FA780 provided a clean exact-head worktree.
+    - npm, node, and git validation executed locally.
+  technical_head: d519baa744bcc43d688b9a65f7987263495f5173
+  administrative_parent: d519baa744bcc43d688b9a65f7987263495f5173
+  commit:
+    state: commit_pending
+    review_target_sha: d519baa744bcc43d688b9a65f7987263495f5173
+  push:
+    state: pushed
+    head_sha: d519baa744bcc43d688b9a65f7987263495f5173
+  ci_wait:
+    state: ci_wait_pending
+    required_for: final publication head
+  full_local_equivalence_gate:
+    state: invalidated
+    candidate_head: d519baa744bcc43d688b9a65f7987263495f5173
+    invalidated_runs:
+      - head: d519baa744bcc43d688b9a65f7987263495f5173
+        reason: full npm run lint fails on pre-existing historical-report MD036 unrelated to R5/R6 delta
+  final_publication:
+    sequence: validate report/handoff, commit and push, update PR, then check exact-head CI only
+    pr_action: update existing PR #1
+authoritative_requirements:
+  - source: pr_review
+    reference: RDMCP-R5
+    severity: high
+    summary: Make process output contract implementable by the pinned Desktop Commander version and add focused contract validation.
+  - source: pr_review
+    reference: RDMCP-R6
+    severity: high
+    summary: Bind logical process identity to Desktop Commander generation and invalidate stale mappings after restart.
+  - source: project_instruction
+    reference: current project
+    summary: Use RDC for git, preserve diagnostics, save detailed report, comment on PR, do not merge.
+
+development_policy:
+  method: documentation-validation
+  testing_order: focused design validation followed by repository non-Markdown gates and explicit recording of the pre-existing full-lint failure
+
+scope:
+  - Change initial process output contract to combined output plus state and exit code.
+  - Pin initial Desktop Commander contract baseline to 0.2.50 and require mechanical contract validation before version updates.
+  - Add desktop_commander_generation to logical process mapping.
+  - Invalidate prior-generation mappings on Desktop Commander or executor restart.
+  - Prevent stale logical IDs from reaching read_process_output or force_terminate.
+  - Retire completed PID mappings and serve completed status/output from a final snapshot.
+non_goals:
+  - Implement the process delegation code.
+  - Add duplicate local process handling outside Desktop Commander.
+  - Modify historical reviewer reports.
+  - Fix unrelated pre-existing MD036.
+  - Merge PR #1.
+
+files:
+  changed:
+    - path: doc/design/functional-requirements.md
+      purpose: Replace separate stdout/stderr requirement with combined output contract.
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Define process output contract, pinned-version validation, generation-aware mapping, stale invalidation, and validation cases.
+    - path: doc/report/2026-09-22-pr1-r5-r6-review-followup.md
+      purpose: Persist detailed implementation-side evidence.
+    - path: doc/report/2026-09-22-pr1-r5-r6-review-followup-handoff.yaml
+      purpose: Transport state for fix verification.
+  intentionally_untouched:
+    - path_or_area: src/
+      reason: Findings are design findings; product implementation is a later task.
+    - path_or_area: .github/workflows/lint.yml
+      reason: Existing workflow already stores required diagnostics on success/failure.
+    - path_or_area: tools/lint/markdown-whitelist.yaml
+      reason: Design wording was adjusted to existing terminology policy.
+    - path_or_area: historical review reports
+      reason: Preserve review evidence; unrelated MD036 remains explicit.
+upstream_evidence:
+  desktop_commander_version: "0.2.50"
+  evidence:
+    - FA780 get_config reported Remote Desktop Commander 0.2.50.
+    - A probe process wrote distinct stdout and stderr markers.
+    - read_process_output returned both markers in one combined output without per-line source provenance.
+  design_decision:
+    - Initial RemoteDesktopMCP process_output exposes combined output, state, and exit_code.
+    - Initial contract does not expose separate stdout/stderr fields.
+    - Source provenance is never fabricated by the wrapper.
+
+implementation:
+  outcome: design_fix_completed
+  commits:
+    - sha: d519baa744bcc43d688b9a65f7987263495f5173
+      purpose: Fix process delegation contracts for RDMCP-R5 and RDMCP-R6.
+  addressed_findings:
+    - id: RDMCP-R5
+      severity: high
+      source_reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+      disposition: addressed_pending_fix_verification
+      evidence:
+        - process_output fields are output/state/exit_code
+        - separate stdout/stderr fields are removed from initial contract
+        - Desktop Commander 0.2.50 is the initial validation baseline
+        - version changes require a mechanical output-contract probe
+    - id: RDMCP-R6
+      severity: high
+      source_reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+      disposition: addressed_pending_fix_verification
+      evidence:
+        - mapping identity includes node_id, desktop_commander_generation, and pid
+        - generation is a fresh 16-byte opaque random value per local Desktop Commander connection
+        - local Desktop Commander or executor restart invalidates prior-generation active mappings
+        - stale mappings never forward PID to read_process_output or force_terminate
+        - completed mappings retire the active PID association and retain final result data
+
+validation:
+  diagnostics_path: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r5-r6-diagnostics-20260922
+  focused_markdownlint:
+    result: passed
+    evidence: 2 changed design files, 0 issues
+  design_terminology_lint:
+    command: npm run lint:md:terms:design
+    result: passed
+  typescript_lint:
+    command: npm run lint:ts
+    result: passed
+  type_check:
+    command: npm run check
+    result: passed
+  build:
+    command: npm run build
+    result: passed
+  audit:
+    command: npm audit --audit-level=low
+    result: passed
+    evidence: 0 vulnerabilities
+  diff_check:
+    command: git diff --check
+    result: passed
+  full_lint:
+    command: npm run lint
+    result: failed_pre_existing
+    evidence: doc/report/2026-09-19-pr1-design-review-fix-verification.md:91 MD036/no-emphasis-as-heading
+    changed_by_this_task: false
+
+failure_diagnostics:
+  - type: local_logs
+    location: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r5-r6-diagnostics-20260922
+    summary: stdout, stderr, and result files retained for lint/check/build/audit/diff/full-lint.
+  - type: workflow_artifact_policy
+    location: .github/workflows/lint.yml
+    summary: Always uploads npm install/lint stdout, stderr, results, SHA, and environment data.
+
+ci:
+  required: true
+  final_publication_head: pending
+  exact_head_run_id: null
+  conclusion: pending
+  rule: only a run whose head_sha equals final PR current HEAD may be used
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-22-pr1-r5-r6-review-followup.md
+
+review:
+  mode: pending_fix_verification
+  finding_ids:
+    - RDMCP-R5
+    - RDMCP-R6
+  source_reviewed_head: 71d039f0ea2d3b0d57bc5a3d4e4c6ba4d0a59ed8
+  severity_preserved: high
+  requested_scope:
+    - Verify combined output contract against pinned Desktop Commander behavior.
+    - Verify generation changes on local Desktop Commander/executor restart.
+    - Verify stale logical IDs cannot reach a new process even with PID reuse.
+    - Verify completed mappings retire live PID association.
+    - Check direct regressions only.
+
+unknown:
+  - field_or_fact: exact-head CI for final publication commit
+    reason: final publication commit does not exist yet
+  - field_or_fact: tasks/tasks-status.md
+    reason: repository path has not been present in prior worktree inspections
+
+remaining_risks:
+  - Product implementation and focused runtime tests still need to be written in a later implementation task.
+  - Full repository lint remains red on an unrelated historical report MD036.
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Verify RDMCP-R5 and RDMCP-R6 against the final PR #1 publication HEAD.
+  instructions:
+    - Re-resolve PR #1 current HEAD.
+    - Preserve RDMCP-R5 and RDMCP-R6 severity as High.
+    - Verify only these findings and direct regressions from their fix.
+    - Use exact-head CI evidence only.
+    - Do not substitute workflow runs from another SHA.
+  required_attachments_or_references:
+    - doc/report/2026-09-22-pr1-r4-fix-verification.md
+    - doc/report/2026-09-22-pr1-r5-r6-review-followup.md
+    - doc/report/2026-09-22-pr1-r5-r6-review-followup-handoff.yaml
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-22-pr1-r5-r6-review-followup-handoff.yaml
+  packet_url: null
+  transport_note: publication SHA and exact-head CI evidence will be recorded in PR metadata/comment after commit and push
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user

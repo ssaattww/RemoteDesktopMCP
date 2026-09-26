@@ -1,0 +1,364 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: review-follow-up
+  generated_at: 2026-09-22T07:52:47+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: RDMCP-R7
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+
+target:
+  current_head: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+  reviewed_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  commit_range: 2fe4f86bf0ea60095744dc848c6ff3fd0ea3d5df..28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  machine_name: FA780
+  connection: available
+  os: Windows
+  shell: powershell.exe
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tailscale-funnel-design-lint
+  head_sha: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+  source_state: report_handoff_pending
+  source_fingerprint: null
+  ownership: current_task
+  writable_paths:
+    - C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  dependencies:
+    - name: node/npm
+      status: available
+      evidence: lint/check/build/audit commands executed on FA780
+    - name: git
+      status: available
+      evidence: commit and push succeeded on the pinned worktree
+    - name: Remote Desktop Commander
+      status: available
+      evidence: device FA780 online; no active terminal sessions at task start
+  evidence:
+    - PR current HEAD and local worktree HEAD matched at 2fe4f86bf0ea60095744dc848c6ff3fd0ea3d5df before edits
+    - worktree was clean before R7 implementation
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - FA780 provides a usable exact-head local worktree and validation executor
+  technical_head: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+  administrative_parent: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+  commit:
+    state: commit_pending
+    review_target_sha: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+  push:
+    state: pushed
+    head_sha: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+  ci_wait:
+    state: ci_wait_pending
+    required_for: final publication head
+  full_local_equivalence_gate:
+    state: invalidated
+    candidate_head: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+    invalidated_runs:
+      - head: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+        reason: full npm run lint fails on pre-existing historical-report MD036 unrelated to R7 delta
+  final_publication:
+    sequence: validate report/handoff, commit and push, update PR, then query exact-head CI only
+    pr_action: update existing PR #1
+authoritative_requirements:
+  - source: user_instruction
+    reference: current chat
+    summary: Address the current PR #1 review finding
+  - source: pr_review
+    reference: RDMCP-R7
+    severity: high
+    summary: Prevent stale logical process IDs from targeting a new process when PID is reused within the same Desktop Commander generation
+  - source: project_instruction
+    reference: RemoteDesktopMCP project instructions
+    summary: Use RDC for git, preserve diagnostics, save detailed report and handoff, comment on PR, and do not merge
+
+development_policy:
+  method: documentation-validation
+  testing_order: focused design validation followed by repository non-Markdown gates and explicit recording of the pre-existing full-lint failure
+
+scope:
+  - Maintain one current logical-process owner per node_id/generation/pid key
+  - Invalidate the previous owner before publishing a new logical ID for a reused key
+  - Refuse PID forwarding from non-owner logical IDs
+  - Remove completed final snapshots from active ownership
+  - Add a same-generation PID-reuse validation case without restarting RDC
+
+non_goals:
+  - Implement process ownership in product code
+  - Change RDMCP-R5 or RDMCP-R6 conclusions
+  - Fix the unrelated historical MD036
+  - Modify workflow or terminology whitelist
+  - Merge PR #1
+write_boundary:
+  allowed:
+    - doc/design/multi-pc-architecture.md
+    - doc/report/2026-09-22-pr1-r7-review-followup.md
+    - doc/report/2026-09-22-pr1-r7-review-followup-handoff.yaml
+    - git commit and push on feat/tailscale-funnel-design-lint
+    - PR #1 metadata and top-level implementation comment
+  forbidden:
+    - src/
+    - unrelated design changes
+    - historical reviewer reports
+    - merge
+
+files:
+  changed:
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Define same-generation PID current ownership and stale-owner rejection
+    - path: doc/report/2026-09-22-pr1-r7-review-followup.md
+      purpose: Detailed R7 implementation-side report
+    - path: doc/report/2026-09-22-pr1-r7-review-followup-handoff.yaml
+      purpose: Transport continuation state for fix verification
+  intentionally_untouched:
+    - path_or_area: src/
+      reason: R7 is a design finding; product implementation is future work
+    - path_or_area: doc/design/functional-requirements.md
+      reason: Existing process requirements do not need change for ownership semantics
+    - path_or_area: .github/workflows/lint.yml
+      reason: Existing workflow already saves required diagnostics
+    - path_or_area: tools/lint/markdown-whitelist.yaml
+      reason: Design text was adjusted to existing terminology policy
+    - path_or_area: doc/report/2026-09-19-pr1-design-review-fix-verification.md
+      reason: Historical review evidence remains unchanged despite pre-existing MD036
+
+implementation:
+  outcome: design_fix_completed
+  commits:
+    - sha: 28f8fc4a122a61e4b6956991427d0b18ff0ceb84
+      purpose: Define same-generation process ownership
+  addressed_findings:
+    - id: RDMCP-R7
+      severity: high
+      reviewed_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+      disposition: addressed_pending_fix_verification
+      evidence:
+        - process_key is node_id plus desktop_commander_generation plus pid
+        - current_process_owner stores at most one active owner per process_key
+        - a reused process_key invalidates the prior owner before new logical ID publication
+        - non-owner status/output/kill never forwards PID to Desktop Commander
+        - completed final snapshots are removed from active ownership
+        - same-generation PID reuse validation is explicitly defined
+
+validation:
+  diagnostics_path: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r7-diagnostics-20260922
+  focused_markdownlint:
+    result: passed
+    evidence: 1 changed design file, 0 issues
+  design_terminology_lint:
+    command: npm run lint:md:terms:design
+    result: passed
+  typescript_lint:
+    command: npm run lint:ts
+    result: passed
+  type_check:
+    command: npm run check
+    result: passed
+  build:
+    command: npm run build
+    result: passed
+  audit:
+    command: npm audit --audit-level=low
+    result: passed
+    evidence: 0 vulnerabilities
+  diff_check:
+    command: git diff --check
+    result: passed
+  full_lint:
+    command: npm run lint
+    result: failed_pre_existing
+    evidence: doc/report/2026-09-19-pr1-design-review-fix-verification.md:91 MD036/no-emphasis-as-heading
+    changed_by_this_task: false
+
+failure_diagnostics:
+  - type: local_logs
+    location: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r7-diagnostics-20260922
+    summary: stdout, stderr, and result files retained for lint/check/build/audit/diff/full-lint
+  - type: workflow_artifact_policy
+    location: .github/workflows/lint.yml
+    summary: always uploads install/lint stdout, stderr, result, SHA, and environment data
+
+ci:
+  required: true
+  final_publication_head: pending
+  exact_head_run_id: null
+  conclusion: pending
+  artifacts: []
+  rule: only workflow evidence whose head_sha equals the final PR current HEAD may be used
+
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-09-22-pr1-r7-review-followup.md
+  reviewed_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  attestation_head: null
+  pr_comments: []
+  summary:
+    - RDMCP-R7 implementation-side design follow-up persisted
+
+findings:
+  - id: RDMCP-R7
+    severity: high
+    origin: introduced_by_fix
+    location: doc/design/multi-pc-architecture.md process identity and validation rules
+    description: Same-generation PID reuse could leave two logical IDs with the same node/generation/pid key and allow the older ID to target the newer process
+    impact: A stale process_kill could terminate the wrong new process
+    evidence: Desktop Commander 0.2.50 keys process sessions by PID and the source review found no unique current-owner rule inside one generation
+    required_action: Maintain one current owner per node/generation/pid, stale the prior owner before exposing a reused key, refuse PID forwarding from non-owners, exclude final snapshots from active ownership, and validate same-generation PID reuse
+
+held:
+  - item: exact-head CI
+    reason: final publication commit does not exist yet
+    owner: implementation worker
+    remaining_risk: final CI state is unknown until publication push
+    verdict_impact: cannot be reported as success
+
+unexplored:
+  - area: product implementation runtime behavior
+    blocker: design-only review follow-up scope
+    remaining_risk: implementation must enforce atomic owner replacement and non-owner rejection
+    verdict_impact: fix verification can assess design closure only
+
+unknown:
+  - field_or_fact: final publication SHA
+    reason: report/handoff commit has not been created yet
+  - field_or_fact: tasks/tasks-status.md
+    reason: path is absent in the current worktree
+
+not_applicable:
+  - field_or_area: merge
+    reason: merge is reserved for the user
+
+remaining_risks:
+  - Product implementation and focused runtime tests remain future work
+  - Full repository lint remains red on an unrelated historical report MD036
+  - Exact-head CI must be checked after final publication push
+review:
+  mode: not_applicable
+  reviewed_head: 75c50f61ae2855817aacebe739e8e731e7c64f1e
+  reviewer:
+    identity: source normal-review chat
+    role: normal_reviewer
+    continuity:
+      previous_reviewer_identity: source normal-review chat
+      changed: false
+      reason: fix verification has not yet run
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: true
+      inherited_conversation: true
+      evidence:
+        - RDMCP-R7 source report is doc/report/2026-09-22-pr1-r5-r6-fix-verification.md
+  verdict: not_applicable
+  required_coverage: []
+  independent_closure:
+    initial_independent_reviewed_head: null
+    closure_reviewed_heads: []
+    reviewer_continuity: null
+    closure_scope: []
+    completeness_matrix: []
+  validation_assessment: []
+  reserved_report_paths: []
+  report_attestation:
+    allowed: not_applicable
+    reviewed_implementation_head: null
+    allowed_paths: []
+    required_first_parent: null
+    maximum_commits_after_reviewed_head: null
+    forbidden_path_classes: []
+    no_later_commits_required: not_applicable
+    validation_status: not_applicable
+    validation_evidence: []
+  summary:
+    - This handoff records implementation follow-up only and does not issue a review verdict
+
+source_payloads:
+  - source_skill: work-context-manager
+    output_contract_version: "3"
+    content_type: text/plain
+    payload: >-
+      Repository ssaattww/RemoteDesktopMCP, PR #1, branch feat/tailscale-funnel-design-lint.
+      Authoritative source finding RDMCP-R7 High was reviewed at implementation HEAD
+      75c50f61ae2855817aacebe739e8e731e7c64f1e. Work resumed from current PR/local HEAD
+      2fe4f86bf0ea60095744dc848c6ff3fd0ea3d5df on clean FA780 worktree
+      C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922. Verification capability is
+      local_execution_available. Allowed writes are the R7 design file, implementation report,
+      handoff, commit/push, and PR metadata/comment. Merge and unrelated changes are forbidden.
+      Existing .github/workflows/lint.yml already provides required failure diagnostics.
+  - source_skill: implementation-worker
+    output_contract_version: "3"
+    content_type: text/plain
+    payload: >-
+      In review-follow-up mode, RDMCP-R7 was addressed in technical commit
+      28f8fc4a122a61e4b6956991427d0b18ff0ceb84. The design now maintains
+      current_process_owner for each process_key {node_id, desktop_commander_generation, pid},
+      atomically stales an older owner before a reused key is exposed, refuses Desktop Commander
+      PID forwarding from non-owner logical IDs, removes final snapshots from active ownership,
+      removes old-generation owner indexes on connection loss, and adds a same-generation PID
+      reuse validation case. Focused markdownlint, design terminology lint, TypeScript lint,
+      check, build, audit, and git diff --check passed. Full npm run lint fails only on the
+      pre-existing doc/report/2026-09-19-pr1-design-review-fix-verification.md:91 MD036.
+      Diagnostics are stored at C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r7-diagnostics-20260922.
+      Product code, workflow, whitelist, historical reports, and merge were intentionally untouched.
+  - source_skill: report-writer
+    output_contract_version: "3"
+    content_type: text/plain
+    payload: >-
+      Detailed implementation report is persisted at
+      doc/report/2026-09-22-pr1-r7-review-followup.md. It preserves RDMCP-R7 severity High,
+      records source reviewed HEAD 75c50f61ae2855817aacebe739e8e731e7c64f1e and technical
+      head 28f8fc4a122a61e4b6956991427d0b18ff0ceb84, records all validation and the
+      unrelated full-lint failure, leaves final exact-head CI pending, and requests normal-review
+      fix verification after publication.
+
+extensions:
+  - namespace: final-publication
+    payload: >-
+      Validate report and handoff, commit them as one publication commit, push through RDC,
+      re-resolve PR #1 current HEAD, update PR body and concise comment through GitHub connector,
+      then accept only workflow runs whose head_sha exactly matches that final HEAD. Do not use
+      another SHA and do not merge.
+
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Verify RDMCP-R7 against the final PR #1 publication HEAD
+  instructions:
+    - Re-resolve PR #1 current HEAD after publication
+    - Preserve RDMCP-R7 severity as High
+    - Verify unique current ownership for same-generation PID reuse
+    - Verify old logical IDs cannot reach read_process_output or force_terminate after ownership transfer
+    - Verify completed final snapshots do not participate in active PID ownership
+    - Use only exact-head CI evidence matching the final PR HEAD
+  required_attachments_or_references:
+    - doc/report/2026-09-22-pr1-r5-r6-fix-verification.md
+    - doc/report/2026-09-22-pr1-r7-review-followup.md
+    - doc/report/2026-09-22-pr1-r7-review-followup-handoff.yaml
+  requested_authorized_actions:
+    - read_repository
+    - review
+    - write_report
+    - comment_pr
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-22-pr1-r7-review-followup-handoff.yaml
+  packet_url: null
+  transport_note: final publication SHA and exact-head CI evidence are recorded externally after the report/handoff commit exists
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user

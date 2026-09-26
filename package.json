@@ -1,0 +1,47 @@
+{
+  "name": "remote-desktop-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Least-privilege MCP server for approved remote desktop actions",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/bootstrap.js",
+    "dev": "tsx watch src/bootstrap.ts",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "user:hash": "tsx src/hash-password.ts",
+    "remote-auth": "tsx src/remote-auth-cli.ts",
+    "lint": "npm run lint:ts && npm run lint:md && npm run lint:md:terms:design",
+    "lint:ts": "eslint \"src/**/*.ts\"",
+    "lint:md": "node scripts/lint-markdown.mjs",
+    "lint:md:terms:candidates": "node scripts/check-markdown-whitelist.mjs --list-unknown",
+    "lint:md:terms": "node scripts/check-markdown-whitelist.mjs",
+    "lint:md:terms:design": "node scripts/check-markdown-whitelist.mjs --files doc/design/functional-requirements.md doc/design/tailscale-funnel-architecture.md doc/design/multi-pc-architecture.md"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@wonderwhy-er/desktop-commander": "0.2.51",
+    "express": "^5.2.1",
+    "jose": "^6.2.12",
+    "zod": "^3.24.2"
+  },
+  "overrides": {
+    "sharp": "0.35.4",
+    "uuid": "11.1.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.10",
+    "eslint": "^10.10.0",
+    "markdownlint": "^0.41.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.70.0",
+    "yaml": "^2.9.1"
+  }
+}

@@ -1,0 +1,172 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: documentation-cleanup
+  generated_at: 2026-09-23T07:48:32+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+task_id: japanese-wording-cleanup
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+
+target:
+  work_start_head: 7804426bb5af74610fe4d97a46f85d2f20456bb2
+  first_pass_head: 7ac921c9cf7a7b72a49cb1ff16668f71c64613ca
+  technical_head: 5b84a9c23a9628a683e6f56199863ac6ba2b3275
+  current_head: 5b84a9c23a9628a683e6f56199863ac6ba2b3275
+
+execution_environment:
+  kind: connected_computer
+  tool: Remote Desktop Commander
+  machine_id: 4eae589f-096b-4362-9bec-0f392d77d44f
+  machine_name: FA780
+  connection: available
+  working_directory: C:\Users\donabe\Project\RemoteDesktopMCP-pr1-r4-20260922
+  source_state: report_handoff_pending
+  ownership: current_task
+
+authoritative_requirements:
+  - source: user_instruction
+    summary: Replace uncommon or unnatural Japanese expressions with wording commonly used in technical documents.
+  - source: user_instruction
+    summary: Prioritize readability over lint workarounds.
+  - source: user_instruction
+    summary: Surface whitelist candidates instead of avoiding normal terminology.
+  - source: user_instruction
+    summary: Do not evade whitelist checks by quoting or code-formatting ordinary words.
+  - source: project_instruction
+    summary: Use RDC for git operations, persist detailed report, update PR, exact-head CI only, and do not merge.
+
+scope:
+  - Review all three design documents for unnatural Japanese wording.
+  - Preserve technical meaning and RDMCP-R1 through RDMCP-R8 constraints.
+  - Add normal technical terms to the Markdown terminology whitelist where needed.
+  - Keep full repository lint green.
+
+non_goals:
+  - Change product code.
+  - Change authentication algorithms or process-safety design.
+  - Merge PR #1.
+
+files:
+  changed:
+    - path: doc/design/functional-requirements.md
+      purpose: Natural Japanese wording and terminology cleanup.
+    - path: doc/design/multi-pc-architecture.md
+      purpose: Natural Japanese wording for authentication, routing, process identity, and concurrency design.
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: Natural Japanese wording for public access, OAuth, token handling, and operations.
+    - path: tools/lint/markdown-whitelist.yaml
+      purpose: Allow ordinary technical terminology instead of forcing unnatural paraphrases.
+    - path: doc/report/2026-09-23-pr1-japanese-wording-cleanup.md
+      purpose: Detailed cleanup report.
+    - path: doc/report/2026-09-23-pr1-japanese-wording-cleanup-handoff.yaml
+      purpose: Handoff for subsequent review.
+
+terminology:
+  representative_replacements:
+    - from: 共有秘密情報
+      to: 事前共有鍵（PSK）
+    - from: 規約版
+      to: プロトコルのバージョン
+    - from: 接続専用鍵
+      to: セッション鍵
+    - from: 送信本体
+      to: メッセージ本文
+    - from: 再送攻撃
+      to: リプレイ攻撃
+    - from: 論理プロセス識別子
+      to: 論理プロセスID
+    - from: 原子的に置き換える
+      to: 同じロック内で切り替える
+    - from: 退役させる
+      to: 実行中プロセスの対応表から外す
+    - from: 長期資格情報
+      to: 長期間利用される認証情報
+
+whitelist:
+  added_candidates:
+    - HMAC
+    - nonce
+    - PSK
+    - エラー
+    - ディレクトリ
+    - テスト
+    - バージョン
+    - バイト
+    - ハッシュ
+    - プロトコル
+    - メッセージ
+    - リクエスト
+    - リプレイ
+    - ロック
+    - アドレス
+  unknown_terms_after_update: 0
+
+validation:
+  lint:
+    command: npm run lint
+    result: passed
+    evidence: markdownlint 21 files, 0 issues; design terminology lint passed
+  check:
+    command: npm run check
+    result: passed
+  build:
+    command: npm run build
+    result: passed
+  audit:
+    command: npm audit --audit-level=low
+    result: passed
+    evidence: 0 vulnerabilities
+  diff_check:
+    command: git diff --check
+    result: passed
+  terminology_candidates:
+    command: node scripts/check-markdown-whitelist.mjs --list-unknown --files doc/design/functional-requirements.md doc/design/tailscale-funnel-architecture.md doc/design/multi-pc-architecture.md
+    result: passed
+    evidence: 0 unknown terms
+
+diagnostic_workflow:
+  path: .github/workflows/lint.yml
+  status: already_sufficient
+  evidence:
+    - Always uploads npm install and lint stdout/stderr/results.
+    - Records workflow SHA and Node.js/npm versions.
+    - Upload step uses if: always().
+
+task_ledger:
+  path: tasks/tasks-status.md
+  status: absent
+
+review:
+  mode: pending_fix_verification
+  source_finding: RDMCP-R8
+  severity: high
+  note: Wording cleanup must be checked for semantic drift together with RDMCP-R8 fix verification.
+
+ci:
+  required: true
+  final_publication_head: pending
+  exact_head_run_id: null
+  conclusion: pending
+  rule: only a workflow run whose head_sha equals final PR current HEAD may be used
+
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: fix_verification
+  summary: Verify RDMCP-R8 and confirm that Japanese wording cleanup preserved technical meaning.
+  instructions:
+    - Re-resolve current PR HEAD.
+    - Preserve RDMCP-R8 severity as High until reviewed.
+    - Check Japanese wording changes for semantic drift.
+    - Use only exact-head CI evidence.
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-09-23-pr1-japanese-wording-cleanup-handoff.yaml
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user

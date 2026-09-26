@@ -1,0 +1,149 @@
+schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: design-follow-up
+  generated_at: 2026-09-24T23:41:20+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #1"
+branch: feat/tailscale-funnel-design-lint
+base_ref: main
+
+target:
+  work_start_head: 95ec1874e6fe82d92d2d77253cfe83a6ccbf1865
+  technical_head: e11fc23c12aa17e3d95bbfd623c90ea862c01feb
+  current_head: e11fc23c12aa17e3d95bbfd623c90ea862c01feb
+
+scope:
+  - Add ChatGPT/OpenAI MCP Connector to the architecture diagram.
+  - Design bidirectional remote file transfer as a RemoteDesktopMCP feature.
+  - Exclude Desktop Commander server configuration from RemoteDesktopMCP file APIs and transfers.
+  - Keep process_start same-user trust model unchanged.
+  - Do not implement runtime behavior.
+
+design:
+  connector:
+    location: ChatGPT / OpenAI side
+    responsibility:
+      - MCP server connection target
+      - authentication connection flow
+    server_location: coordinator PC
+  file_transfer:
+    owner: RemoteDesktopMCP
+    transport: existing MCP connection
+    extra_public_http_endpoint: false
+    external_temporary_url_required: false
+    encoding: base64 chunks
+    initial_chunk_size: 256 KiB
+    identity:
+      - transfer_id
+      - session_id
+      - node_id
+    tools:
+      - file_transfer_download_begin
+      - file_transfer_download_chunk
+      - file_transfer_upload_begin
+      - file_transfer_upload_chunk
+      - file_transfer_upload_commit
+      - file_transfer_status
+      - file_transfer_cancel
+    integrity:
+      algorithm: SHA-256
+      download_change_detection:
+        - size
+        - modification time
+      upload_commit:
+        - write to temporary file
+        - verify expected size
+        - verify SHA-256
+        - replace destination only after successful verification
+    overwrite:
+      default: false
+      requires_explicit_permission: true
+    resume:
+      same_server_process: supported through status/next offset
+      after_server_restart: unsupported
+  multi_pc:
+    coordinator_target: handle chunks locally
+    remote_executor_target: relay transfer state and chunks over existing node connection
+    remote_executor_public_endpoint: false
+  desktop_commander:
+    reuse_for:
+      - search
+      - normal reads
+      - partial edits
+      - process execution
+    direct_rdmcp_exception:
+      - raw byte reads required by file transfer
+      - temporary-file writes required by file transfer
+    no_desktop_commander_fork_required: true
+  protected_configuration:
+    target: Desktop Commander server configuration file
+    recommended_location: outside Desktop Commander and RemoteDesktopMCP allowed directories
+    excluded_apis:
+      - file_search
+      - content_search
+      - file_read
+      - file_patch
+      - file_transfer_*
+    search_must_not_scan_file: true
+    path_identity: canonical/resolved path
+    process_start_isolation: not_guaranteed
+    reason: process_start intentionally has the MCP server OS user's authority
+
+files:
+  changed:
+    - doc/design/functional-requirements.md
+    - doc/design/multi-pc-architecture.md
+    - doc/design/tailscale-funnel-architecture.md
+    - tools/lint/markdown-whitelist.yaml
+  report:
+    - doc/report/2026-09-24-pr1-file-transfer-design.md
+    - doc/report/2026-09-24-pr1-file-transfer-design-handoff.yaml
+
+validation:
+  technical_head: e11fc23c12aa17e3d95bbfd623c90ea862c01feb
+  npm_run_lint: passed
+  markdownlint: "28 files / 0 issues"
+  terminology_lint: passed
+  unknown_terms: 0
+  npm_run_check: passed
+  npm_run_build: passed
+  npm_audit:
+    result: passed
+    vulnerabilities: 0
+  git_diff_check: passed
+  publication_candidate:
+    markdownlint: "29 files / 0 issues"
+    handoff_yaml: passed
+    npm_run_check: passed
+    npm_run_build: passed
+    npm_audit: passed with 0 vulnerabilities
+    git_diff_check: passed
+implementation:
+  performed: false
+  reason: user requested design only
+  next_runtime_work:
+    - implement transfer state management
+    - implement chunk byte transport
+    - implement upload temporary-file commit
+    - implement protected Desktop Commander config exclusion
+    - add transfer tests
+
+ci:
+  required: true
+  final_publication_head: pending
+  exact_head_run_id: null
+  conclusion: pending
+  rule: only use a run whose head_sha equals current PR HEAD
+
+tasks_status:
+  path: tasks/tasks-status.md
+  state: absent
+
+merge:
+  performed: false
+  boundary: merge is reserved for the user
+
+next_action:
+  type: review_or_implementation
+  summary: Review the file-transfer design, then implement only when the user requests it.
