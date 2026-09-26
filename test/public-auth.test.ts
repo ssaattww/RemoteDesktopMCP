@@ -549,7 +549,7 @@ test("REMOTE-NR-002: startup, CLI, and state loading reject broad existing secre
   const sentinel = "fixture-existing-secret-must-not-be-loaded";
   try {
     await protectPrivateDirectory(base);
-    await Promise.all([mkdir(data), mkdir(root)]);
+    await mkdir(data);
     await protectPrivateDirectory(data);
     await createPrivateFile(stateFile, JSON.stringify({ version: 1, epoch: 1, allowedSubjects: [], refreshes: [], families: {} }));
     await grantBuiltinUsersRead(stateFile);
@@ -557,7 +557,7 @@ test("REMOTE-NR-002: startup, CLI, and state loading reject broad existing secre
     await createPrivateFile(envFile, [
       `BASE_URL=${baseUrl}`, "REMOTE_AUTH_MODE=google", `TOKEN_SECRET=${sentinel}`,
       "GOOGLE_CLIENT_ID=fixture-client", `GOOGLE_CLIENT_SECRET=${sentinel}`, `GOOGLE_REDIRECT_URI=${baseUrl}/google/callback`,
-      `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${data}`,
+      `DATA_DIR=${data}`,
     ].join("\n"));
     await grantBuiltinUsersRead(envFile);
     const cli = await runCli(base, ["authorize-google"], 3_000);
@@ -578,7 +578,7 @@ test("REMOTE-NR-002: configure creates a strict .env from a safe ordinary checko
   try {
     await protectPrivateDirectory(base);
     await grantBuiltinUsersRead(base);
-    await Promise.all([mkdir(root), writeFile(clientFile, JSON.stringify({ web: { client_id: "fixture-client", client_secret: "fixture-client-secret" } }))]);
+    await writeFile(clientFile, JSON.stringify({ web: { client_id: "fixture-client", client_secret: "fixture-client-secret" } }));
     const configured = await runCli(base, ["configure", clientFile, "--base-url", baseUrl, "--root", root, "--data-dir", data]);
     assert.equal(configured.code, 0);
     await assertPrivateFile(path.join(base, ".env"));
@@ -592,7 +592,7 @@ test("RA-09: configure writes only a new isolated .env and never prints the Goog
   const clientFile = path.join(base, "google-client.json");
   const clientSecret = "cli-fixture-secret-must-not-print";
   await protectPrivateDirectory(base);
-  await Promise.all([mkdir(root), mkdir(data), writeFile(clientFile, JSON.stringify({ web: { client_id: "fixture-client", client_secret: clientSecret } }))]);
+  await Promise.all([mkdir(data), writeFile(clientFile, JSON.stringify({ web: { client_id: "fixture-client", client_secret: clientSecret } }))]);
   await protectPrivateDirectory(data);
   try {
     const configured = await runCli(base, ["configure", clientFile, "--base-url", baseUrl, "--root", root, "--data-dir", data]);
@@ -601,12 +601,10 @@ test("RA-09: configure writes only a new isolated .env and never prints the Goog
     const env = await readFile(path.join(base, ".env"), "utf8");
     assert.match(env, /^REMOTE_AUTH_MODE=google$/m);
     assert.match(env, new RegExp(`^GOOGLE_REDIRECT_URI=${baseUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/google/callback$`, "m"));
-    const existing = await runCli(base, ["configure", clientFile, "--base-url", baseUrl, "--root", root, "--data-dir", data]);
+    const existing = await runCli(base, ["configure", clientFile, "--base-url", baseUrl, "--data-dir", data]);
     assert.notEqual(existing.code, 0, "an existing .env must never be overwritten");
     assert.equal(`${existing.stdout}${existing.stderr}`.includes(clientSecret), false);
-    const overlap = await runCli(path.join(base, "overlap"), ["configure", clientFile, "--base-url", baseUrl, "--root", root, "--data-dir", root]);
-    assert.notEqual(overlap.code, 0, "DATA_DIR cannot overlap a permitted root");
-    const badUrl = await runCli(path.join(base, "bad-url"), ["configure", clientFile, "--base-url", "http://not-public.example.test", "--root", root, "--data-dir", data]);
+    const badUrl = await runCli(path.join(base, "bad-url"), ["configure", clientFile, "--base-url", "http://not-public.example.test", "--data-dir", data]);
     assert.notEqual(badUrl.code, 0, "public configuration requires HTTPS");
   } finally {
     await rm(base, { recursive: true, force: true, maxRetries: 3 });
@@ -618,7 +616,6 @@ test("RA-09: password mode and incomplete Google settings fail closed for a publ
     BASE_URL: baseUrl,
     TOKEN_SECRET: "x".repeat(32),
     AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "owner@example.test", passwordHash: "scrypt$fixture$fixture" }]),
-    FILE_ROOTS_JSON: JSON.stringify([{ id: "workspace", path: path.resolve("reference", "validation") }]),
   };
   assert.throws(() => configFromEnv({ ...shared, REMOTE_AUTH_MODE: "password" }), /loopback/i);
   assert.throws(() => configFromEnv({ ...shared, REMOTE_AUTH_MODE: "google" }), /GOOGLE_CLIENT_ID/i);

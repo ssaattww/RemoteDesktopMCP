@@ -48,8 +48,8 @@ test("RDMCP-MVP-IFR-002: live config history prunes past 64 versions without los
     await captureProtectedConfigPin(f.service, f.data, alias);
     await writeFile(ordinary, "ordinary history file");
     let session = await openSession(api);
-    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "known-config-alias.json" }));
-    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-history.txt" })).output), /ordinary history file/);
+    await assert.rejects(api.call("file_read", { session_id: session, path: alias }));
+    assert.match(String((await api.call("file_read", { session_id: session, path: ordinary })).output), /ordinary history file/);
 
     const capture = (f.service as unknown as { rememberProtectedConfigIdentity: () => Promise<void> }).rememberProtectedConfigIdentity.bind(f.service);
     for (let version = 0; version < 70; version++) {
@@ -59,13 +59,13 @@ test("RDMCP-MVP-IFR-002: live config history prunes past 64 versions without los
       await capture();
     }
 
-    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "known-config-alias.json" }), "the known hard-link alias survives history pruning");
-    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-history.txt" })).output), /ordinary history file/);
+    await assert.rejects(api.call("file_read", { session_id: session, path: alias }), "the known hard-link alias survives history pruning");
+    assert.match(String((await api.call("file_read", { session_id: session, path: ordinary })).output), /ordinary history file/);
 
     await api.close(); await f.service.close();
     restarted = new RemoteDesktopService(f.service.cfg); await restarted.initialize(); api = await mcp(restarted); session = await openSession(api);
-    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "known-config-alias.json" }), "restart preserves known config protection after pruning");
-    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-history.txt" })).output), /ordinary history file/);
+    await assert.rejects(api.call("file_read", { session_id: session, path: alias }), "restart preserves known config protection after pruning");
+    assert.match(String((await api.call("file_read", { session_id: session, path: ordinary })).output), /ordinary history file/);
   } finally { await api.close(); await restarted?.close(); await f.cleanup(); }
 });
 
@@ -99,9 +99,9 @@ test("RDMCP-MVP-IFR-002: real pin-link replacements settle or fail closed within
     await writeFile(path.join(f.root, "retry-ordinary.txt"), "ordinary retry file");
     stableApi = await mcp(stable);
     const stableSession = await openSession(stableApi);
-    await assert.rejects(stableApi.call("file_read", { session_id: stableSession, root_id: "files", relative_path: "retry-known-a.json" }));
-    await assert.rejects(stableApi.call("file_read", { session_id: stableSession, root_id: "files", relative_path: "retry-known-b.json" }));
-    assert.match(String((await stableApi.call("file_read", { session_id: stableSession, root_id: "files", relative_path: "retry-ordinary.txt" })).output), /ordinary retry file/);
+    await assert.rejects(stableApi.call("file_read", { session_id: stableSession, path: aliasA }));
+    await assert.rejects(stableApi.call("file_read", { session_id: stableSession, path: aliasB }));
+    assert.match(String((await stableApi.call("file_read", { session_id: stableSession, path: path.join(f.root, "retry-ordinary.txt") })).output), /ordinary retry file/);
 
     await unstableFixture.service.close();
     const readyBefore = (await auditEvents(unstableFixture.data)).filter((entry) => entry.event === "desktop_commander.ready").length;
@@ -134,13 +134,13 @@ test("RDMCP-MVP-IFR-003: uploads and downloads share one active-transfer cap", a
     const source = Buffer.from("download source");
     await Promise.all(Array.from({ length: 10 }, (_, index) => writeFile(path.join(f.root, `cap-source-${index}.txt`), source)));
     for (let index = 0; index < 10; index++) {
-      await api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: `cap-upload-${index}.bin`, size: 1, sha256: digest(Buffer.from("x")), overwrite: false });
-      await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: `cap-source-${index}.txt` });
+      await api.call("file_transfer_upload_begin", { session_id: session, path: path.join(f.root, `cap-upload-${index}.bin`), size: 1, sha256: digest(Buffer.from("x")), overwrite: false });
+      await api.call("file_transfer_download_begin", { session_id: session, path: path.join(f.root, `cap-source-${index}.txt`) });
     }
     assert.equal([...f.service.transfers.values()].filter((item) => item.state === "active").length, 20);
     const beforeRoot = (await readdir(f.root)).sort();
     const beforeManifest = await readFile(manifest, "utf8");
-    await assert.rejects(api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: "cap-overflow.bin", size: 1, sha256: digest(Buffer.from("y")), overwrite: false }));
+    await assert.rejects(api.call("file_transfer_upload_begin", { session_id: session, path: path.join(f.root, "cap-overflow.bin"), size: 1, sha256: digest(Buffer.from("y")), overwrite: false }));
     assert.equal([...f.service.transfers.values()].filter((item) => item.state === "active").length, 20, "overflow must not create transfer state");
     assert.deepEqual((await readdir(f.root)).sort(), beforeRoot, "overflow must not leave a temporary upload file");
     assert.equal(await readFile(manifest, "utf8"), beforeManifest, "overflow must not create an owned-upload manifest record");
@@ -154,7 +154,7 @@ test("RDMCP-MVP-IFR-006: successful multi-chunk uploads commit exact bytes and c
     const session = await openSession(api);
     const manifest = path.join(f.data, "transfers", "owned-uploads.json");
     const commit = async (name: string, bytes: Buffer, overwrite: boolean) => {
-      const begun = await api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: name, size: bytes.length, sha256: digest(bytes), overwrite });
+      const begun = await api.call("file_transfer_upload_begin", { session_id: session, path: path.join(f.root, name), size: bytes.length, sha256: digest(bytes), overwrite });
       const id = begun.transfer_id as string;
       const item = f.service.transfers.get(id)!;
       for (let offset = 0; offset < bytes.length; offset += 1024) {

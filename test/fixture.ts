@@ -29,7 +29,7 @@ export async function fixture(): Promise<Fixture> {
     baseUrl: "http://127.0.0.1",
     tokenSecret: "x".repeat(32),
     users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }],
-    roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024,
+    dataDir: data, port: 0, chunkBytes: 1024,
     nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath,
     dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"],
     allowedRedirectOrigins: new Set(["https://chatgpt.com"]),

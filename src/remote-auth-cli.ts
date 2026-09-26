@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, readFile, realpath } from "node:fs/promises";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
@@ -12,8 +11,6 @@ import { assertPrivateFile, assertSafePrivateParent, createPrivateFile, ensurePr
 
 const LOCAL_CALLBACK = "http://localhost:8765/callback";
 const current = process.cwd();
-const inside = (parent: string, candidate: string) => { const relative = path.relative(parent, candidate); return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)); };
-const overlaps = (a: string, b: string) => inside(a, b) || inside(b, a);
 const argument = (name: string) => { const position = process.argv.indexOf(name); return position >= 0 ? process.argv[position + 1] : undefined; };
 const ask = async (prompt: string) => { const terminal = createInterface({ input, output }); try { return (await terminal.question(prompt)).trim(); } finally { terminal.close(); } };
 const secret = () => randomBytes(32).toString("base64url");
@@ -24,19 +21,16 @@ async function configure(source: string) {
   if (typeof client !== "object" || client === null || typeof (client as { client_id?: unknown }).client_id !== "string" || typeof (client as { client_secret?: unknown }).client_secret !== "string") throw new Error("The Google Web OAuth client JSON is invalid.");
   const baseUrl = (argument("--base-url") ?? process.env.BASE_URL ?? await ask("Public BASE_URL (https://…): ")).replace(/\/$/, "");
   const parsed = new URL(baseUrl); if (parsed.protocol !== "https:") throw new Error("The public BASE_URL must use HTTPS.");
-  const requestedRoot = path.resolve(argument("--root") ?? path.join(os.homedir(), "RemoteDesktopWorkspace"));
-  const requestedDataDir = path.resolve(argument("--data-dir") ?? path.join(os.homedir(), "RemoteDesktopMCP-data"));
-  await mkdir(requestedRoot, { recursive: true, mode: 0o700 }); await ensurePrivateDirectory(requestedDataDir);
-  const root = await realpath(requestedRoot); const dataDir = await realpath(requestedDataDir);
-  const envPath = path.join(current, ".env"); const sourcePath = await realpath(path.resolve(source));
-  if (overlaps(root, dataDir) || inside(root, envPath) || inside(root, sourcePath)) throw new Error("The permitted workspace must not contain DATA_DIR, .env, or the Google client JSON.");
+  const dataDir = path.resolve(argument("--data-dir") ?? path.join(current, "data"));
+  await ensurePrivateDirectory(dataDir);
+  const envPath = path.join(current, ".env");
   const lines = [
     `BASE_URL=${baseUrl}`, "PORT=3000", "REMOTE_AUTH_MODE=google", `TOKEN_SECRET=${secret()}`,
     `GOOGLE_CLIENT_ID=${(client as { client_id: string }).client_id}`, `GOOGLE_CLIENT_SECRET=${(client as { client_secret: string }).client_secret}`, `GOOGLE_REDIRECT_URI=${baseUrl}/google/callback`, `GOOGLE_LOCAL_REDIRECT_URI=${LOCAL_CALLBACK}`,
-    `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${dataDir}`, "LOCAL_NODE_ID=local", "LOCAL_NODE_LABEL=This PC", "TRANSFER_CHUNK_BYTES=131072",
+    `DATA_DIR=${dataDir}`, "LOCAL_NODE_ID=local", "LOCAL_NODE_LABEL=This PC", "TRANSFER_CHUNK_BYTES=131072",
   ];
   await createPrivateFile(envPath, `${lines.join("\n")}\n`);
-  console.log("Created .env with Google mode. Keep the Google client JSON and .env outside the permitted workspace.");
+  console.log("Created .env with Google mode. File tools accept absolute paths available to this OS account; DATA_DIR remains reserved for service state.");
 }
 
 async function authorizeGoogle() {
@@ -72,4 +66,4 @@ async function authorizeGoogle() {
 const command = process.argv[2];
 if (command === "configure" && process.argv[3]) await configure(process.argv[3]);
 else if (command === "authorize-google") await authorizeGoogle();
-else console.error("Usage: npm run remote-auth -- configure <google-client.json> [--base-url https://host] [--root path] | authorize-google");
+else console.error("Usage: npm run remote-auth -- configure <google-client.json> [--base-url https://host] [--data-dir path] | authorize-google");

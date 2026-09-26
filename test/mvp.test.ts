@@ -10,7 +10,7 @@ import { hashPassword } from "../src/hash-password.js";
 import { RemoteDesktopService, configFromEnv, createApp, type RuntimeConfig } from "../src/index.js";
 import { protectPrivateDirectory } from "../src/private-storage.js";
 
-async function fixture(): Promise<{ service: RemoteDesktopService; root: string; cleanup: () => Promise<void> }> {
+async function fixture(): Promise<{ service: RemoteDesktopService; root: string; data: string; cleanup: () => Promise<void> }> {
   const workspace = path.resolve(process.cwd());
   const validation = path.resolve(workspace, "reference", "validation");
   const relativeValidation = path.relative(workspace, validation);
@@ -22,11 +22,11 @@ async function fixture(): Promise<{ service: RemoteDesktopService; root: string;
   const root = path.join(base, "files"); const data = path.join(base, "data");
   await mkdir(root); await mkdir(data);
   await protectPrivateDirectory(data);
-  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
+  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
   const service = new RemoteDesktopService(cfg);
   try { await service.initialize(); }
   catch (error) { await service.close().catch(() => undefined); await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined); throw error; }
-  return { service, root, cleanup: async () => { await service.close(); await rm(base, { recursive: true, force: true }); } };
+  return { service, root, data, cleanup: async () => { await service.close(); await rm(base, { recursive: true, force: true }); } };
 }
 async function mcp(service: RemoteDesktopService, user = "owner@example.test") {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -41,17 +41,69 @@ async function mcp(service: RemoteDesktopService, user = "owner@example.test") {
   return { call, close: async () => { await client.close(); await server.close(); } };
 }
 
-test("configuration fails before Desktop Commander for protected root overlap", async () => {
-  const validation = path.resolve(process.cwd(), "reference", "validation");
-  await mkdir(validation, { recursive: true });
-  const base = await mkdtemp(path.join(validation, "rdmcp-overlap-"));
-  const data = path.join(base, "data");
+test("configuration does not require a file-root allowlist", () => {
+  const cfg = configFromEnv({
+    BASE_URL: "http://127.0.0.1",
+    TOKEN_SECRET: "x".repeat(32),
+    AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]),
+    DATA_DIR: path.resolve("reference", "validation", "config-data"),
+  });
+  assert.equal((cfg as unknown as { roots?: unknown }).roots, undefined);
+});
+
+test("file and transfer tools accept absolute OS paths while service state stays protected", async () => {
+  const f = await fixture();
+  const outside = path.join(path.dirname(f.root), "outside");
+  await mkdir(outside);
+  const source = path.join(outside, "outside.txt");
+  await writeFile(source, "before unrestricted access");
+  const api = await mcp(f.service);
   try {
-    await mkdir(data); await protectPrivateDirectory(data);
-    const env = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]), FILE_ROOTS_JSON: JSON.stringify([{ id: "r", path: data }]), DATA_DIR: data };
-    const cfg = configFromEnv(env); const service = new RemoteDesktopService(cfg);
-    await assert.rejects(service.initialize(), /must not overlap/);
-  } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }
+    const opened = await api.call("session_open", {});
+    const session = opened.session_id as string;
+    const nodes = await api.call("node_list", { session_id: session });
+    const node = (nodes.nodes as Array<Record<string, unknown>>)[0];
+    assert.equal("root_ids" in node, false);
+
+    const read = await api.call("file_read", { session_id: session, path: source });
+    assert.match(String(read.output), /before unrestricted access/);
+    await api.call("file_patch", { session_id: session, path: source, old_string: "before", new_string: "after", expected_replacements: 1 });
+    assert.equal(await readFile(source, "utf8"), "after unrestricted access");
+
+    const files = await api.call("file_search", { session_id: session, path: outside, query: "outside.txt" });
+    assert.match(String(files.output), /outside\.txt/);
+    const content = await api.call("content_search", { session_id: session, path: outside, query: "after unrestricted" });
+    assert.match(String(content.output), /outside\.txt/);
+
+    const payload = Buffer.from("absolute upload");
+    const sha256 = createHash("sha256").update(payload).digest("hex");
+    const uploadPath = path.join(outside, "upload.bin");
+    const upload = await api.call("file_transfer_upload_begin", { session_id: session, path: uploadPath, size: payload.length, sha256, overwrite: false });
+    await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: payload.toString("base64") });
+    await api.call("file_transfer_upload_commit", { session_id: session, transfer_id: upload.transfer_id });
+    assert.deepEqual(await readFile(uploadPath), payload);
+
+    const download = await api.call("file_transfer_download_begin", { session_id: session, path: uploadPath });
+    const chunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: download.transfer_id, offset: 0 });
+    assert.deepEqual(Buffer.from(chunk.data as string, "base64"), payload);
+
+    await assert.rejects(api.call("file_read", { session_id: session, path: path.join(f.data, "audit.jsonl") }), /Protected service files/);
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
+
+test("file tools require absolute OS paths", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    const opened = await api.call("session_open", {});
+    await assert.rejects(api.call("file_read", { session_id: opened.session_id, path: "relative.txt" }), /absolute path/);
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
 });
 
 test("OAuth authorization code is PKCE-bound and one use", async () => {
@@ -86,11 +138,11 @@ test("transfer snapshot remains immutable and no-replace preserves a racing dest
     const other = await mcp(f.service, "other@example.test");
     await assert.rejects(other.call("node_list", { session_id: session }));
     await other.close();
-    const begin = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "source.bin" }); const transfer = begin.transfer_id as string;
+    const begin = await api.call("file_transfer_download_begin", { session_id: session, path: source }); const transfer = begin.transfer_id as string;
     await writeFile(source, Buffer.from("changed! content")); await utimes(source, originalStat.atime, originalStat.mtime);
     const chunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: transfer, offset: 0 }); assert.deepEqual(Buffer.from(chunk.data as string, "base64"), original);
     const payload = Buffer.from("upload data"); const digest = createHash("sha256").update(payload).digest("hex");
-    const upload = await api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: "race.bin", size: payload.length, sha256: digest, overwrite: false });
+    const upload = await api.call("file_transfer_upload_begin", { session_id: session, path: path.join(f.root, "race.bin"), size: payload.length, sha256: digest, overwrite: false });
     await assert.rejects(api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: "***" }));
     await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: payload.toString("base64") });
     await writeFile(path.join(f.root, "race.bin"), "winner");

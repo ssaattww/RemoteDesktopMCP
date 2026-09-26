@@ -81,8 +81,8 @@ async function openSession(api: Awaited<ReturnType<typeof mcp>>) {
   return (await api.call("session_open", {})).session_id as string;
 }
 
-async function upload(api: Awaited<ReturnType<typeof mcp>>, session: string, name: string, bytes: Buffer, overwrite = false) {
-  const begun = await api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: name, size: bytes.length, sha256: sha256(bytes), overwrite });
+async function upload(api: Awaited<ReturnType<typeof mcp>>, session: string, target: string, bytes: Buffer, overwrite = false) {
+  const begun = await api.call("file_transfer_upload_begin", { session_id: session, path: target, size: bytes.length, sha256: sha256(bytes), overwrite });
   return begun.transfer_id as string;
 }
 
@@ -95,7 +95,7 @@ test("DR001: downloads use one immutable multi-chunk snapshot and clean failed s
     await writeFile(source, original);
     const originalStat = await stat(source);
     const session = await openSession(api);
-    const begun = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "source.bin" });
+    const begun = await api.call("file_transfer_download_begin", { session_id: session, path: source });
     const id = begun.transfer_id as string;
     const replacement = path.join(f.root, "replacement.bin");
     await writeFile(replacement, Buffer.alloc(original.length, 0x5a));
@@ -110,7 +110,7 @@ test("DR001: downloads use one immutable multi-chunk snapshot and clean failed s
     assert.equal(sha256(Buffer.concat(chunks)), begun.sha256);
     assert.equal(f.service.transfers.get(id)?.state, "complete", "completed transfers retain only bounded terminal metadata");
 
-    const failing = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "source.bin" });
+    const failing = await api.call("file_transfer_download_begin", { session_id: session, path: source });
     const failedId = failing.transfer_id as string;
     const failed = f.service.transfers.get(failedId)!;
     await unlink(failed.snapshot!);
@@ -124,7 +124,7 @@ test("DR002: no-replace commit preserves a winner and removes the losing temp", 
   const f = await fixture(); const api = await mcp(f.service);
   try {
     const session = await openSession(api); const payload = Buffer.from("losing upload");
-    const id = await upload(api, session, "race.bin", payload);
+    const id = await upload(api, session, path.join(f.root, "race.bin"), payload);
     const item = f.service.transfers.get(id)!;
     await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: id, offset: 0, data: payload.toString("base64") });
     await writeFile(path.join(f.root, "race.bin"), "winner");
@@ -142,7 +142,7 @@ test("DR002: upload begin fails safely when the destination lacks atomic no-repl
     const cfg = { ...f.service.cfg, linkNoReplace: async () => { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); } };
     unsupported = new RemoteDesktopService(cfg); await unsupported.initialize(); api = await mcp(unsupported);
     const session = await openSession(api);
-    await assert.rejects(upload(api, session, "unsupported.bin", Buffer.from("x")));
+    await assert.rejects(upload(api, session, path.join(f.root, "unsupported.bin"), Buffer.from("x")));
     assert.equal(unsupported.transfers.size, 0, "unsupported storage must fail before creating transfer state");
     assert.deepEqual((await readdir(f.root)).filter((name) => name.startsWith(".__rdmcp_")), [], "capability probes must clean their own artifacts");
   } finally { await api?.close(); await unsupported?.close(); await f.cleanup(); }
@@ -157,7 +157,7 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     const replacement = `${protectedPath}.replacement`;
     const pinDirectory = path.join(f.data, "transfers", "protected-config-pins");
     await captureProtectedConfigPin(service, f.data, historicalAlias);
-    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-historical-alias.json" }), "the known protected A inode before replacement", f.data, service, historicalAlias);
+    await expectRejected(api.call("file_read", { session_id: session, path: historicalAlias }), "the known protected A inode before replacement", f.data, service, historicalAlias);
 
     // Stop Desktop Commander before manually replacing config.json.  Its asynchronous
     // usage tracker may otherwise atomically replace the file between our rename and
@@ -186,9 +186,9 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     const pinnedIdentities = await Promise.all((await readdir(pinDirectory)).map(async (name) => stat(path.join(pinDirectory, name), { bigint: true })));
     assert.ok(pinnedIdentities.some((info) => info.dev === capturedIdentity.dev && info.ino === capturedIdentity.ino), "the replacement alias must retain the exact dev:ino recorded by a private pin");
     const replacementSession = await openSession(api);
-    await expectRejected(api.call("file_read", { session_id: replacementSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the retained config inode", f.data, service);
-    await expectRejected(api.call("file_read", { session_id: replacementSession, root_id: "files", relative_path: "config-current-alias.json" }), "the replacement config inode captured by its private pin", f.data, service, currentAlias);
-    await assert.rejects(api.call("content_search", { session_id: replacementSession, root_id: "files", query: "allowedDirectories" }));
+    await expectRejected(api.call("file_read", { session_id: replacementSession, path: historicalAlias }), "the retained config inode", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: replacementSession, path: currentAlias }), "the replacement config inode captured by its private pin", f.data, service, currentAlias);
+    await assert.rejects(api.call("content_search", { session_id: replacementSession, path: f.root, query: "allowedDirectories" }));
 
     for (let index = 0; index < 128; index++) {
       const churn = path.join(f.root, `inode-churn-${index}.txt`);
@@ -199,11 +199,11 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     await api.close(); await service.close();
     service = new RemoteDesktopService(f.service.cfg); await service.initialize(); api = await mcp(service);
     const restartedSession = await openSession(api);
-    await expectRejected(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the persisted historical config inode", f.data, service);
-    await expectRejected(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "config-current-alias.json" }), "the persisted replacement config inode", f.data, service);
-    assert.match(String((await api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "ordinary-after-replacement.txt" })).output), /ordinary file remains readable/);
+    await expectRejected(api.call("file_read", { session_id: restartedSession, path: historicalAlias }), "the persisted historical config inode", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: restartedSession, path: currentAlias }), "the persisted replacement config inode", f.data, service);
+    assert.match(String((await api.call("file_read", { session_id: restartedSession, path: path.join(f.root, "ordinary-after-replacement.txt") })).output), /ordinary file remains readable/);
 
-    const bytes = Buffer.from("x"); const id = await upload(api, restartedSession, "swap.bin", bytes, true);
+    const bytes = Buffer.from("x"); const id = await upload(api, restartedSession, path.join(f.root, "swap.bin"), bytes, true);
     const item = service.transfers.get(id)!;
     const stableTargetAlias = path.join(f.root, "config-swap-target-alias.json");
     await link(protectedPath, stableTargetAlias);
@@ -213,8 +213,8 @@ test("DR003: protected config aliases cannot be read, searched, or reached by a 
     assert.equal(sha256(await readFile(stableTargetAlias)), stableTargetDigest, "a path swap must never write the exact protected inode swapped into the temp path");
     assert.equal(service.transfers.get(id)?.state, "failed");
 
-    await assert.rejects(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "../data/audit.jsonl" }));
-    await expectRejected(api.call("file_read", { session_id: restartedSession, root_id: "files", relative_path: "config-historical-alias.json" }), "the historical config inode after all operations", f.data, service);
+    await assert.rejects(api.call("file_read", { session_id: restartedSession, path: path.join(f.data, "audit.jsonl") }));
+    await expectRejected(api.call("file_read", { session_id: restartedSession, path: historicalAlias }), "the historical config inode after all operations", f.data, service);
   } finally { await api.close(); await service.close(); await f.cleanup(); }
 });
 
@@ -226,7 +226,7 @@ test("DR003: a config replacement during pin linking preserves known history and
     await captureProtectedConfigPin(f.service, f.data, knownAlias);
     api = await mcp(f.service);
     const knownSession = await openSession(api);
-    await expectRejected(api.call("file_read", { session_id: knownSession, root_id: "files", relative_path: "config-known-before-race.json" }), "the known config inode before the pin-link race", f.data, f.service);
+    await expectRejected(api.call("file_read", { session_id: knownSession, path: knownAlias }), "the known config inode before the pin-link race", f.data, f.service);
     await api.close(); api = undefined; await f.service.close();
 
     let replacedDuringPin = false;
@@ -253,10 +253,10 @@ test("DR003: a config replacement during pin linking preserves known history and
     await writeFile(path.join(f.root, "ordinary-after-pin-race.txt"), "ordinary pin-race file");
     api = await mcp(service);
     const session = await openSession(api);
-    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-known-before-race.json" }), "the known historical config inode after the pin-link race", f.data, service);
-    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-version-linked-during-pin.json" }), "the config inode actually linked during the pin-link race", f.data, service, pinnedVersionAlias);
+    await expectRejected(api.call("file_read", { session_id: session, path: knownAlias }), "the known historical config inode after the pin-link race", f.data, service);
+    await expectRejected(api.call("file_read", { session_id: session, path: pinnedVersionAlias }), "the config inode actually linked during the pin-link race", f.data, service, pinnedVersionAlias);
     try {
-      assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-after-pin-race.txt" })).output), /ordinary pin-race file/);
+      assert.match(String((await api.call("file_read", { session_id: session, path: path.join(f.root, "ordinary-after-pin-race.txt") })).output), /ordinary pin-race file/);
     } catch (error) {
       throw new Error(`ordinary file after pin-link race was rejected: ${error instanceof Error ? error.message : "unknown"}; ${await safeDcDiagnostics(f.data, service, path.join(f.root, "ordinary-after-pin-race.txt"))}`);
     }
@@ -291,8 +291,8 @@ test("DR003: exact bigint identity keys distinguish adjacent unsafe ids while pr
     assert.ok(identityManifest.length > 0 && identityManifest.every((entry) => typeof entry.dev === "string" && /^\d+$/.test(entry.dev) && typeof entry.ino === "string" && /^\d+$/.test(entry.ino)), "new protected-config manifests must persist exact decimal bigint identities");
 
     const session = await openSession(api);
-    await expectRejected(api.call("file_read", { session_id: session, root_id: "files", relative_path: "config-exact-identity-alias.json" }), "the exact pinned alias", f.data, f.service, protectedAlias);
-    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary-exact-identity.txt" })).output), /ordinary bigint identity file/);
+    await expectRejected(api.call("file_read", { session_id: session, path: protectedAlias }), "the exact pinned alias", f.data, f.service, protectedAlias);
+    assert.match(String((await api.call("file_read", { session_id: session, path: ordinary })).output), /ordinary bigint identity file/);
   } finally { await api.close(); await f.cleanup(); }
 });
 
@@ -320,7 +320,7 @@ test("DR003: protected identity manifests accept safe legacy values and fail clo
   } finally { await rejected?.close(); await f.cleanup(); }
 });
 
-test("NR009: canonical allowed roots work through a symlink or Windows junction", async (t) => {
+test("NR009: absolute OS paths work through a symlink or Windows junction", async (t) => {
   const f = await fixture(); let service: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
   try {
     await f.service.close();
@@ -332,12 +332,12 @@ test("NR009: canonical allowed roots work through a symlink or Windows junction"
       throw error;
     }
     await writeFile(path.join(f.root, "ordinary.txt"), "ordinary allowed-root content");
-    service = new RemoteDesktopService({ ...f.service.cfg, roots: [{ id: "files", path: aliasedRoot }] });
+    service = new RemoteDesktopService(f.service.cfg);
     await service.initialize(); api = await mcp(service);
     const session = await openSession(api);
-    const read = await api.call("file_read", { session_id: session, root_id: "files", relative_path: "ordinary.txt" });
+    const read = await api.call("file_read", { session_id: session, path: path.join(aliasedRoot, "ordinary.txt") });
     assert.match(String(read.output), /ordinary allowed-root content/);
-    const search = await api.call("file_search", { session_id: session, root_id: "files", query: "ordinary" });
+    const search = await api.call("file_search", { session_id: session, path: aliasedRoot, query: "ordinary" });
     assert.match(String(search.output), /ordinary\.txt/);
   } finally { await api?.close(); await service?.close(); await f.cleanup(); }
 });
@@ -349,19 +349,19 @@ test("NR002 and NR006: expiry sweeps cancel transfers, clean files, and list ses
     const listed = await api.call("session_list", {});
     const row = (listed.sessions as Array<Record<string, unknown>>).find((value) => value.session_id === session);
     assert.equal(row?.state, "active"); assert.equal(typeof row?.expires_at, "string");
-    const id = await upload(api, session, "expired.bin", Buffer.from("x"));
+    const id = await upload(api, session, path.join(f.root, "expired.bin"), Buffer.from("x"));
     const item = f.service.transfers.get(id)!; item.touched = old();
     await f.service.sweepExpired();
     assert.equal(f.service.transfers.get(id)?.state, "expired"); await absent(item.temp!);
     assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: id })).state, "expired");
     await assert.rejects(api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: id, offset: 0, data: "eA==" }));
 
-    const cancellable = await upload(api, session, "cancel.bin", Buffer.from("x"));
+    const cancellable = await upload(api, session, path.join(f.root, "cancel.bin"), Buffer.from("x"));
     const cancellableItem = f.service.transfers.get(cancellable)!;
     await api.call("file_transfer_cancel", { session_id: session, transfer_id: cancellable });
     await absent(cancellableItem.temp!);
 
-    const session2 = await openSession(api); const id2 = await upload(api, session2, "session-expired.bin", Buffer.from("x"));
+    const session2 = await openSession(api); const id2 = await upload(api, session2, path.join(f.root, "session-expired.bin"), Buffer.from("x"));
     const item2 = f.service.transfers.get(id2)!;
     const expiredSession = f.service.sessions.get(session2)!;
     expiredSession.touched = Date.now() - 25 * 60 * 60_000;
@@ -389,7 +389,7 @@ test("NR008: startup preserves unowned lookalikes and removes only manifest-owne
     await mkdir(path.dirname(snapshot), { recursive: true });
     await Promise.all([writeFile(snapshot, "orphan"), writeFile(legitimate, "keep me"), writeFile(owned, "remove me")]);
     const identity = await stat(owned, { bigint: true });
-    await writeFile(manifest, JSON.stringify([{ rootId: "files", path: owned, dev: identity.dev.toString(), ino: identity.ino.toString() }]));
+    await writeFile(manifest, JSON.stringify([{ path: owned, dev: identity.dev.toString(), ino: identity.ino.toString() }]));
     restarted = new RemoteDesktopService(f.service.cfg); await restarted.initialize();
     await Promise.all([absent(snapshot), absent(owned)]);
     assert.equal(await readFile(legitimate, "utf8"), "keep me");
@@ -402,11 +402,11 @@ test("NR003 and NR004: searches return every page and portable Node processes re
     const session = await openSession(api);
     await Promise.all(Array.from({ length: 115 }, (_, index) => writeFile(path.join(f.root, `needle-${index}.txt`), `literal [term] ${index}`)));
     let files: Record<string, unknown>;
-    try { files = await api.call("file_search", { session_id: session, root_id: "files", query: "needle-" }); }
+    try { files = await api.call("file_search", { session_id: session, path: f.root, query: "needle-" }); }
     catch { throw new Error(`file_search returned an MCP error; ${await safeDcDiagnostics(f.data, f.service)}`); }
     const fileHits = new Set([...String(files.output).matchAll(/needle-(\d+)\.txt/g)].map((match) => Number(match[1])));
     assert.deepEqual([...fileHits].sort((left, right) => left - right), Array.from({ length: 115 }, (_, index) => index));
-    const content = await api.call("content_search", { session_id: session, root_id: "files", query: "[term]" });
+    const content = await api.call("content_search", { session_id: session, path: f.root, query: "[term]" });
     assert.match(String(content.output), /Pattern: "\[term\]"/);
     const contentHits = new Set([...String(content.output).matchAll(/needle-(\d+)\.txt/g)].map((match) => Number(match[1])));
     assert.deepEqual([...contentHits].sort((left, right) => left - right), Array.from({ length: 115 }, (_, index) => index));
@@ -526,9 +526,9 @@ test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, an
       return JSON.parse(response.content.find((item) => item.type === "text")?.text ?? "{}") as Record<string, unknown>;
     };
     const session = (await call("session_open", {})).session_id as string;
-    assert.match(String((await call("file_read", { session_id: session, root_id: "files", relative_path: "http.txt" })).output), /before/);
-    await call("file_patch", { session_id: session, root_id: "files", relative_path: "http.txt", old_string: "before", new_string: "after" });
-    assert.match(String((await call("content_search", { session_id: session, root_id: "files", query: "after" })).output), /after/);
+    assert.match(String((await call("file_read", { session_id: session, path: path.join(f.root, "http.txt") })).output), /before/);
+    await call("file_patch", { session_id: session, path: path.join(f.root, "http.txt"), old_string: "before", new_string: "after" });
+    assert.match(String((await call("content_search", { session_id: session, path: f.root, query: "after" })).output), /after/);
     await client.close();
   } finally { commander.call = originalCommanderCall; await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
@@ -564,15 +564,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     const api = await mcp(service);
     try {
       const session = await openSession(api);
-      assert.equal((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "anything.txt" })).output, "stub");
+      assert.equal((await api.call("file_read", { session_id: session, path: path.join(f.root, "anything.txt") })).output, "stub");
     } finally { await api.close(); }
   } finally { await service?.close(); await f.cleanup(); }
 });
 
-test("configuration rejects resolved overlap and traversal aliases", async () => {
-  const f = await fixture();
-  try {
-    const env = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]), FILE_ROOTS_JSON: JSON.stringify([{ id: "r", path: f.data }]), DATA_DIR: f.data };
-    await assert.rejects(new RemoteDesktopService(configFromEnv(env)).initialize(), /must not overlap/);
-  } finally { await f.cleanup(); }
-});
+
