@@ -86,6 +86,37 @@ async function upload(api: Awaited<ReturnType<typeof mcp>>, session: string, nam
   return begun.transfer_id as string;
 }
 
+test("Issue 13: published tool descriptions match session, file-root, transfer, and process boundaries", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    const tools = new Map((await api.listTools()).tools.map((tool) => [tool.name, tool.description ?? ""]));
+    const required = ["session_open", "node_list", "file_search", "content_search", "file_read", "file_patch", "file_transfer_download_begin", "file_transfer_download_chunk", "file_transfer_upload_begin", "file_transfer_upload_chunk", "file_transfer_upload_commit", "process_start", "process_output", "process_status", "process_kill"];
+    for (const name of required) assert.ok(tools.get(name)?.length, `${name} must have a useful published description`);
+    assert.match(api.getInstructions() ?? "", /authenticated caller/i);
+    assert.match(tools.get("session_open")!, /session_id/i);
+    for (const name of ["file_search", "content_search"]) assert.match(tools.get(name)!, /root_id/i);
+    for (const name of ["file_read", "file_patch", "file_transfer_download_begin", "file_transfer_upload_begin"]) {
+      assert.match(tools.get(name)!, /root_id/i);
+      assert.match(tools.get(name)!, /relative_path/i);
+    }
+    assert.match(tools.get("file_transfer_download_begin")!, /snapshot copy/i);
+    assert.match(tools.get("file_transfer_upload_commit")!, /SHA-256/i);
+    assert.match(tools.get("file_transfer_upload_commit")!, /atomic/i);
+    assert.match(tools.get("process_start")!, /OS user's existing permissions/i);
+    for (const name of ["process_output", "process_status", "process_kill"]) assert.match(tools.get(name)!, /same session_id/i);
+
+    const session = await openSession(api);
+    const outside = path.join(f.base, "outside-root.txt");
+    await writeFile(outside, "reachable-through-command");
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "../outside-root.txt" }), /Path/);
+    const script = path.join(f.base, "read-outside-root.cjs");
+    await writeFile(script, `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(outside)}, 'utf8'))`);
+    const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(script), timeout_ms: 10_000 });
+    assert.match(String(started.output), /reachable-through-command/, "process_start keeps the server OS user's file access outside configured file roots");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("DR001: downloads use one immutable multi-chunk snapshot and clean failed snapshots", async () => {
   const f = await fixture();
   const api = await mcp(f.service);
