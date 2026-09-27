@@ -165,7 +165,9 @@ MCP の認可には認可コード + PKCE (`S256`) を使用する。アクセ�
 ### ローカル設定と `process_start`
 
 初期版の `process_start` は、RemoteDesktopMCP を起動した OS ユーザーと同じ権限で
-任意のコマンドを実行してよい。
+任意のコマンドを実行してよい。Desktop Commander 自体も同じユーザー環境を継承し、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`HOME` などのユーザー固有の環境変数を RemoteDesktopMCP 側で別ディレクトリ向けに差し替えない。`process_start` の子プロセスもその環境を継承する。
+
+RemoteDesktopMCP 固有の状態と、RemoteDesktopMCP 専用の Desktop Commander 設定は `DATA_DIR` 配下に置く。専用設定の場所は専用起動処理で固定し、通常ユーザーの Desktop Commander 設定を変更しない。CLI ごとの環境変数による例外対応は行わない。同じ OS ユーザーが通常のローカル実行で更新した CLI 設定や認証状態は、新しい `process_start` から RemoteDesktopMCP の再起動なしで参照できること。
 そのため、その OS ユーザーが読み書きできる許可ユーザー設定、認証設定、
 `DATA_DIR` などは、`process_start` から起動したコマンドからも到達できる可能性がある。
 
