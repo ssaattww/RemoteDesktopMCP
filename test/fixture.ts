@@ -60,7 +60,7 @@ export async function mcp(service: RemoteDesktopService, user = "owner@example.t
   };
   return {
     call: async (name: string, args: Record<string, unknown>) => {
-      return callRaw(name, name === "session_open" ? { working_directory: process.cwd(), purpose: "Automated test", ...args } : args);
+      return callRaw(name, { comment: "Automated test execution", ...(name === "session_open" ? { working_directory: process.cwd(), purpose: "Automated test" } : {}), ...args });
     },
     callRaw,
     listTools: async () => client.listTools(),

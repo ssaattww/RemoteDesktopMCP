@@ -584,7 +584,7 @@ test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, an
     catch (error) { throw new Error(`NR005 MCP RPC failed at transport connect; DC trace=${trace()}`, { cause: error }); }
     const call = async (name: string, args: Record<string, unknown>) => {
       let response;
-      try { response = await client.callTool({ name, arguments: args }); }
+      try { response = await client.callTool({ name, arguments: { comment: "Automated HTTP regression", ...args } }); }
       catch (error) { throw new Error(`NR005 MCP RPC failed at ${name}; DC trace=${trace()}`, { cause: error }); }
       if (response.isError) throw new Error(`HTTP MCP ${name} returned isError; ${await safeDcDiagnostics(f.data, f.service)}`);
       return JSON.parse(response.content.find((item) => item.type === "text")?.text ?? "{}") as Record<string, unknown>;

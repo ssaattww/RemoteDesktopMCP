@@ -168,6 +168,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const latest = events.at(-1)!;
       const exit = events.filter((event) => event.event === "process.exit").at(-1);
       const command = start?.command ?? events.filter((event) => event.command !== undefined).at(-1)?.command;
+      const comment = start?.comment ?? events.filter((event) => event.comment !== undefined).at(-1)?.comment;
       const outputEvents = events.filter((event) => event.output !== undefined && event.event !== "process.exit");
       const earlierOutput = outputEvents.map((event) => String(event.output)).join("\n");
       if (exit?.output !== undefined && !earlierOutput.includes(String(exit.output))) {
@@ -175,7 +176,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
         const remaining = snapshot.startsWith(earlierOutput) ? snapshot.slice(earlierOutput.length).replace(/^\n/, "") : snapshot;
         if (remaining) outputEvents.push({ ...exit, output: remaining });
       }
-      return `<article class="process-block"><p>${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</p>${command === undefined ? "" : `<h3>コマンド</h3><pre>${escape(command)}</pre>`}${outputEvents.length ? `<h3>出力</h3>${outputEvents.map((event) => `<div class="output-part"><small>${event.event === "process.exit" ? "終了時の出力 · " : ""}${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
+      return `<article class="process-block"><p>${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</p>${comment === undefined ? "" : `<h3>実行目的</h3><pre>${escape(comment)}</pre>`}${command === undefined ? "" : `<h3>コマンド</h3><pre>${escape(command)}</pre>`}${outputEvents.length ? `<h3>出力</h3>${outputEvents.map((event) => `<div class="output-part"><small>${event.event === "process.exit" ? "終了時の出力 · " : ""}${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
     }).join("")}</section>`;
     return res.type("html").send(page(body + stopDetails, refreshSeconds));
   });
