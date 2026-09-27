@@ -22,7 +22,7 @@ async function fixture(): Promise<{ service: RemoteDesktopService; root: string;
   const root = path.join(base, "files"); const data = path.join(base, "data");
   await mkdir(root); await mkdir(data);
   await protectPrivateDirectory(data);
-  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
+  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
   const service = new RemoteDesktopService(cfg);
   try { await service.initialize(); }
   catch (error) { await service.close().catch(() => undefined); await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined); throw error; }
