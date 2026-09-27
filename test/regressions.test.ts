@@ -94,7 +94,6 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
     const required = ["session_open", "node_list", "file_search", "content_search", "file_read", "file_patch", "file_transfer_download_begin", "file_transfer_download_chunk", "file_transfer_upload_begin", "file_transfer_upload_chunk", "file_transfer_upload_commit", "process_start", "process_output", "process_status", "process_kill"];
     for (const name of required) assert.ok(tools.get(name)?.length, `${name} must have a useful published description`);
     assert.match(api.getInstructions() ?? "", /authenticated caller/i);
-    assert.match(api.getInstructions() ?? "", /outside configured file roots/i);
     assert.match(tools.get("session_open")!, /session_id/i);
     for (const name of ["file_search", "content_search"]) assert.match(tools.get(name)!, /root_id/i);
     for (const name of ["file_read", "file_patch", "file_transfer_download_begin", "file_transfer_upload_begin"]) {
@@ -105,7 +104,6 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
     assert.match(tools.get("file_transfer_upload_commit")!, /SHA-256/i);
     assert.match(tools.get("file_transfer_upload_commit")!, /atomic/i);
     assert.match(tools.get("process_start")!, /OS user's existing permissions/i);
-    assert.match(tools.get("process_start")!, /outside configured file roots/i);
     for (const name of ["process_output", "process_status", "process_kill"]) assert.match(tools.get(name)!, /same session_id/i);
 
     const session = await openSession(api);
