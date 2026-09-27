@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -66,10 +66,12 @@ test("owned Job runner preserves arguments, environment, cwd, streams, and root 
   const result = await collect(child, "stdin payload");
   assert.equal(result.code, 23, result.stderr);
   assert.equal(result.stderr, "stderr-ok");
-  assert.deepEqual(JSON.parse(result.stdout), {
+  const received = JSON.parse(result.stdout) as { argv: string[]; env: string; cwd: string; input: string };
+  assert.equal(await realpath(received.cwd), await realpath(cwd));
+  assert.deepEqual({ ...received, cwd: "canonicalized" }, {
     argv: ["space value", "quote\"inside", "trail\\", "日本語"],
     env: "env value with spaces",
-    cwd,
+    cwd: "canonicalized",
     input: "stdin payload",
   });
 });

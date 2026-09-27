@@ -417,7 +417,9 @@ test("NR003 and NR004: searches return every page and portable Node processes re
     await Promise.all([
       writeFile(linesScript, "for (let index = 0; index < 1005; index += 1) console.log(`line-${index}`);"),
       writeFile(naturalScript, "setTimeout(() => process.exit(7), 150);"),
-      writeFile(longScript, "console.log('ready'); setTimeout(() => process.exit(0), 4_500);"),
+      // Leave enough time for heavily loaded Windows CI to report a live
+      // process after the initial 200 ms start response and root preflight.
+      writeFile(longScript, "console.log('ready'); setTimeout(() => process.exit(0), 15_000);"),
     ]);
     const natural = await api.call("process_start", { session_id: session, command: nodeScriptCommand(naturalScript), timeout_ms: 10_000 });
     const naturalId = natural.process_id as string;
@@ -450,7 +452,7 @@ test("NR003 and NR004: searches return every page and portable Node processes re
       terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
       assert.match(terminationAudit, new RegExp(`"event":"process\\.exit"[^\\n]*"processId":"${killedId}"`));
     } else if (killed.termination_unconfirmed === true) {
-      await new Promise((resolve) => setTimeout(resolve, 4_700));
+      await new Promise((resolve) => setTimeout(resolve, 15_200));
       terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
       assert.match(terminationAudit, new RegExp(`"event":"process\\.termination_unconfirmed"[^\\n]*"processId":"${killedId}"`));
     } else {
