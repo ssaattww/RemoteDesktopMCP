@@ -19,6 +19,15 @@ async function waitForFile(file: string, timeoutMs = 15_000): Promise<string> {
   throw new Error(`Timed out waiting for test-owned marker ${path.basename(file)}.`);
 }
 
+async function waitForFileChange(file: string, previous: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await readFile(file, "utf8") !== previous) return;
+    await delay(50);
+  }
+  assert.fail(`Test-owned heartbeat ${path.basename(file)} stopped changing.`);
+}
+
 function processIsAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "EPERM") return true; return false; }
@@ -85,8 +94,7 @@ test("Windows emergency stop kills the owned Job descendants after their root ex
     testOwnedPids.add(rootPid);
     await waitForProcessExit(rootPid);
     const heartbeatBeforeStop = await waitForFile(descendantHeartbeat);
-    await delay(150);
-    assert.notEqual(await readFile(descendantHeartbeat, "utf8"), heartbeatBeforeStop, `the descendant must still be alive after its root exits (helperAlive=${processIsAlive(ownerProcess.pid)}, descendantAlive=${processIsAlive(descendantPid)}, helperPid=${ownerProcess.pid}, rootPid=${rootPid}, descendantPid=${descendantPid})`);
+    await waitForFileChange(descendantHeartbeat, heartbeatBeforeStop);
     assert.ok(processIsAlive(descendantPid));
 
     const otherStart = await otherApi.call("process_start", { session_id: otherSession, command: nodeScriptCommand(heartbeatScript), timeout_ms: 500 });
@@ -100,8 +108,7 @@ test("Windows emergency stop kills the owned Job descendants after their root ex
     await waitForProcessExit(ownerProcess.pid);
     await waitForProcessExit(descendantPid);
     const otherHeartbeatBefore = await readFile(otherHeartbeat, "utf8");
-    await delay(250);
-    assert.notEqual(await readFile(otherHeartbeat, "utf8"), otherHeartbeatBefore, "stopping one principal must leave the other principal's process running");
+    await waitForFileChange(otherHeartbeat, otherHeartbeatBefore);
     assert.ok(processIsAlive(otherPid));
 
     await f.service.stopUserExecution("other@example.test");
