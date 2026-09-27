@@ -59,6 +59,8 @@ export async function mcp(service: RemoteDesktopService, user = "owner@example.t
       if (response.isError) throw new Error(text);
       return JSON.parse(text) as Record<string, unknown>;
     },
+    listTools: async () => client.listTools(),
+    getInstructions: () => client.getInstructions(),
     close: async () => { await client.close(); await server.close(); },
   };
 }
