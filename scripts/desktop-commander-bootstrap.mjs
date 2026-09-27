@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { installDesktopCommanderOwnership, isOwnershipContextActive } from "./desktop-commander-ownership.mjs";
+import { installDesktopCommanderOwnership, isOwnershipContextActive, ownedProcessWorkingDirectory } from "./desktop-commander-ownership.mjs";
 import { prepareWindowsJobLauncher } from "./windows-job-launcher.mjs";
 
 const [, , entryArgument, configArgument, ...forwardedArguments] = process.argv;
@@ -45,8 +45,20 @@ try {
     // roots that remain alive until every managed descendant exits.
     const wrapSpawn = await prepareWindowsJobLauncher(isolatedHome);
     childProcess.spawn = wrapSpawn(childProcess.spawn, isOwnershipContextActive);
-    syncBuiltinESMExports();
   }
+  // Desktop Commander imports spawn by name. Keep the working directory tied
+  // to the authenticated session's owned start_process call on every platform.
+  const spawnWithOwnedCwd = childProcess.spawn;
+  childProcess.spawn = (...args) => {
+    const cwd = ownedProcessWorkingDirectory();
+    if (!cwd) return spawnWithOwnedCwd(...args);
+    const optionsIndex = Array.isArray(args[1]) ? 2 : 1;
+    const options = args[optionsIndex];
+    const next = args.slice();
+    next[optionsIndex] = { ...(options && typeof options === "object" ? options : {}), cwd };
+    return spawnWithOwnedCwd(...next);
+  };
+  syncBuiltinESMExports();
   // The bridge must be installed before Desktop Commander imports server.js
   // and registers its handlers. It deliberately supports the pinned package
   // layout only; a different entry cannot silently bypass owner isolation.

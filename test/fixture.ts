@@ -51,14 +51,18 @@ export async function mcp(service: RemoteDesktopService, user = "owner@example.t
   const client = new Client({ name: "regression-test", version: "1" });
   const server = service.server(user);
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  const callRaw = async (name: string, args: Record<string, unknown>) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.ok("content" in response);
+    const text = response.content.find((item) => item.type === "text")?.text ?? "";
+    if (response.isError) throw new Error(text);
+    return JSON.parse(text) as Record<string, unknown>;
+  };
   return {
     call: async (name: string, args: Record<string, unknown>) => {
-      const response = await client.callTool({ name, arguments: args });
-      assert.ok("content" in response);
-      const text = response.content.find((item) => item.type === "text")?.text ?? "";
-      if (response.isError) throw new Error(text);
-      return JSON.parse(text) as Record<string, unknown>;
+      return callRaw(name, name === "session_open" ? { working_directory: process.cwd(), purpose: "Automated test", ...args } : args);
     },
+    callRaw,
     listTools: async () => client.listTools(),
     getInstructions: () => client.getInstructions(),
     close: async () => { await client.close(); await server.close(); },

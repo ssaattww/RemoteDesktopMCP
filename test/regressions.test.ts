@@ -117,6 +117,37 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("Issue 9: sessions require a working directory and purpose, and commands start there", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    await assert.rejects(api.callRaw("session_open", {}));
+    await assert.rejects(api.callRaw("session_open", { purpose: "missing directory" }));
+    await assert.rejects(api.call("session_open", { working_directory: "relative/path", purpose: "relative path" }), /absolute directory/i);
+    await assert.rejects(api.call("session_open", { working_directory: path.join(f.base, "missing-directory"), purpose: "missing directory" }), /absolute directory/i);
+
+    const workingDirectory = path.join(f.base, "working-directory");
+    await mkdir(workingDirectory);
+    const marker = path.join(f.root, "outside-working-directory.txt");
+    await writeFile(marker, "available outside the working directory");
+    const script = path.join(f.base, "show-working-directory.cjs");
+    await writeFile(script, `process.stdout.write(process.cwd() + "|" + require("node:fs").readFileSync(${JSON.stringify(marker)}, "utf8"))`);
+
+    const opened = await api.call("session_open", { working_directory: workingDirectory, purpose: "Inspect a project" });
+    const session = String(opened.session_id);
+    assert.equal(opened.working_directory, workingDirectory);
+    assert.equal(opened.purpose, "Inspect a project");
+    const listed = await api.call("session_list", {}) as { sessions: Array<Record<string, unknown>> };
+    const row = listed.sessions.find((entry) => entry.session_id === session);
+    assert.equal(row?.working_directory, workingDirectory);
+    assert.equal(row?.purpose, "Inspect a project");
+
+    const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(script), timeout_ms: 10_000 });
+    assert.ok(String(started.output).includes(workingDirectory));
+    assert.match(String(started.output), /available outside the working directory/);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("DR001: downloads use one immutable multi-chunk snapshot and clean failed snapshots", async () => {
   const f = await fixture();
   const api = await mcp(f.service);
@@ -558,7 +589,7 @@ test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, an
       if (response.isError) throw new Error(`HTTP MCP ${name} returned isError; ${await safeDcDiagnostics(f.data, f.service)}`);
       return JSON.parse(response.content.find((item) => item.type === "text")?.text ?? "{}") as Record<string, unknown>;
     };
-    const session = (await call("session_open", {})).session_id as string;
+    const session = (await call("session_open", { working_directory: f.root, purpose: "HTTP file regression" })).session_id as string;
     assert.match(String((await call("file_read", { session_id: session, root_id: "files", relative_path: "http.txt" })).output), /before/);
     await call("file_patch", { session_id: session, root_id: "files", relative_path: "http.txt", old_string: "before", new_string: "after" });
     assert.match(String((await call("content_search", { session_id: session, root_id: "files", query: "after" })).output), /after/);

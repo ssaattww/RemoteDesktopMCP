@@ -10,6 +10,7 @@ const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
 const privateResult = (v) => ({ content: [{ type: "text", text: JSON.stringify(v) }] });
 const schemaMethod = (s) => s?.shape?.method?.value;
 export const isOwnershipContextActive = () => Boolean(ownershipContext.getStore());
+export const ownedProcessWorkingDirectory = () => ownershipContext.getStore()?.workingDirectory;
 
 function attachTerminal(state, terminalManager) {
   if (typeof terminalManager?.getSession !== "function" || typeof terminalManager?.forceTerminate !== "function" || !(terminalManager.sessions instanceof Map)) throw new Error("Desktop Commander ownership bridge dependencies are incompatible.");
@@ -80,10 +81,11 @@ function prepareOwnershipBridge({ ServerClass, callSchema, listSchema }) {
       if (params?.name === "start_process") {
         if (!isRecord(args) || typeof args.__rdmcp_owner !== "string" || args.__rdmcp_owner.length === 0 || args.__rdmcp_owner.length > 256 || typeof args.__rdmcp_operation !== "string" || args.__rdmcp_operation.length === 0 || args.__rdmcp_operation.length > 256) throw new Error("Owned Desktop Commander process metadata is required.");
         if (state.blockedOwners.has(args.__rdmcp_owner)) throw new Error("Owner execution is stopped.");
-        const cleanArgs = { ...args }; delete cleanArgs.__rdmcp_owner; delete cleanArgs.__rdmcp_operation;
-        return ownershipContext.run({ owner: args.__rdmcp_owner, operation: args.__rdmcp_operation }, () => handler.call(this, { ...request, params: { ...params, arguments: cleanArgs } }, extra));
+        if (typeof args.__rdmcp_cwd !== "string" || args.__rdmcp_cwd.length === 0 || args.__rdmcp_cwd.length > 4096 || !path.isAbsolute(args.__rdmcp_cwd)) throw new Error("Absolute working directory metadata is required.");
+        const cleanArgs = { ...args }; delete cleanArgs.__rdmcp_owner; delete cleanArgs.__rdmcp_operation; delete cleanArgs.__rdmcp_cwd;
+        return ownershipContext.run({ owner: args.__rdmcp_owner, operation: args.__rdmcp_operation, workingDirectory: args.__rdmcp_cwd }, () => handler.call(this, { ...request, params: { ...params, arguments: cleanArgs } }, extra));
       }
-      if (isRecord(args) && ("__rdmcp_owner" in args || "__rdmcp_operation" in args)) { const cleanArgs = { ...args }; delete cleanArgs.__rdmcp_owner; delete cleanArgs.__rdmcp_operation; return handler.call(this, { ...request, params: { ...params, arguments: cleanArgs } }, extra); }
+      if (isRecord(args) && ("__rdmcp_owner" in args || "__rdmcp_operation" in args || "__rdmcp_cwd" in args)) { const cleanArgs = { ...args }; delete cleanArgs.__rdmcp_owner; delete cleanArgs.__rdmcp_operation; delete cleanArgs.__rdmcp_cwd; return handler.call(this, { ...request, params: { ...params, arguments: cleanArgs } }, extra); }
       return handler.call(this, request, extra);
     });
     return original.call(this, schema, handler);

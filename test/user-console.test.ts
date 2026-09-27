@@ -6,6 +6,31 @@ import { readSessionLogs } from "../src/admin.js";
 import type { OAuthState } from "../src/public-auth.js";
 import { fixture, mcp } from "./fixture.js";
 
+test("user console lists each active connection's working directory and purpose for its owner", async () => {
+  const f = await fixture();
+  const owner = await mcp(f.service);
+  const other = await mcp(f.service, "other@example.test");
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const own = await owner.call("session_open", { working_directory: f.root, purpose: "Build <safe> feature" });
+    await other.call("session_open", { working_directory: f.data, purpose: "Other user's private work" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    assert.equal(login.status, 303);
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1];
+    assert.ok(token);
+    const html = await (await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
+    assert.match(html, new RegExp(String(own.session_id)));
+    assert.match(html, /Build &lt;safe&gt; feature/);
+    assert.match(html, /作業ディレクトリ/);
+    assert.ok(html.includes(f.root));
+    assert.doesNotMatch(html, /Other user's private work/);
+    assert.ok(!html.includes(f.data));
+  } finally { await owner.close(); await other.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
 test("emergency stop persists per principal, terminates known processes, and requires a new connection after resume", async () => {
   const f = await fixture();
   const terminated: number[] = [];

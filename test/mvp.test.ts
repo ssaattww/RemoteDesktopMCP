@@ -70,7 +70,7 @@ test("OAuth authorization code is PKCE-bound and one use", async () => {
     const httpClient = new Client({ name: "http-test", version: "1" });
     const httpTransport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokenBody.access_token}` } } });
     await httpClient.connect(httpTransport);
-    const httpSession = await httpClient.callTool({ name: "session_open", arguments: {} });
+    const httpSession = await httpClient.callTool({ name: "session_open", arguments: { working_directory: f.root, purpose: "HTTP session regression" } });
     assert.ok("content" in httpSession && !httpSession.isError);
     await httpClient.close();
     const reused = await fetch(`${url}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: "https://chatgpt.com/callback" }) }); assert.equal(reused.status, 400);
@@ -82,7 +82,7 @@ test("transfer snapshot remains immutable and no-replace preserves a racing dest
   try {
     const source = path.join(f.root, "source.bin"); const original = Buffer.from("original content");
     await writeFile(source, original); const originalStat = await stat(source);
-    const api = await mcp(f.service); const opened = await api.call("session_open", {}); const session = opened.session_id as string;
+    const api = await mcp(f.service); const opened = await api.call("session_open", { working_directory: f.root, purpose: "Transfer regression" }); const session = opened.session_id as string;
     const other = await mcp(f.service, "other@example.test");
     await assert.rejects(other.call("node_list", { session_id: session }));
     await other.close();
