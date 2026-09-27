@@ -123,6 +123,83 @@ test("session log associates retained output when unrelated events evict its pro
   } finally { await f.cleanup(); }
 });
 
+test("admin list filters, sorts, and retains latest command metadata outside the event window", async () => {
+  const f = await fixture();
+  f.service.cfg.adminUsers = ["owner@example.test"];
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  const login = await fetch(`${base}/admin/login`, { method: "POST", headers: { origin: new URL(f.service.cfg.baseUrl).origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+  const cookie = login.headers.get("set-cookie")!.split(";")[0];
+  const api = await mcp(f.service);
+  try {
+    const emptyList = await (await fetch(`${base}/admin/sessions`, { headers: { cookie } })).text();
+    assert.match(emptyList, /data-empty-session-message>該当するセッションログはありません。/);
+    const client = await (await fetch(`${base}/admin/client.js`, { headers: { cookie } })).text();
+    assert.match(client, /empty\.hidden = payload\.sessions\.length > 0/);
+    const activeId = (await api.call("session_open", {})).session_id as string;
+    await f.service.audit("process.start", { at: "2026-09-25T00:00:00.000Z", sessionId: activeId, processId: "old-process", command: "echo old" });
+    await f.service.audit("session.open", { at: "2026-09-21T00:00:00.000Z", user: "owner@example.test", sessionId: "new-closed" });
+    await f.service.audit("process.start", { at: "2026-09-26T00:00:00.000Z", sessionId: "new-closed", processId: "new-process", command: "echo new" });
+    await f.service.audit("session.close", { sessionId: "new-closed" });
+    await f.service.audit("session.open", { at: "2026-09-22T00:00:00.000Z", user: "owner@example.test", sessionId: "never-ran" });
+    await f.service.audit("session.close", { sessionId: "never-ran" });
+    const noiseAt = "2026-09-27T00:00:00.000Z";
+    await appendFile(path.join(f.data, "audit.jsonl"), `${Array.from({ length: 201 }, (_, event) => JSON.stringify({ at: noiseAt, event: "file.read", sessionId: activeId, output: `noise ${event}` })).join("\n")}\n`);
+    const retained = (await readSessionLogs(f.service)).sessions.find((session) => session.id === activeId)!;
+    assert.equal(retained.events.length, 200);
+    assert.equal(retained.latestCommandAt, "2026-09-25T00:00:00.000Z");
+    const json = await fetch(`${base}/admin/sessions.json?state=inactive&sort=latest&direction=desc`, { headers: { cookie } });
+    assert.equal(json.status, 200);
+    const sessions = (await json.json() as { sessions: Array<{ id: string; latestCommandAtLabel: string }> }).sessions;
+    assert.deepEqual(sessions.map((session) => session.id), ["new-closed", "never-ran"]);
+    assert.match(sessions[0]!.latestCommandAtLabel, /2026\/09\/26 09:00:00 JST/);
+    const all = await (await fetch(`${base}/admin/sessions.json?sort=created&direction=asc`, { headers: { cookie } })).json() as { sessions: Array<{ id: string; latestCommandAtLabel: string }> };
+    assert.equal(all.sessions.find((session) => session.id === "never-ran")?.latestCommandAtLabel, "未実行");
+    const active = await (await fetch(`${base}/admin/sessions.json?state=active`, { headers: { cookie } })).json() as { sessions: Array<{ id: string }> };
+    assert.deepEqual(active.sessions.map((session) => session.id), [activeId]);
+    const list = await fetch(`${base}/admin/sessions`, { headers: { cookie } });
+    const html = await list.text();
+    assert.match(list.headers.get("content-security-policy")!, /script-src 'self'; connect-src 'self'/);
+    assert.doesNotMatch(list.headers.get("content-security-policy")!, /unsafe-inline'.*script/);
+    assert.doesNotMatch(html, /owner@example\.test/);
+    assert.doesNotMatch(html, />old-active</);
+    assert.match(html, /data-empty-session-message hidden/);
+    assert.equal((await fetch(`${base}/admin/sessions.json`)).status, 401);
+  } finally { await api.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("admin detail groups interleaved process records and only coalesces duplicate start and exit snapshots", async () => {
+  const f = await fixture();
+  f.service.cfg.adminUsers = ["owner@example.test"];
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  const login = await fetch(`${base}/admin/login`, { method: "POST", headers: { origin: new URL(f.service.cfg.baseUrl).origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+  const cookie = login.headers.get("set-cookie")!.split(";")[0];
+  try {
+    const sessionId = "interleaved";
+    await f.service.audit("process.start", { sessionId, processId: "one", command: "echo one", output: "initial snapshot" });
+    await f.service.audit("process.start", { sessionId, processId: "two", command: "echo two", output: "two output" });
+    await f.service.audit("process.output", { sessionId, processId: "one", output: "same distinct output" });
+    await f.service.audit("process.output", { sessionId, processId: "one", output: "same distinct output" });
+    await f.service.audit("process.exit", { sessionId, processId: "one", output: "initial snapshot\nidle poll not audited\nsame distinct output\nsame distinct output", exitCode: 0 });
+    await f.service.audit("legacy.event", { sessionId, output: "legacy output" });
+    const html = await (await fetch(`${base}/admin/sessions?session=${sessionId}`, { headers: { cookie } })).text();
+    assert.equal((html.match(/initial snapshot/g) ?? []).length, 1);
+    assert.equal((html.match(/same distinct output/g) ?? []).length, 2);
+    assert.match(html, /two output/);
+    assert.doesNotMatch(html, /idle poll not audited/);
+    assert.match(html, /開始: .*JST/);
+    assert.match(html, /完了: .*JST/);
+    assert.match(html, /開始情報は履歴上限により表示されません|コマンド実行/);
+    assert.match(html, /legacy.event/);
+    assert.doesNotMatch(html, /interleaved/);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
 test("Google admin login binds the callback to the browser and checks approval on each request", async () => {
   const identity = { iss: "https://accounts.google.com", sub: "admin-sub" };
   const state: OAuthState = { version: 1, epoch: 1, allowedSubjects: [identity], refreshes: [], families: {} };
