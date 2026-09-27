@@ -116,6 +116,7 @@ export class PublicAuthService {
   private readonly transactions = new Map<string, Transaction>();
   private readonly codes = new Map<string, Code>();
   constructor(readonly cfg: PublicAuthConfig, options: PublicAuthOptions = {}) { this.store = options.store ?? createFileOAuthStateStore(cfg.dataDir); this.verifier = options.verifier ?? new GoogleOidcClient(cfg.googleClientId, cfg.googleClientSecret, options.request, options.now); this.now = options.now ?? (() => Date.now()); this.makeId = options.makeId ?? id; this.request = options.request ?? fetch; }
+  async isAllowedIdentity(identity: GoogleIdentity): Promise<boolean> { return this.serialized(async () => { await this.reload(); return this.allowed(identity); }); }
   async initialize(): Promise<void> { await this.reload(); await this.verifyChatGptClientMetadata(); }
   private current() { if (!this.state) throw new Error("Public authentication was not initialized."); return this.state; }
   private async reload() { this.state = await this.store.load(); this.normalize(); this.clean(); }
