@@ -230,7 +230,7 @@ test("RDMCP-MVP-IFR-004: a termination timeout becomes an observed single finish
   let reads = 0;
   const adapter: ProcessAdapter = {
     start: async () => "Process started with PID 5050",
-    read: async () => { reads += 1; return "Reading 1 new lines (total: 1 lines)\nProcess completed with exit code 9"; },
+    read: async () => { reads += 1; return active ? "Reading 0 new lines (total: 0 lines, 0 remaining)" : "Reading 1 new lines (total: 1 lines)\nProcess completed with exit code 9"; },
     terminate: async () => { throw Object.assign(new Error("timeout"), { code: -32001 }); },
     sessions: async () => active ? "PID: 5050" : "No active sessions",
   };

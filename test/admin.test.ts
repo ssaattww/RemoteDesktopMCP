@@ -7,7 +7,7 @@ import type { OAuthState } from "../src/public-auth.js";
 import { readSessionLogs } from "../src/admin.js";
 import { fixture, mcp } from "./fixture.js";
 
-test("admin session page requires an explicit administrator and renders escaped JST history", async () => {
+test("admin page requires the administrator role and shows server status without ordinary invocation details", async () => {
   const f = await fixture();
   const server = createApp(f.service).listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -23,12 +23,15 @@ test("admin session page requires an explicit administrator and renders escaped 
     await f.service.audit("session.open", { at: "2026-09-26T16:00:00.000Z", user: "owner@example.test", sessionId: "session-admin-test" });
     await f.service.audit("process.start", { sessionId: "session-admin-test", processId: "p1", command: "echo <script>alert(1)</script>", output: "example output" });
     await f.service.audit("process.exit", { processId: "p1", exitCode: 0 });
-    const detail = await fetch(`${base}/admin/sessions?session=session-admin-test`, { headers: { cookie } });
+    await f.service.audit("mcp.rejected", { at: "2026-09-26T16:00:00.000Z", reason: "authentication" });
+    const detail = await fetch(`${base}/admin`, { headers: { cookie } });
     const html = await detail.text();
     assert.equal(detail.headers.get("cache-control"), "no-store");
+    assert.match(html, /サーバー状態/);
+    assert.match(html, /セキュリティ監査/);
     assert.match(html, /2026\/09\/27 01:00:00 JST/);
-    assert.match(html, /&lt;script&gt;/); assert.doesNotMatch(html, /<script>/);
-    assert.match(html, /example output/); assert.match(html, /終了コード: 0/);
+    assert.match(html, /mcp\.rejected/);
+    assert.doesNotMatch(html, /&lt;script&gt;|<script>|example output|終了コード: 0|session-admin-test/);
     const restarted = new RemoteDesktopService(f.service.cfg);
     assert.equal((await readSessionLogs(restarted)).sessions.find((entry) => entry.id === "session-admin-test")?.state, "unavailable");
     f.service.cfg.adminUsers = [];
@@ -123,7 +126,7 @@ test("session log associates retained output when unrelated events evict its pro
   } finally { await f.cleanup(); }
 });
 
-test("admin list filters, sorts, and retains latest command metadata outside the event window", async () => {
+test("admin console does not expose user invocation history through legacy routes", async () => {
   const f = await fixture();
   f.service.cfg.adminUsers = ["owner@example.test"];
   const server = createApp(f.service).listen(0, "127.0.0.1");
@@ -135,9 +138,9 @@ test("admin list filters, sorts, and retains latest command metadata outside the
   const api = await mcp(f.service);
   try {
     const emptyList = await (await fetch(`${base}/admin/sessions`, { headers: { cookie } })).text();
-    assert.match(emptyList, /data-empty-session-message>該当するセッションログはありません。/);
-    const client = await (await fetch(`${base}/admin/client.js`, { headers: { cookie } })).text();
-    assert.match(client, /empty\.hidden = payload\.sessions\.length > 0/);
+    assert.match(emptyList, /サーバー状態/);
+    assert.doesNotMatch(emptyList, /セッションログ/);
+    assert.equal((await fetch(`${base}/admin/client.js`, { headers: { cookie } })).status, 404);
     const activeId = (await api.call("session_open", {})).session_id as string;
     await f.service.audit("process.start", { at: "2026-09-25T00:00:00.000Z", sessionId: activeId, processId: "old-process", command: "echo old" });
     await f.service.audit("session.open", { at: "2026-09-21T00:00:00.000Z", user: "owner@example.test", sessionId: "new-closed" });
@@ -151,26 +154,18 @@ test("admin list filters, sorts, and retains latest command metadata outside the
     assert.equal(retained.events.length, 200);
     assert.equal(retained.latestCommandAt, "2026-09-25T00:00:00.000Z");
     const json = await fetch(`${base}/admin/sessions.json?state=inactive&sort=latest&direction=desc`, { headers: { cookie } });
-    assert.equal(json.status, 200);
-    const sessions = (await json.json() as { sessions: Array<{ id: string; latestCommandAtLabel: string }> }).sessions;
-    assert.deepEqual(sessions.map((session) => session.id), ["new-closed", "never-ran"]);
-    assert.match(sessions[0]!.latestCommandAtLabel, /2026\/09\/26 09:00:00 JST/);
-    const all = await (await fetch(`${base}/admin/sessions.json?sort=created&direction=asc`, { headers: { cookie } })).json() as { sessions: Array<{ id: string; latestCommandAtLabel: string }> };
-    assert.equal(all.sessions.find((session) => session.id === "never-ran")?.latestCommandAtLabel, "未実行");
-    const active = await (await fetch(`${base}/admin/sessions.json?state=active`, { headers: { cookie } })).json() as { sessions: Array<{ id: string }> };
-    assert.deepEqual(active.sessions.map((session) => session.id), [activeId]);
+    assert.equal(json.status, 404);
     const list = await fetch(`${base}/admin/sessions`, { headers: { cookie } });
     const html = await list.text();
     assert.match(list.headers.get("content-security-policy")!, /script-src 'self'; connect-src 'self'/);
     assert.doesNotMatch(list.headers.get("content-security-policy")!, /unsafe-inline'.*script/);
-    assert.doesNotMatch(html, /owner@example\.test/);
-    assert.doesNotMatch(html, />old-active</);
-    assert.match(html, /data-empty-session-message hidden/);
+    assert.match(html, /owner@example\.test/);
+    assert.doesNotMatch(html, /new-closed|never-ran|old-process|echo old/);
     assert.equal((await fetch(`${base}/admin/sessions.json`)).status, 401);
   } finally { await api.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
-test("admin detail groups interleaved process records and only coalesces duplicate start and exit snapshots", async () => {
+test("admin detail route never displays process commands or output", async () => {
   const f = await fixture();
   f.service.cfg.adminUsers = ["owner@example.test"];
   const server = createApp(f.service).listen(0, "127.0.0.1");
@@ -188,14 +183,8 @@ test("admin detail groups interleaved process records and only coalesces duplica
     await f.service.audit("process.exit", { sessionId, processId: "one", output: "initial snapshot\nidle poll not audited\nsame distinct output\nsame distinct output", exitCode: 0 });
     await f.service.audit("legacy.event", { sessionId, output: "legacy output" });
     const html = await (await fetch(`${base}/admin/sessions?session=${sessionId}`, { headers: { cookie } })).text();
-    assert.equal((html.match(/initial snapshot/g) ?? []).length, 1);
-    assert.equal((html.match(/same distinct output/g) ?? []).length, 2);
-    assert.match(html, /two output/);
-    assert.doesNotMatch(html, /idle poll not audited/);
-    assert.match(html, /開始: .*JST/);
-    assert.match(html, /完了: .*JST/);
-    assert.match(html, /開始情報は履歴上限により表示されません|コマンド実行/);
-    assert.match(html, /legacy.event/);
+    assert.match(html, /サーバー状態/);
+    assert.doesNotMatch(html, /initial snapshot|same distinct output|two output|idle poll not audited|echo one|legacy\.event|interleaved/);
     assert.doesNotMatch(html, /interleaved/);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });

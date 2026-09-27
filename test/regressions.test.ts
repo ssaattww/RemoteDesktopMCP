@@ -564,7 +564,7 @@ test("Desktop Commander stderr is drained before repeated get_config calls can b
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import readline from "node:readline";
-const names = ${JSON.stringify(["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"])};
+const names = ${JSON.stringify(["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"])};
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
