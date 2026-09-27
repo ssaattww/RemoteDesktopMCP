@@ -84,12 +84,16 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(persistedDetail, /http-equiv="refresh" content="30"/);
     const paused = await (await fetch(`${base}/user?refresh=0`, { headers: { cookie: persistedCookie } })).text();
     assert.doesNotMatch(paused, /http-equiv="refresh"/);
+    await assert.rejects(owner.call("file_read", { session_id: own.session_id, root_id: "missing", relative_path: "missing.txt" }));
+    const failedAccessAt = f.service.sessions.get(String(own.session_id))?.touched;
+    assert.ok(failedAccessAt);
     const rejectedAt = new Date(Date.now() + 60_000).toISOString();
     await f.service.audit("operation.received", { at: rejectedAt, user: "owner@example.test", sessionId: own.session_id, operationId: "rejected-after-close", tool: "file_read" });
     await f.service.audit("operation.rejected", { at: rejectedAt, user: "owner@example.test", sessionId: own.session_id, operationId: "rejected-after-close", tool: "file_read", status: "rejected" });
     f.service.sessions.delete(String(own.session_id));
     const historicalSession = (await readSessionLogs(f.service)).sessions.find((session) => session.id === own.session_id);
     assert.ok(historicalSession?.lastAccessAt && Date.parse(historicalSession.lastAccessAt) < Date.parse(rejectedAt), "a rejected attempt does not extend historical last access");
+    assert.ok(Date.parse(historicalSession.lastAccessAt) >= failedAccessAt, "a validated but failed operation still updates historical last access");
     const history = await (await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(history, /Build &lt;safe&gt; feature/);
     assert.ok(history.includes(f.root), "the list retains working-directory metadata from the audit history");

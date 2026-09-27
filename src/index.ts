@@ -31,7 +31,7 @@ type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
-type ExecutionOperation = { user: string; operationId: string; stopGeneration: number };
+type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; sessionAccessAt?: string };
 
 class UserStopRequested extends Error {
   constructor(readonly state: UserExecutionState) { super("USER_STOP_REQUESTED"); }
@@ -426,7 +426,7 @@ export class RemoteDesktopService {
     for (const [id, session] of this.sessions) if (session.state !== "active" && now - session.expires > SESSION_TTL) this.sessions.delete(id);
   }
   async sweepExpired(): Promise<void> { await this.transferLock.run(() => this.sweepExpiredLocked()); }
-  session(user: string, sessionId: string): Session { this.requireCurrentOperation(); const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; return value; }
+  session(user: string, sessionId: string): Session { this.requireCurrentOperation(); const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; const operation = this.operationContext.getStore(); if (operation?.user === user) operation.sessionAccessAt = new Date(value.touched).toISOString(); return value; }
   node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
   private configPath(): string { return path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json"); }
@@ -715,29 +715,31 @@ export class RemoteDesktopService {
       : "—";
     let started = false;
     const entryGeneration = entryState.stopGeneration;
+    const executionOperation: ExecutionOperation = { user, operationId, stopGeneration: entryGeneration };
+    const sessionAccess = () => executionOperation.sessionAccessAt ? { sessionAccessAt: executionOperation.sessionAccessAt } : {};
     try {
       await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, receivedAt });
       if (entryState.stopped) throw new UserStopRequested(entryState);
       started = true;
       const startAt = new Date().toISOString();
       await this.audit("operation.started", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, startAt });
-      const body = await this.operationContext.run({ user, operationId, stopGeneration: entryGeneration }, () => { this.requireCurrentOperation(); return fn(args, operationId); });
+      const body = await this.operationContext.run(executionOperation, () => { this.requireCurrentOperation(); return fn(args, operationId); });
       // A stop can arrive while an unavoidable in-flight I/O operation is
       // completing. Do not present that operation as permission to continue.
       this.requireCurrentOperation();
       const openedConnection = isRecord(body) && typeof body.connection_id === "string" ? body.connection_id : isRecord(body) && typeof body.session_id === "string" ? body.session_id : undefined;
       const terminalConnection = openedConnection ?? connectionId;
-      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded" });
+      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...sessionAccess() });
       return result(body);
     } catch (error) {
       if (error instanceof UserStopRequested) {
         const status = started ? "cancelled" : "rejected";
-        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration }).catch(() => undefined);
+        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...sessionAccess() }).catch(() => undefined);
         return stoppedFailure(error.state);
       }
       const message = error instanceof Error ? error.message : "Operation failed.";
       const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
-      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason });
+      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...sessionAccess() });
       const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory)/.test(message) ? message : "Operation failed.";
       return failure(publicMessage);
     }
