@@ -104,8 +104,9 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
     assert.match(tools.get("file_transfer_download_begin")!, /snapshot copy/i);
     assert.match(tools.get("file_transfer_upload_commit")!, /SHA-256/i);
     assert.match(tools.get("file_transfer_upload_commit")!, /atomic/i);
-    assert.match(tools.get("process_start")!, /OS user's permissions/i);
+    assert.match(tools.get("process_start")!, /OS user's existing permissions/i);
     assert.match(tools.get("process_start")!, /outside configured file roots/i);
+    assert.match(tools.get("process_start")!, /inherited environment variables/i);
     for (const name of ["process_output", "process_status", "process_kill"]) assert.match(tools.get(name)!, /same session_id/i);
 
     const session = await openSession(api);
