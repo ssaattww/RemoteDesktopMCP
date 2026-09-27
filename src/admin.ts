@@ -102,7 +102,7 @@ export async function readSessionLogs(service: RemoteDesktopService) {
         pendingOperations.delete(operationId);
       }
     }
-    if (entry.user === session.user && ["session.open", "session.close", "operation.received"].includes(entry.event) && dateValue(entry.at) >= dateValue(session.lastAccessAt)) session.lastAccessAt = entry.at;
+    if (entry.user === session.user && ["session.open", "session.close", "operation.succeeded"].includes(entry.event) && dateValue(entry.at) >= dateValue(session.lastAccessAt)) session.lastAccessAt = entry.at;
     if (entry.event === "process.start") session.latestCommandAt = entry.at;
     if (entry.event === "session.open" && entry.user === session.user) {
       session.at = entry.at;

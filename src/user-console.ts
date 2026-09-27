@@ -169,8 +169,13 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const exit = events.filter((event) => event.event === "process.exit").at(-1);
       const command = start?.command ?? events.filter((event) => event.command !== undefined).at(-1)?.command;
       const outputEvents = events.filter((event) => event.output !== undefined && event.event !== "process.exit");
-      if (!outputEvents.length && exit?.output !== undefined) outputEvents.push(exit);
-      return `<article class="process-block"><p>${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</p>${command === undefined ? "" : `<h3>コマンド</h3><pre>${escape(command)}</pre>`}${outputEvents.length ? `<h3>出力</h3>${outputEvents.map((event) => `<div class="output-part"><small>${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
+      const earlierOutput = outputEvents.map((event) => String(event.output)).join("\n");
+      if (exit?.output !== undefined && !earlierOutput.includes(String(exit.output))) {
+        const snapshot = String(exit.output);
+        const remaining = snapshot.startsWith(earlierOutput) ? snapshot.slice(earlierOutput.length).replace(/^\n/, "") : snapshot;
+        if (remaining) outputEvents.push({ ...exit, output: remaining });
+      }
+      return `<article class="process-block"><p>${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</p>${command === undefined ? "" : `<h3>コマンド</h3><pre>${escape(command)}</pre>`}${outputEvents.length ? `<h3>出力</h3>${outputEvents.map((event) => `<div class="output-part"><small>${event.event === "process.exit" ? "終了時の出力 · " : ""}${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
     }).join("")}</section>`;
     return res.type("html").send(page(body + stopDetails, refreshSeconds));
   });

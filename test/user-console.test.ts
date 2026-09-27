@@ -24,7 +24,7 @@ test("user console lists each active connection's working directory and purpose 
     await f.service.audit("process.start", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", command: "echo first-command", output: "first-output" });
     await f.service.audit("process.output", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "second-output" });
     await f.service.audit("process.output", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "third-output" });
-    await f.service.audit("process.exit", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "first-output\nsecond-output\nthird-output", exitCode: 0 });
+    await f.service.audit("process.exit", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "first-output\nsecond-output\nthird-output\nfinal-only-output", exitCode: 0 });
     await f.service.audit("process.start", { user: "owner@example.test", sessionId: own.session_id, processId: "process-second", command: "echo another-command", output: "another-output" });
     await f.service.audit("process.exit", { user: "owner@example.test", sessionId: own.session_id, processId: "process-second", output: "another-output", exitCode: 0 });
     const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
@@ -57,6 +57,9 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(detail, /first-output/);
     assert.match(detail, /second-output/);
     assert.match(detail, /third-output/);
+    assert.match(detail, /final-only-output/);
+    assert.match(detail, /終了時の出力/);
+    assert.equal(detail.split("first-output").length - 1, 1, "the final snapshot does not repeat earlier output");
     assert.match(detail, /終了コード: 0/);
     const processBlocks = [...detail.matchAll(/<article class="process-block">([\s\S]*?)<\/article>/g)].map((match) => match[1]!);
     assert.equal(processBlocks.length, 2);
@@ -81,7 +84,12 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(persistedDetail, /http-equiv="refresh" content="30"/);
     const paused = await (await fetch(`${base}/user?refresh=0`, { headers: { cookie: persistedCookie } })).text();
     assert.doesNotMatch(paused, /http-equiv="refresh"/);
+    const rejectedAt = new Date(Date.now() + 60_000).toISOString();
+    await f.service.audit("operation.received", { at: rejectedAt, user: "owner@example.test", sessionId: own.session_id, operationId: "rejected-after-close", tool: "file_read" });
+    await f.service.audit("operation.rejected", { at: rejectedAt, user: "owner@example.test", sessionId: own.session_id, operationId: "rejected-after-close", tool: "file_read", status: "rejected" });
     f.service.sessions.delete(String(own.session_id));
+    const historicalSession = (await readSessionLogs(f.service)).sessions.find((session) => session.id === own.session_id);
+    assert.ok(historicalSession?.lastAccessAt && Date.parse(historicalSession.lastAccessAt) < Date.parse(rejectedAt), "a rejected attempt does not extend historical last access");
     const history = await (await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(history, /Build &lt;safe&gt; feature/);
     assert.ok(history.includes(f.root), "the list retains working-directory metadata from the audit history");
