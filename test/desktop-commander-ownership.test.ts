@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { installOwnershipBridge } from "../scripts/desktop-commander-ownership.mjs";
+import { installOwnershipBridge, ownedProcessWorkingDirectory } from "../scripts/desktop-commander-ownership.mjs";
 
 const callSchema = {};
 const listSchema = {};
@@ -15,6 +15,7 @@ function makeBridge() {
   }
   const sessions = new Map<number, any>();
   const forceTerminated: number[] = [];
+  const observedWorkingDirectories: Array<string | undefined> = [];
   const manager = {
     sessions,
     getSession(pid: number) { return sessions.get(pid); },
@@ -25,6 +26,7 @@ function makeBridge() {
   server.setRequestHandler(listSchema, async () => ({ tools: [{ name: "start_process" }] }));
   server.setRequestHandler(callSchema, async (request: any) => {
     if (request.params.name === "start_process") {
+      observedWorkingDirectories.push(ownedProcessWorkingDirectory());
       const child = new EventEmitter() as EventEmitter & { pid: number; killed: boolean; exitCode: number | null };
       child.pid = request.params.arguments.pid;
       child.killed = false;
@@ -37,8 +39,15 @@ function makeBridge() {
     }
     return { content: [{ type: "text", text: "handled" }] };
   });
-  const call = server.handlers.get(callSchema)!;
-  return { server, call, sessions, forceTerminated };
+  const rawCall = server.handlers.get(callSchema)!;
+  const call = (request: any, extra: any) => {
+    const args = request?.params?.arguments;
+    if (request?.params?.name === "start_process" && args?.__rdmcp_owner && args?.__rdmcp_operation && !args.__rdmcp_cwd) {
+      return rawCall({ ...request, params: { ...request.params, arguments: { ...args, __rdmcp_cwd: process.cwd() } } }, extra);
+    }
+    return rawCall(request, extra);
+  };
+  return { server, call, rawCall, sessions, forceTerminated, observedWorkingDirectories };
 }
 
 const readResult = (result: any) => JSON.parse(result.content[0].text);
@@ -80,4 +89,13 @@ test("the bridge requires trusted owner and operation metadata and strips it bef
   await assert.rejects(call({ params: { name: "start_process", arguments: { pid: 1 } } }, {}), /metadata is required/);
   await call({ params: { name: "start_process", arguments: { __rdmcp_owner: "alice", __rdmcp_operation: "op-1", pid: 12 } } }, {});
   assert.equal(sessions.has(12), true);
+});
+
+test("the bridge applies private working-directory metadata only inside the owned process call", async () => {
+  const { call, rawCall, observedWorkingDirectories } = makeBridge();
+  assert.equal(ownedProcessWorkingDirectory(), undefined);
+  await call({ params: { name: "start_process", arguments: { __rdmcp_owner: "alice", __rdmcp_operation: "op-cwd", __rdmcp_cwd: process.cwd(), pid: 13 } } }, {});
+  assert.deepEqual(observedWorkingDirectories, [process.cwd()]);
+  assert.equal(ownedProcessWorkingDirectory(), undefined, "the cwd must not leak outside the asynchronous process operation");
+  await assert.rejects(rawCall({ params: { name: "start_process", arguments: { __rdmcp_owner: "alice", __rdmcp_operation: "op-no-cwd", pid: 14 } } }, {}), /working directory metadata is required/i);
 });
