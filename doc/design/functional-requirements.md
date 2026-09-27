@@ -72,8 +72,8 @@ Desktop Commander 側の設定と RemoteDesktopMCP 側の操作制限の両方�
 Desktop Commander の管理用ツールや、初期版で許可していないツールは外部へ公開しない。
 RemoteDesktopMCP から Desktop Commander の設定を変更する専用機能も提供しない。
 
-Desktop Commander のサーバー設定ファイルは、RemoteDesktopMCP の管理対象外とする。
-各実行ノードは、その設定ファイルの実体パスをローカル設定として保持する。
+固定版 Desktop Commander を RemoteDesktopMCP から起動する場合は、専用の Desktop Commander 設定ファイルを `DATA_DIR` 配下に保持する。通常ユーザーの `~/.claude-server-commander/config.json` は参照・変更しない。
+設定パスの分離は RemoteDesktopMCP 側の専用起動処理で行い、ユーザー固有の環境変数を別ディレクトリ向けに差し替える方法は使わない。
 設定ファイルの親ディレクトリと、RemoteDesktopMCP および Desktop Commander の
 検索許可ディレクトリが、実体パスで親子関係にある構成は起動時に拒否する。
 設定ファイルを検索させた後で結果だけを隠す方式は認めない。
@@ -93,6 +93,10 @@ Desktop Commander のサーバー設定ファイルは、RemoteDesktopMCP の管
 
 初期版では、Desktop Commander と `process_start` から起動するプロセスを、
 RemoteDesktopMCP を起動した OS ユーザーと同じ権限で実行してよい。
+
+Desktop Commander は RemoteDesktopMCP 起動時のユーザー環境をそのまま継承する。`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`HOME`、`HOMEDRIVE`、`HOMEPATH` などのユーザー固有の環境変数は、値だけでなく未設定状態も含めて上書き・合成しない。`process_start` から起動する子プロセスも同じ環境を継承する。
+
+RemoteDesktopMCP 固有の監査ログ、一時ファイル、転送状態、専用 Desktop Commander 設定などは `DATA_DIR` 配下へ分離する。分離のために `HOME` などを別ディレクトリ向けに差し替えたり、特定 CLI 専用の環境変数を追加したりしない。同じ OS ユーザーが通常のローカル実行で CLI 設定や認証状態を更新した場合、新しく起動する `process_start` は RemoteDesktopMCP の再起動なしで同じユーザー環境の状態を参照できること。
 
 認証済みの許可ユーザーは、`process_start` を通して
 その OS ユーザーが実行できるコマンドやアクセスできるファイルを操作できるものとして扱う。

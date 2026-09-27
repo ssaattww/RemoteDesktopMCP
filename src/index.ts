@@ -38,7 +38,7 @@ const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -72,7 +72,7 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   const googleClientSecret = env.GOOGLE_CLIENT_SECRET;
   const googleRedirectUri = env.GOOGLE_REDIRECT_URI ?? `${baseUrl}/google/callback`;
   if (authMode === "google" && (!googleClientId || !googleClientSecret || googleRedirectUri !== `${baseUrl}/google/callback`)) throw new Error("Google mode requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI=${BASE_URL}/google/callback.");
-  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: env.DESKTOP_COMMANDER_COMMAND ?? process.execPath, dcArgs: env.DESKTOP_COMMANDER_COMMAND ? (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean) : [bundled, "--no-onboarding"], allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
+  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: env.DESKTOP_COMMANDER_COMMAND ?? process.execPath, dcArgs: env.DESKTOP_COMMANDER_COMMAND ? (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean) : [bundled, "--no-onboarding"], dcManagedConfig: !env.DESKTOP_COMMANDER_COMMAND, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
 }
 
 class Mutex {
@@ -97,11 +97,16 @@ class DesktopCommander {
     this.allowedDirectories = await Promise.all(this.cfg.roots.map((root) => realpath(root.path)));
     await writeFile(config, JSON.stringify({ allowedDirectories: this.allowedDirectories, telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }), { mode: 0o600 });
     await this.configPrepared();
-    const drive = path.parse(home).root;
     const blocked = new Set(["TOKEN_SECRET", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "REMOTE_AUTH_MODE", "AUTHORIZED_USERS_JSON"]);
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => !blocked.has(key) && value !== undefined)) as Record<string, string>;
-    Object.assign(env, { HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"), LOCALAPPDATA: path.join(home, "AppData", "Local"), HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) });
-    this.transport = new StdioClientTransport({ command: this.cfg.dcCommand, args: this.cfg.dcArgs, env, stderr: "pipe", cwd: process.cwd() });
+    let args = this.cfg.dcArgs;
+    if (this.cfg.dcManagedConfig) {
+      const entry = args[0];
+      if (!entry) throw new Error("Managed Desktop Commander requires an entry module.");
+      const bootstrap = fileURLToPath(new URL("../scripts/desktop-commander-bootstrap.mjs", import.meta.url));
+      args = [bootstrap, entry, config, ...args.slice(1)];
+    }
+    this.transport = new StdioClientTransport({ command: this.cfg.dcCommand, args, env, stderr: "pipe", cwd: process.cwd() });
     // Desktop Commander writes diagnostics for every get_config call. Consume
     // the private pipe without retaining or exposing its contents; otherwise
     // stderr backpressure can block the child and its MCP stdout responses.

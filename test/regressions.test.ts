@@ -533,6 +533,27 @@ test("NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, an
   } finally { commander.call = originalCommanderCall; await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
+test("Issue 10: process_start inherits the service user profile environment", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const keys = ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOME", "HOMEDRIVE", "HOMEPATH"] as const;
+    const script = path.join(f.root, "profile-environment.cjs");
+    await writeFile(script, `const keys = ${JSON.stringify(keys)}; console.log("PROFILE_ENV=" + JSON.stringify(Object.fromEntries(keys.map((key) => [key, { present: Object.prototype.hasOwnProperty.call(process.env, key), value: process.env[key] ?? null }]))));`);
+    const session = await openSession(api);
+    const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(script), timeout_ms: 10_000 });
+    const processId = started.process_id as string; let output = String(started.output ?? "");
+    for (let attempt = 0; attempt < 40 && !output.includes("PROFILE_ENV="); attempt += 1) {
+      const observed = await api.call("process_output", { session_id: session, process_id: processId }); output = `${output}\n${String(observed.output ?? "")}`;
+      if (observed.state === "finished" && output.includes("PROFILE_ENV=")) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const line = output.split(/\r?\n/).find((value) => value.startsWith("PROFILE_ENV=")); assert.ok(line, "profile environment output must be observable");
+    const actual = JSON.parse(line.slice("PROFILE_ENV=".length)) as Record<string, { present: boolean; value: string | null }>;
+    const expected = Object.fromEntries(keys.map((key) => [key, { present: Object.prototype.hasOwnProperty.call(process.env, key), value: process.env[key] ?? null }]));
+    assert.deepEqual(actual, expected);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("Desktop Commander stderr is drained before repeated get_config calls can block MCP", async () => {
   const f = await fixture(); let service: RemoteDesktopService | undefined;
   try {
@@ -550,13 +571,13 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   if (request.method === "initialize") reply(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "stderr-stub", version: "1" } });
   else if (request.method === "tools/list") reply(request.id, { tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
   else if (request.method === "tools/call") {
-    if (request.params.name === "get_config") { if (!process.stderr.write("x".repeat(1024 * 1024))) await once(process.stderr, "drain"); const config = JSON.parse(await readFile(process.env.HOME + "/.claude-server-commander/config.json", "utf8")); reply(request.id, { content: [{ type: "text", text: JSON.stringify({ allowedDirectories: config.allowedDirectories }) }] }); }
+    if (request.params.name === "get_config") { if (!process.stderr.write("x".repeat(1024 * 1024))) await once(process.stderr, "drain"); const config = JSON.parse(await readFile(${JSON.stringify(configFile(f.data))}, "utf8")); reply(request.id, { content: [{ type: "text", text: JSON.stringify({ allowedDirectories: config.allowedDirectories }) }] }); }
     else reply(request.id, { content: [{ type: "text", text: "stub" }] });
   }
 }
 `);
     const original = (f.service as unknown as { cfg: RuntimeConfig }).cfg;
-    service = new RemoteDesktopService({ ...original, dcCommand: process.execPath, dcArgs: [stub], allowedRedirectOrigins: new Set(original.allowedRedirectOrigins) });
+    service = new RemoteDesktopService({ ...original, dcCommand: process.execPath, dcArgs: [stub], dcManagedConfig: false, allowedRedirectOrigins: new Set(original.allowedRedirectOrigins) });
     await Promise.race([
       service.initialize(),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stderr drain fixture timed out")), 5_000)),

@@ -32,6 +32,7 @@ export async function fixture(): Promise<Fixture> {
     roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024,
     nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath,
     dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"],
+    dcManagedConfig: true,
     allowedRedirectOrigins: new Set(["https://chatgpt.com"]),
   };
   const service = new RemoteDesktopService(cfg);
