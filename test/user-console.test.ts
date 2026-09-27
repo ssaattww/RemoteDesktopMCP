@@ -6,6 +6,19 @@ import { readSessionLogs } from "../src/admin.js";
 import type { OAuthState } from "../src/public-auth.js";
 import { fixture, mcp } from "./fixture.js";
 
+test("every tool requires a comment that is retained in operation audit history", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    const tools = await api.listTools();
+    for (const tool of tools.tools) assert.equal((tool.inputSchema as { required?: string[] }).required?.includes("comment"), true, `${tool.name} requires a comment`);
+    await assert.rejects(api.callRaw("session_list", {}), /comment/i);
+    await api.call("session_list", { comment: "Check currently active work sessions" });
+    const event = (await readSessionLogs(f.service)).sessions.flatMap((session) => session.events).findLast((entry) => entry.event === "operation.succeeded" && entry.tool === "session_list");
+    assert.equal(event?.comment, "Check currently active work sessions");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("user console lists each active connection's working directory and purpose for its owner", async () => {
   const f = await fixture();
   const owner = await mcp(f.service);
@@ -21,7 +34,7 @@ test("user console lists each active connection's working directory and purpose 
     await owner.call("session_close", { session_id: second.session_id });
     await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: own.session_id, operationId: "operation-first", tool: "file_read", target: "first-only.txt", status: "succeeded" });
     await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: second.session_id, operationId: "operation-second", tool: "file_read", target: "second-only.txt", status: "succeeded" });
-    await f.service.audit("process.start", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", command: "echo first-command", output: "first-output" });
+    await f.service.audit("process.start", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", comment: "Generate the first test output", command: "echo first-command", output: "first-output" });
     await f.service.audit("process.output", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "second-output" });
     await f.service.audit("process.output", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "third-output" });
     await f.service.audit("process.exit", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "first-output\nsecond-output\nthird-output\nfinal-only-output", exitCode: 0 });
@@ -54,6 +67,8 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(detail, /作成日時: .*最終アクセス日時:/);
     assert.match(detail, /first-only\.txt/);
     assert.match(detail, /first-command/);
+    assert.match(detail, /実行目的/);
+    assert.match(detail, /Generate the first test output/);
     assert.match(detail, /first-output/);
     assert.match(detail, /second-output/);
     assert.match(detail, /third-output/);

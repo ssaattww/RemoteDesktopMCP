@@ -33,7 +33,7 @@ async function mcp(service: RemoteDesktopService, user = "owner@example.test") {
   const client = new Client({ name: "test", version: "1" }); const server = service.server(user);
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   const call = async (name: string, args: Record<string, unknown>) => {
-    const response = await client.callTool({ name, arguments: args });
+    const response = await client.callTool({ name, arguments: { comment: "Automated test execution", ...args } });
     assert.ok("content" in response); const block = response.content.find((item) => item.type === "text");
     if (response.isError) throw new Error(block?.text ?? "tool failed");
     return JSON.parse(block?.text ?? "{}") as Record<string, unknown>;
@@ -70,7 +70,7 @@ test("OAuth authorization code is PKCE-bound and one use", async () => {
     const httpClient = new Client({ name: "http-test", version: "1" });
     const httpTransport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokenBody.access_token}` } } });
     await httpClient.connect(httpTransport);
-    const httpSession = await httpClient.callTool({ name: "session_open", arguments: { working_directory: f.root, purpose: "HTTP session regression" } });
+    const httpSession = await httpClient.callTool({ name: "session_open", arguments: { working_directory: f.root, purpose: "HTTP session regression", comment: "Verify an authenticated HTTP session can open" } });
     assert.ok("content" in httpSession && !httpSession.isError);
     await httpClient.close();
     const reused = await fetch(`${url}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: "https://chatgpt.com/callback" }) }); assert.equal(reused.status, 400);

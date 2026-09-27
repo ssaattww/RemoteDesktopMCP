@@ -424,10 +424,10 @@ test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, REMOTE-NR-008, a
       assert.deepEqual(tool._meta?.securitySchemes, [{ type: "oauth2", scopes: ["mcp"] }], "every tool exposes OAuth metadata for linking");
       assert.deepEqual(tool._meta?.["openai/securitySchemes"], [{ type: "oauth2", scopes: ["mcp"] }], "every tool exposes the OpenAI OAuth metadata alias");
     }
-    const opened = await client.callTool({ name: "session_open", arguments: { working_directory: f.root, purpose: "Public authentication regression" } });
+    const opened = await client.callTool({ name: "session_open", arguments: { working_directory: f.root, purpose: "Public authentication regression", comment: "Open an authenticated public session" } });
     const session = JSON.parse(opened.content.find((item) => item.type === "text")?.text ?? "{}") as { session_id: string };
     assert.ok(session.session_id);
-    const nodes = await client.callTool({ name: "node_list", arguments: { session_id: session.session_id } });
+    const nodes = await client.callTool({ name: "node_list", arguments: { session_id: session.session_id, comment: "Verify the public session can list its node" } });
     assert.equal(nodes.isError, undefined);
     const expired = await fetch(`${local}/mcp`, { method: "POST", headers: { authorization: "Bearer expired-token", "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "node_list", arguments: {} } }) });
     assert.equal(expired.status, 200);
@@ -524,7 +524,7 @@ test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, REMOTE-NR-008, a
       const completedBody = await fetch(`${local}/mcp`, {
         method: "POST",
         headers: { authorization: `Bearer ${tokenBody.access_token}`, accept: "application/json, text/event-stream", "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "session_open", arguments: { working_directory: f.root, purpose: "Public authentication regression" } } }),
+        body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "session_open", arguments: { working_directory: f.root, purpose: "Public authentication regression", comment: "Verify completed public requests are not timed out" } } }),
       });
       assert.equal(completedBody.status, 200, "a completed request body is not timed out while its handler runs");
       const completedPayload = JSON.parse(/^data: (.+)$/m.exec(await completedBody.text())?.[1] ?? "{}") as { result?: { content?: Array<{ type?: string; text?: string }> } };
