@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
@@ -14,6 +15,7 @@ import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, protectPrivateFile } from "./private-storage.js";
 
 import { mountAdmin } from "./admin.js";
+import { mountUserConsole } from "./user-console.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
@@ -28,6 +30,12 @@ type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
+export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
+type ExecutionOperation = { user: string; operationId: string; stopGeneration: number };
+
+class UserStopRequested extends Error {
+  constructor(readonly state: UserExecutionState) { super("USER_STOP_REQUESTED"); }
+}
 
 const SESSION_TTL = 24 * 60 * 60_000;
 const TRANSFER_TTL = 30 * 60_000;
@@ -35,17 +43,19 @@ const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_TRANSFERS = 20;
 const MAX_TERMINAL_TRANSFERS = 100;
 const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
-const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"];
+const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
 export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const inside = (parent: string, candidate: string) => { const relative = path.relative(parent, candidate); return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)); };
 const overlaps = (a: string, b: string) => inside(a, b) || inside(b, a);
 const result = (body: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(body, null, 2) }] });
 const failure = (message: string) => ({ isError: true as const, content: [{ type: "text" as const, text: message }] });
+const stoppedFailure = (state: UserExecutionState) => ({ isError: true as const, content: [{ type: "text" as const, text: JSON.stringify({ error: { code: "USER_STOP_REQUESTED", message: "The user has explicitly requested that remote execution stop.", required_action: "Do not retry, continue the task, or create another execution path until the user explicitly resumes remote execution.", stop_id: state.stopId, stop_generation: state.stopGeneration } }) }] });
 const equal = (left: string, right: string) => { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); };
 
 export function configFromEnv(env = process.env): RuntimeConfig {
@@ -72,7 +82,11 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   const googleClientSecret = env.GOOGLE_CLIENT_SECRET;
   const googleRedirectUri = env.GOOGLE_REDIRECT_URI ?? `${baseUrl}/google/callback`;
   if (authMode === "google" && (!googleClientId || !googleClientSecret || googleRedirectUri !== `${baseUrl}/google/callback`)) throw new Error("Google mode requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI=${BASE_URL}/google/callback.");
-  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: env.DESKTOP_COMMANDER_COMMAND ?? process.execPath, dcArgs: env.DESKTOP_COMMANDER_COMMAND ? (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean) : [bundled, "--no-onboarding"], dcManagedConfig: !env.DESKTOP_COMMANDER_COMMAND, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
+  // Owner-scoped termination depends on the fixed Desktop Commander module
+  // layout. Arbitrary launchers cannot be verified to install that bridge.
+  const customArgs = (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean);
+  if (env.DESKTOP_COMMANDER_COMMAND || customArgs.length) throw new Error("Only the managed Desktop Commander launcher is supported because owner-scoped emergency stop requires the pinned backend.");
+  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: process.execPath, dcArgs: [bundled, "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
 }
 
 class Mutex {
@@ -86,7 +100,7 @@ class DesktopCommander {
   private generation?: string;
   private tools = new Set<string>();
   private allowedDirectories: string[] = [];
-  constructor(private readonly cfg: RuntimeConfig, private readonly audit: (name: string, data: Record<string, unknown>) => Promise<void>, private readonly configPrepared: () => Promise<void>) {}
+  constructor(private readonly cfg: RuntimeConfig, private readonly audit: (name: string, data: Record<string, unknown>) => Promise<void>, private readonly configPrepared: () => Promise<void>, private readonly requireCurrentOperation: () => void) {}
   currentGeneration(): string { if (!this.client || !this.generation) throw new Error("Desktop Commander is unavailable for this operation."); return this.generation; }
   async start(): Promise<void> {
     const home = path.join(this.cfg.dataDir, "desktop-commander-home");
@@ -139,9 +153,15 @@ class DesktopCommander {
     if (timeout) clearTimeout(timeout);
     if (!closed) await this.audit("desktop_commander.shutdown_timeout", {});
   }
-  async call(name: string, args: Record<string, unknown>, timeout?: number): Promise<string> {
+  async call(name: string, args: Record<string, unknown>, timeout?: number, options: { skipRootPreflight?: boolean; allowStoppedOperation?: boolean } = {}): Promise<string> {
     if (!this.client || !this.tools.has(name)) throw new Error("Desktop Commander is unavailable for this operation.");
-    if (name !== "get_config") await this.verifyAllowedRoots();
+    // Emergency-stop control is deliberately independent from ordinary tool
+    // preflight: a wedged backend must not make the owner latch wait on an
+    // unbounded get_config request.
+    if (!options.skipRootPreflight && name !== "get_config" && name !== "_rdmcp_stop_owner" && name !== "_rdmcp_resume_owner") await this.verifyAllowedRoots();
+    // Root verification is asynchronous. Recheck the operation generation
+    // after it and immediately before any ordinary backend request.
+    if (!options.allowStoppedOperation) this.requireCurrentOperation();
     const value = await this.client.callTool({ name, arguments: args }, undefined, timeout ? { timeout } : undefined);
     if ("isError" in value && value.isError) {
       const content = value.content as Array<{ type: string; text?: string }>;
@@ -187,11 +207,17 @@ export class RemoteDesktopService {
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
   private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
   private readonly configIdentityLock = new Mutex();
+  private readonly executionStates = new Map<string, UserExecutionState>();
+  private readonly executionStateLock = new Mutex();
+  private readonly executionResumes = new Set<string>();
+  private readonly operationContext = new AsyncLocalStorage<ExecutionOperation>();
+  private executionStateUnavailable = false;
   readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
-  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
+  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
   async initialize(): Promise<void> {
     await ensurePrivateDirectory(this.cfg.dataDir);
+    await this.loadExecutionStates();
     const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
     const actualData = await realpath(this.cfg.dataDir);
     for (const root of this.cfg.roots) {
@@ -222,6 +248,172 @@ export class RemoteDesktopService {
     if (!encoded || !signature || !equal(createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url"), signature)) return undefined;
     try { const body = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>; const user = this.cfg.users[0]; return body.type === "access" && body.sub === user.email && body.iss === this.cfg.baseUrl && body.aud === `${this.cfg.baseUrl}/mcp` && body.scope === "mcp" && typeof body.exp === "number" && body.exp > Math.floor(Date.now() / 1000) ? user.email : undefined; } catch { return undefined; }
   }
+  private executionStatePath(): string { return path.join(this.cfg.dataDir, "user-execution-states.json"); }
+  private executionStopMarkerPath(): string { return path.join(this.cfg.dataDir, "user-execution-stop-pending.json"); }
+  private validateExecutionState(value: unknown): value is UserExecutionState {
+    if (!value || typeof value !== "object") return false;
+    const state = value as UserExecutionState;
+    return typeof state.principalId === "string" && state.principalId.length > 0 && state.principalId.length <= 512
+      && typeof state.stopped === "boolean" && Number.isSafeInteger(state.stopGeneration) && state.stopGeneration >= 0
+      && (state.stoppedAt === undefined || (typeof state.stoppedAt === "string" && !Number.isNaN(Date.parse(state.stoppedAt))))
+      && (state.stopId === undefined || (typeof state.stopId === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(state.stopId)));
+  }
+  private async loadExecutionStates(): Promise<void> {
+    const file = this.executionStatePath();
+    let raw: string;
+    try { raw = await readFile(file, "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { this.executionStateUnavailable = true; throw new Error("User execution state could not be read; remote execution remains stopped.", { cause: error }); }
+      raw = "[]";
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { this.executionStateUnavailable = true; throw new Error("User execution state is invalid; remote execution remains stopped."); }
+    if (!Array.isArray(parsed) || parsed.length > 10_000 || parsed.some((value) => !this.validateExecutionState(value)) || new Set(parsed.map((value) => (value as UserExecutionState).principalId)).size !== parsed.length) {
+      this.executionStateUnavailable = true;
+      throw new Error("User execution state is invalid; remote execution remains stopped.");
+    }
+    for (const state of parsed as UserExecutionState[]) this.executionStates.set(state.principalId, state);
+    const marker = await readFile(this.executionStopMarkerPath(), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (marker !== undefined) {
+      let pending: unknown;
+      try { pending = JSON.parse(marker); } catch { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery marker is invalid; remote execution remains stopped."); }
+      if (!this.validateExecutionState(pending) || !pending.stopped || !pending.stopId) { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery marker is invalid; remote execution remains stopped."); }
+      const recovered = pending as UserExecutionState;
+      const stored = this.executionStates.get(recovered.principalId);
+      try {
+        if (stored?.stopped !== true || stored.stopId !== recovered.stopId || stored.stopGeneration !== recovered.stopGeneration) { this.executionStates.set(recovered.principalId, recovered); await this.persistExecutionStates(); }
+        await rm(this.executionStopMarkerPath(), { force: true });
+      } catch { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery could not be persisted; remote execution remains stopped."); }
+    }
+  }
+  private async persistExecutionStates(): Promise<void> {
+    const file = this.executionStatePath();
+    const pending = `${file}.next`;
+    try {
+      await writeFile(pending, JSON.stringify([...this.executionStates.values()]), { mode: 0o600 });
+      const handle = await open(pending, "r+");
+      try { await handle.sync(); } finally { await handle.close(); }
+      await rename(pending, file);
+      await protectPrivateFile(file);
+    } catch (error) {
+      this.executionStateUnavailable = true;
+      await rm(pending, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+  private async writeExecutionStopMarker(state: UserExecutionState): Promise<void> {
+    if (!state.stopped || !state.stopId) throw new Error("A stopped execution state is required for recovery.");
+    const markerPath = this.executionStopMarkerPath();
+    await writeFile(markerPath, JSON.stringify(state), { mode: 0o600 });
+    const marker = await open(markerPath, "r+");
+    try { await marker.sync(); } finally { await marker.close(); }
+    await protectPrivateFile(markerPath);
+  }
+  private executionStateFor(user: string): UserExecutionState { return this.executionStates.get(user) ?? { principalId: user, stopped: false, stopGeneration: 0 }; }
+  userExecutionState(user: string): UserExecutionState {
+    const state = this.executionStateFor(user);
+    return { ...state, stopped: state.stopped || this.executionStateUnavailable || this.executionResumes.has(user) };
+  }
+  private requireExecutionAllowed(user: string): void {
+    const state = this.userExecutionState(user);
+    if (state.stopped) throw new UserStopRequested(state);
+  }
+  private requireCurrentOperation(): void {
+    const operation = this.operationContext.getStore();
+    if (!operation) return;
+    const state = this.userExecutionState(operation.user);
+    if (state.stopped || state.stopGeneration !== operation.stopGeneration) throw new UserStopRequested(state);
+  }
+  async stopUserExecution(user: string): Promise<UserExecutionState> { return this.executionStateLock.run(async () => {
+    const prior = this.executionStateFor(user);
+    const state: UserExecutionState = { principalId: user, stopped: true, stopGeneration: prior.stopGeneration + 1, stoppedAt: new Date().toISOString(), stopId: makeId() };
+    this.executionStates.set(user, state);
+    let persistenceFailure: Error | undefined;
+    try { await this.writeExecutionStopMarker(state); }
+    catch { this.executionStateUnavailable = true; persistenceFailure = new Error("Emergency stop recovery marker could not be persisted; remote execution remains stopped."); await this.audit("user.stop_marker_failed", { user }).catch(() => undefined); }
+    if (!persistenceFailure) try { await this.persistExecutionStates(); await rm(this.executionStopMarkerPath(), { force: true }); }
+    catch { persistenceFailure = new Error("Emergency stop state could not be persisted; remote execution remains stopped."); await this.audit("user.stop_persistence_failed", { user }).catch(() => undefined); }
+    for (const session of this.sessions.values()) if (session.user === user && session.state === "active") session.state = "closed";
+    // Do not queue behind a long-running process_start/output operation. The
+    // bridge latches the owner and also catches a PID published after this call.
+    let bridgeAvailable = false;
+    const bridgeTerminatedPids = new Set<number>();
+    if (!this.cfg.processAdapter) {
+      try {
+        const reply = await this.dc.call("_rdmcp_stop_owner", { owner: user }, 2_000, { skipRootPreflight: true, allowStoppedOperation: true });
+        const bridgeResult = JSON.parse(reply) as { stopped?: unknown; terminated_pids?: unknown; failed_pids?: unknown };
+        if (bridgeResult.stopped !== true || !Array.isArray(bridgeResult.terminated_pids) || !bridgeResult.terminated_pids.every((pid) => Number.isInteger(pid) && pid > 0)) throw new Error("Owner stop result is invalid.");
+        bridgeAvailable = true;
+        for (const pid of bridgeResult.terminated_pids) bridgeTerminatedPids.add(pid);
+        if (Array.isArray(bridgeResult.failed_pids)) for (const pid of bridgeResult.failed_pids) if (Number.isInteger(pid) && pid > 0) await this.audit("process.owner_stop_failed", { user, pid, stopId: state.stopId }).catch(() => undefined);
+      }
+      catch { await this.audit("process.owner_stop_unconfirmed", { user, stopId: state.stopId }).catch(() => undefined); }
+    }
+    for (const item of this.processes.values()) if (item.user === user && (item.state === "running" || item.state === "terminating")) {
+      item.state = "terminating"; item.terminationRequested = true;
+      try {
+        if (this.cfg.processAdapter) await this.cfg.processAdapter.terminate(item.pid, 2_000);
+        // A PID can be reused after its old process exits.  Only the private
+        // owner bridge can prove that this PID still belongs to this user; a
+        // generic PID kill here could terminate another user's new process.
+        else if (!bridgeAvailable || !bridgeTerminatedPids.has(item.pid)) {
+          item.terminationUnconfirmed = true;
+          await this.audit("process.stop_unconfirmed", { user, processId: item.id, pid: item.pid, stopId: state.stopId, reason: "owner_not_confirmed" }).catch(() => undefined);
+          continue;
+        }
+        await this.audit("process.stop_requested", { user, processId: item.id, pid: item.pid, stopId: state.stopId }).catch(() => undefined);
+      } catch {
+        item.terminationUnconfirmed = true;
+        await this.audit("process.stop_unconfirmed", { user, processId: item.id, pid: item.pid, stopId: state.stopId }).catch(() => undefined);
+      }
+    }
+    await this.audit("user.stop_requested", { user, stopId: state.stopId, stopGeneration: state.stopGeneration }).catch(() => undefined);
+    await this.transferLock.run(async () => {
+      for (const item of this.transfers.values()) if (item.sessionId && this.sessions.get(item.sessionId)?.user === user && item.state === "active") {
+        item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item);
+        await this.audit("transfer.cancelled_by_user_stop", { user, transferId: item.id, stopId: state.stopId }).catch(() => undefined);
+      }
+    });
+    if (persistenceFailure) throw persistenceFailure;
+    return { ...state };
+  }); }
+  async resumeUserExecution(user: string): Promise<UserExecutionState> { return this.executionStateLock.run(async () => {
+    if (this.executionStateUnavailable) throw new Error("Remote execution state is unavailable and cannot be resumed.");
+    const prior = this.executionStateFor(user);
+    if (!prior.stopped || !prior.stopId) throw new Error("Remote execution is not stopped.");
+    const state: UserExecutionState = { principalId: user, stopped: false, stopGeneration: prior.stopGeneration + 1 };
+    // Persist the prospective state before exposing it. A failed resume must
+    // leave the in-memory latch closed as well as the durable one.
+    this.executionResumes.add(user);
+    try {
+      try {
+        // Keep a durable stopped record until both the new state and the backend
+        // latch have changed.  In particular, persistExecutionStates can fail
+        // after rename (for example while restoring the private ACL), leaving a
+        // false state on disk even though this resume must fail closed.
+        await this.writeExecutionStopMarker(prior);
+        this.executionStates.set(user, state);
+        await this.persistExecutionStates();
+      } catch (error) {
+        this.executionStates.set(user, prior);
+        throw error;
+      }
+      try {
+        if (!this.cfg.processAdapter) await this.dc.call("_rdmcp_resume_owner", { owner: user }, 2_000, { skipRootPreflight: true, allowStoppedOperation: true });
+      } catch (error) {
+        // The backend latch must reopen together with the durable user state.
+        // If it cannot, restore a durable stopped state rather than exposing a
+        // resume that still rejects (or could later partially reopen) processes.
+        this.executionStates.set(user, prior);
+        try { await this.persistExecutionStates(); } catch { this.executionStateUnavailable = true; }
+        throw error;
+      }
+      try { await rm(this.executionStopMarkerPath(), { force: true }); }
+      catch { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery marker could not be cleared; remote execution remains stopped."); }
+      await this.audit("user.execution_resumed", { user, stopGeneration: state.stopGeneration });
+      return { ...state };
+    } finally { this.executionResumes.delete(user); }
+  }); }
   private async sweepExpiredLocked(now = Date.now()): Promise<void> {
     for (const session of this.sessions.values()) {
       if (session.state === "active" && session.expires <= now) {
@@ -234,7 +426,7 @@ export class RemoteDesktopService {
     for (const [id, session] of this.sessions) if (session.state !== "active" && now - session.expires > SESSION_TTL) this.sessions.delete(id);
   }
   async sweepExpired(): Promise<void> { await this.transferLock.run(() => this.sweepExpiredLocked()); }
-  session(user: string, sessionId: string): Session { const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; return value; }
+  session(user: string, sessionId: string): Session { this.requireCurrentOperation(); const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; return value; }
   node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
   private configPath(): string { return path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json"); }
@@ -280,7 +472,14 @@ export class RemoteDesktopService {
     const pending = `${manifest}.next`;
     const records = [...this.protectedConfigIdentities.values()];
     await writeFile(pending, JSON.stringify(records), { mode: 0o600 });
-    await rename(pending, manifest);
+    for (let attempt = 0; ; attempt += 1) {
+      try { await rename(pending, manifest); return; }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if ((code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") || attempt >= 19) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(100, 10 * 2 ** Math.min(attempt, 3))));
+      }
+    }
   }
   private async rememberProtectedConfigIdentity(allowMissing = false): Promise<void> { await this.configIdentityLock.run(() => this.rememberProtectedConfigIdentityLocked(allowMissing)); }
   private async rememberProtectedConfigIdentityLocked(allowMissing: boolean): Promise<void> {
@@ -413,6 +612,7 @@ export class RemoteDesktopService {
     await visit(root.path);
   }
   private async safePath(rootId: string, relative: string, absent = false): Promise<string> {
+    this.requireCurrentOperation();
     const root = this.root(rootId);
     if (!relative || path.isAbsolute(relative) || relative.includes("\0")) throw new Error("A relative path is required.");
     const candidate = path.resolve(root.path, relative);
@@ -458,7 +658,9 @@ export class RemoteDesktopService {
     }
   }
   private async search(root: Root, pattern: string, searchType: "files" | "content"): Promise<string> {
+    this.requireCurrentOperation();
     await this.guardSearchRoot(root);
+    this.requireCurrentOperation();
     const started = await this.dc.call("start_search", { path: root.path, pattern, searchType, maxResults: 500, timeout_ms: 5_000, literalSearch: true });
     const session = started.match(/session:\s*([^\s]+)/i)?.[1];
     if (!session) throw new Error("Desktop Commander did not return a search session.");
@@ -469,6 +671,7 @@ export class RemoteDesktopService {
     let incomplete = false;
     try {
       while (page < 5 && Date.now() < deadline) {
+        this.requireCurrentOperation();
         const output = await this.dc.call("get_more_search_results", { sessionId: session, offset, length: 100 });
         pages.push(output);
         const complete = /Status:\s*COMPLETED/i.test(output);
@@ -495,9 +698,53 @@ export class RemoteDesktopService {
       if (Date.now() >= deadline) incomplete = true;
       if (incomplete) pages.push("Search result collection reached the local service limit; results may be incomplete.");
       return pages.join("\n");
-    } finally { await this.dc.call("stop_search", { sessionId: session }).catch(() => undefined); }
+    } finally { await this.dc.call("stop_search", { sessionId: session }, undefined, { allowStoppedOperation: true }).catch(() => undefined); }
   }
-  private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>) => Promise<unknown>) { return async (args: z.infer<z.ZodObject<T>>) => { try { return result(await fn(args)); } catch (error) { const message = error instanceof Error ? error.message : "Operation failed."; const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error"; await this.audit("operation.rejected", { user, reason }); const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot)/.test(message) ? message : "Operation failed."; return failure(publicMessage); } }; }
+  private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>, operationId: string) => Promise<unknown>) {
+    let toolName = "unknown";
+    const handler = async (args: z.infer<z.ZodObject<T>>) => {
+    const operationId = makeId();
+    const receivedAt = new Date().toISOString();
+    const record = args as Record<string, unknown>;
+    const connectionId = typeof record.session_id === "string" ? record.session_id : `request:${operationId}`;
+    const entryState = this.userExecutionState(user);
+    const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
+      : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
+      : typeof record.transfer_id === "string" ? `transfer:${record.transfer_id.slice(0, 128)}`
+      : typeof record.command === "string" ? "command execution"
+      : "—";
+    let started = false;
+    const entryGeneration = entryState.stopGeneration;
+    try {
+      await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, receivedAt });
+      if (entryState.stopped) throw new UserStopRequested(entryState);
+      started = true;
+      const startAt = new Date().toISOString();
+      await this.audit("operation.started", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, startAt });
+      const body = await this.operationContext.run({ user, operationId, stopGeneration: entryGeneration }, () => { this.requireCurrentOperation(); return fn(args, operationId); });
+      // A stop can arrive while an unavoidable in-flight I/O operation is
+      // completing. Do not present that operation as permission to continue.
+      this.requireCurrentOperation();
+      const openedConnection = isRecord(body) && typeof body.connection_id === "string" ? body.connection_id : isRecord(body) && typeof body.session_id === "string" ? body.session_id : undefined;
+      const terminalConnection = openedConnection ?? connectionId;
+      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded" });
+      return result(body);
+    } catch (error) {
+      if (error instanceof UserStopRequested) {
+        const status = started ? "cancelled" : "rejected";
+        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration }).catch(() => undefined);
+        return stoppedFailure(error.state);
+      }
+      const message = error instanceof Error ? error.message : "Operation failed.";
+      const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
+      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason });
+      const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot)/.test(message) ? message : "Operation failed.";
+      return failure(publicMessage);
+    }
+    };
+    Object.defineProperty(handler, "rdmcpSetToolName", { value: (name: string) => { toolName = name; } });
+    return handler;
+  }
   server(user: string): McpServer {
     const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" });
     type RequestHandler = (...args: unknown[]) => unknown;
@@ -510,22 +757,26 @@ export class RemoteDesktopService {
     } : handler);
     const intercept = server as unknown as { registerTool: (name: string, config: { _meta?: Record<string, unknown> }, handler: unknown) => unknown };
     const originalRegisterTool = intercept.registerTool.bind(server);
-    intercept.registerTool = (name, config, handler) => originalRegisterTool(name, { ...config, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
+    intercept.registerTool = (name, config, handler) => {
+      const tagged = handler as { rdmcpSetToolName?: (tool: string) => void };
+      tagged.rdmcpSetToolName?.(name);
+      return originalRegisterTool(name, { ...config, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
+    };
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
-    server.registerTool("session_open", { description: "Open a local operation session.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); const now = Date.now(); const session: Session = { id: makeId(), user, created: now, touched: now, expires: now + SESSION_TTL, state: "active" }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id }); return { session_id: session.id, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state }; }));
+    server.registerTool("session_open", { description: "Open a local operation session.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); this.requireCurrentOperation(); const now = Date.now(); const session: Session = { id: makeId(), user, created: now, touched: now, expires: now + SESSION_TTL, state: "active" }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, stopGeneration: this.userExecutionState(user).stopGeneration }); return { session_id: session.id, connection_id: session.id, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state }; }));
     server.registerTool("session_list", { description: "List the caller's active sessions.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
     server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
     server.registerTool("node_list", { description: "List the single supported local node and permitted file-root identifiers.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, root_ids: this.cfg.roots.map((root) => root.id), connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
     server.registerTool("file_search", { description: "Search permitted file names through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
     server.registerTool("content_search", { description: "Search permitted file content through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "content"); await this.audit("file.content_search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
     const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500) };
-    server.registerTool("file_read", { description: "Read a permitted text file through Desktop Commander.", inputSchema: { ...fileInput, offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().max(1000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, offset, length }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("read_file", { path: await this.safePath(root_id, relative_path), offset, length }); await this.audit("file.read", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
-    server.registerTool("file_patch", { description: "Apply an exact text replacement through Desktop Commander.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("edit_block", { file_path: await this.safePath(root_id, relative_path), old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
-    server.registerTool("file_transfer_download_begin", { description: "Create an immutable private snapshot for chunk download.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
+    server.registerTool("file_read", { description: "Read a permitted text file through Desktop Commander.", inputSchema: { ...fileInput, offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().max(1000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, offset, length }) => { this.session(user, session_id); const node = this.node(node_id); const filePath = await this.safePath(root_id, relative_path); this.requireCurrentOperation(); const output = await this.dc.call("read_file", { path: filePath, offset, length }); await this.audit("file.read", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
+    server.registerTool("file_patch", { description: "Apply an exact text replacement through Desktop Commander.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const filePath = await this.safePath(root_id, relative_path); this.requireCurrentOperation(); const output = await this.dc.call("edit_block", { file_path: filePath, old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
+    server.registerTool("file_transfer_download_begin", { description: "Create an immutable private snapshot for chunk download.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); this.requireCurrentOperation(); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { this.requireCurrentOperation(); const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
     server.registerTool("file_transfer_download_chunk", { description: "Read the next immutable chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); let handle: FileHandle | undefined; try { handle = await open(item.snapshot, "r"); const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed."); if (complete) { item.state = "complete"; await this.cleanup(item); this.rememberTerminal(item); } return { data: data.toString("base64"), next_offset: item.offset, complete }; } catch (error) { await this.fail(item, "snapshot_read_failed"); throw error; } finally { await handle?.close().catch(() => undefined); } })));
-    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
-    server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
-    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
+    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); this.requireCurrentOperation(); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { this.requireCurrentOperation(); handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); this.requireCurrentOperation(); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
+    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); this.requireCurrentOperation(); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
     server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
       await this.sweepExpiredLocked();
       this.session(user, session_id);
@@ -547,7 +798,7 @@ export class RemoteDesktopService {
     const markStale = (item: Process) => { if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); item.state = "stale"; stopWatching(item.id); };
     const requireCurrent = (item: Process) => { let generation: string; try { generation = this.dc.currentGeneration(); } catch { markStale(item); throw new Error("Process id is stale or finished."); } if (item.generation !== generation || this.currentProcessOwners.get(processKey(item)) !== item.id) { markStale(item); throw new Error("Process id is stale or finished."); } return item; };
     const redactCommand = (command: string) => [this.cfg.tokenSecret, this.cfg.publicAuth?.googleClientSecret ?? "", ...this.cfg.users.map((configured) => configured.passwordHash)].filter(Boolean).reduce((value, secret) => value.split(secret).join("[redacted]"), command).replace(/\bBearer\s+\S+/gi, "Bearer [redacted]").replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]").slice(0, 4000);
-    const startProcess = (command: string, timeout: number) => this.cfg.processAdapter?.start(command, timeout) ?? this.dc.call("start_process", { command, timeout_ms: timeout });
+    const startProcess = (command: string, timeout: number, owner: string, operationId: string) => this.cfg.processAdapter?.start(command, timeout) ?? this.dc.call("start_process", { command, timeout_ms: timeout, __rdmcp_owner: owner, __rdmcp_operation: operationId });
     const readProcess = (item: Process) => this.cfg.processAdapter?.read(item.pid, item.cursor, 1_000) ?? this.dc.call("read_process_output", { pid: item.pid, offset: item.cursor, length: 1000, timeout_ms: 100 }, 1_000);
     const terminateProcess = (item: Process) => this.cfg.processAdapter?.terminate(item.pid, 2_000) ?? this.dc.call("force_terminate", { pid: item.pid }, 2_000);
     const listProcessSessions = () => this.cfg.processAdapter?.sessions() ?? this.dc.call("list_sessions", {}, 1_000);
@@ -559,8 +810,8 @@ export class RemoteDesktopService {
     const activeInDesktopCommander = async (item: Process): Promise<boolean> => { requireCurrent(item); const output = await listProcessSessions(); return new RegExp(`PID:\\s*${item.pid}(?:\\D|$)`, "i").test(output); };
     const observe = async (item: Process) => { const pages: string[] = []; let drained = false; item.outputDrained = false; for (let page = 0; page < 100; page += 1) { requireCurrent(item); const output = await readProcess(item); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); if (completion) { item.completionPending = true; item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]); } if (!remaining || Number(remaining[1]) === 0) { drained = true; break; } } item.outputDrained = drained; item.observationFailures = 0; item.nextObservationAt = undefined; item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); const observed = pages.join("\n"); if (observed && pages.some((page) => !/^Reading 0 (?:new )?lines(?: from line \d+)? \(total: \d+ lines(?:, 0 remaining)?\)\s*$/i.test(page.trim()))) await this.audit("process.output", { sessionId: item.sessionId, processId: item.id, output: redactCommand(observed), outputTruncated: observed.length > 4000 }); if (drained && item.completionPending) { await auditExit(item); item.state = "finished"; item.completionPending = false; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); } return observed; };
     const watchProcess = (processId: string) => { if (this.processWatchers.has(processId)) return; let checking = false; const watcher = setInterval(() => { if (checking) return; checking = true; void this.processLock.run(async () => { const item = this.processes.get(processId); if (!item || item.state === "finished" || item.state === "stale") { stopWatching(processId); return; } if (item.nextObservationAt && item.nextObservationAt > Date.now()) return; try { const active = await activeInDesktopCommander(item); if (item.state === "terminating" && active) return; await observe(item); if (!active && item.outputDrained) await finishWhenRootIsGone(item); } catch { if (this.processes.get(processId)?.state === "stale") { stopWatching(processId); return; } item.observationFailures = (item.observationFailures ?? 0) + 1; item.nextObservationAt = Date.now() + Math.min(5_000, 250 * 2 ** Math.min(item.observationFailures, 4)); if (item.observationFailures === 1) await this.audit("process.observe_failed", { processId }); return; } if (this.processes.get(processId)?.state === "finished") stopWatching(processId); }).finally(() => { checking = false; }); }, 250); watcher.unref(); this.processWatchers.set(processId, watcher); };
-    server.registerTool("process_start", { description: "Start an arbitrary command as the same OS user through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => this.processLock.run(async () => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); let output: string; try { output = await startProcess(command, timeout_ms); } catch { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), result: "実行を開始できませんでした。" }); throw new Error("Process start failed."); } const match = output.match(/PID\s+(-?\d+)/i); if (!match) { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), output: redactCommand(output), outputTruncated: output.length > 4000, result: "Process ID unavailable." }); throw new Error("Desktop Commander did not return a process id."); } const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); const item: Process = { id: makeId(), sessionId: session_id, user, generation: this.dc.currentGeneration(), pid: Number(match[1]), state: initialCompletion ? "finished" : "running", output, cursor: 0, exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]) }; const priorId = this.currentProcessOwners.get(processKey(item)); if (priorId) { const prior = this.processes.get(priorId); if (prior) markStale(prior); } this.processes.set(item.id, item); if (item.state === "running") this.currentProcessOwners.set(processKey(item), item.id); try { await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id, pid: item.pid, command: redactCommand(command), output: redactCommand(output), outputTruncated: output.length > 4000 }); } finally { if (item.state === "running") watchProcess(item.id); } if (item.state === "finished") await auditExit(item); return { process_id: item.id, output }; })));
-    const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.state === "stale") throw new Error("Process id is stale or finished."); if (item.state !== "finished") requireCurrent(item); return item; };
+    server.registerTool("process_start", { description: "Start an arbitrary command as the same OS user through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }, operationId) => this.processLock.run(async () => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); let output: string; try { output = await startProcess(command, timeout_ms, user, operationId); } catch { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), result: "実行を開始できませんでした。" }); throw new Error("Process start failed."); } const match = output.match(/PID\s+(-?\d+)/i); if (!match) { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), output: redactCommand(output), outputTruncated: output.length > 4000, result: "Process ID unavailable." }); throw new Error("Desktop Commander did not return a process id."); } try { this.requireCurrentOperation(); } catch (error) { if (this.cfg.processAdapter) await this.cfg.processAdapter.terminate(Number(match[1]), 2_000).catch(() => undefined); await this.audit(this.cfg.processAdapter ? "process.stop_requested_after_start" : "process.stop_unconfirmed_after_start", { user, sessionId: session_id, pid: Number(match[1]) }); throw error; } const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); const item: Process = { id: makeId(), sessionId: session_id, user, generation: this.dc.currentGeneration(), pid: Number(match[1]), state: initialCompletion ? "finished" : "running", output, cursor: 0, exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]) }; const priorId = this.currentProcessOwners.get(processKey(item)); if (priorId) { const prior = this.processes.get(priorId); if (prior) markStale(prior); } this.processes.set(item.id, item); if (item.state === "running") this.currentProcessOwners.set(processKey(item), item.id); try { await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id, pid: item.pid, command: redactCommand(command), output: redactCommand(output), outputTruncated: output.length > 4000 }); } finally { if (item.state === "running") watchProcess(item.id); } if (item.state === "finished") await auditExit(item); return { process_id: item.id, output }; })));
+    const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.user !== user || item.sessionId !== sid || item.state === "stale") throw new Error("Process id is stale or finished."); if (item.state !== "finished") requireCurrent(item); return item; };
     const current = (sid: string, pid: string) => { const item = getProcess(sid, pid); if (item.state !== "running") throw new Error("Process id is stale or finished."); return item; };
     server.registerTool("process_output", { description: "Read combined process output through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
     server.registerTool("process_status", { description: "Get process status through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
@@ -591,6 +842,7 @@ const publicAuthorizeRequest = (service: RemoteDesktopService, req: Request) => 
 export function createApp(service: RemoteDesktopService): Express {
   const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => { let timer: NodeJS.Timeout | undefined = setTimeout(() => req.destroy(), 15_000); const clearDeadline = () => { if (timer) { clearTimeout(timer); timer = undefined; } }; req.once("end", clearDeadline); req.once("aborted", clearDeadline); res.once("close", clearDeadline); if (["/authorize", "/authorize/confirm", "/authorize/consent", "/token", "/google/callback"].includes(req.path) && Number(req.header("content-length") ?? 0) > 16 * 1024) { clearDeadline(); return res.status(413).type("text").send("Request is too large."); } next(); }); app.use(express.urlencoded({ extended: false, limit: "16kb" })); app.use(["/token", "/authorize/confirm", "/authorize/consent"], express.json({ limit: "16kb" })); app.use(express.json({ limit: "1mb" }));
   mountAdmin(app, service);
+  mountUserConsole(app, service);
   app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: service.publicAuth ? "google" : "local-development" }));
   app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json({ resource: `${service.cfg.baseUrl}/mcp`, authorization_servers: [service.cfg.baseUrl], scopes_supported: ["mcp"] }));
   app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_response_iss_parameter_supported: Boolean(service.publicAuth), authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, ...(service.publicAuth ? { client_id_metadata_document_supported: true } : { registration_endpoint: `${service.cfg.baseUrl}/register` }), response_types_supported: ["code"], grant_types_supported: service.publicAuth ? ["authorization_code", "refresh_token"] : ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp"] }));

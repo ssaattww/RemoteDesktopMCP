@@ -1,0 +1,136 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { createApp, RemoteDesktopService, configFromEnv } from "../src/index.js";
+import { readSessionLogs } from "../src/admin.js";
+import type { OAuthState } from "../src/public-auth.js";
+import { fixture, mcp } from "./fixture.js";
+
+test("emergency stop persists per principal, terminates known processes, and requires a new connection after resume", async () => {
+  const f = await fixture();
+  const terminated: number[] = [];
+  f.service.cfg.processAdapter = { start: async () => "PID 771", read: async () => "Reading 0 new lines (total: 0 lines)", terminate: async (pid) => { terminated.push(pid); return "Successfully initiated termination of session"; }, sessions: async () => "PID: 771" };
+  const api = await mcp(f.service);
+  try {
+    const connection = await api.call("session_open", {});
+    const sessionId = connection.session_id as string;
+    const operationEvents = (await readSessionLogs(f.service)).sessions.flatMap((session) => session.events).filter((event) => event.tool === "session_open");
+    const started = operationEvents.find((event) => event.event === "operation.started")!;
+    const succeeded = operationEvents.find((event) => event.event === "operation.succeeded")!;
+    assert.ok(String(started.connectionId).startsWith("request:"));
+    assert.equal(typeof started.startAt, "string");
+    assert.equal(succeeded.connectionId, sessionId);
+    const process = await api.call("process_start", { session_id: sessionId, command: "test process" });
+    assert.ok(process.process_id);
+    const stopped = await f.service.stopUserExecution("owner@example.test");
+    assert.equal(stopped.stopped, true);
+    assert.equal(stopped.stopGeneration, 1);
+    assert.deepEqual(terminated, [771]);
+    await assert.rejects(api.call("session_open", {}), /USER_STOP_REQUESTED/);
+    const stored = JSON.parse(await readFile(`${f.data}/user-execution-states.json`, "utf8")) as Array<{ stopped: boolean; stopGeneration: number }>;
+    assert.deepEqual(stored, [{ stopped: true, stopGeneration: 1, principalId: "owner@example.test", stoppedAt: stopped.stoppedAt, stopId: stopped.stopId }]);
+    await f.service.resumeUserExecution("owner@example.test");
+    await assert.rejects(api.call("node_list", { session_id: sessionId }), /Session is invalid/);
+    const newConnection = await api.call("session_open", {});
+    assert.ok(newConnection.connection_id);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("user console authenticates the principal, applies CSRF checks, and hides another principal's logs", async () => {
+  const f = await fixture();
+  f.service.cfg.processAdapter = { start: async () => "PID 1", read: async () => "", terminate: async () => "", sessions: async () => "" };
+  await f.service.stopUserExecution("owner@example.test");
+  await f.service.audit("process.owner_stop_unconfirmed", { user: "owner@example.test", stopId: f.service.userExecutionState("owner@example.test").stopId, pid: 444 });
+  await f.service.audit("process.owner_stop_failed", { user: "other@example.test", stopId: "other-stop", pid: 555 });
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    await f.service.audit("session.open", { user: "other@example.test", sessionId: "other-connection" });
+    await f.service.audit("session.open", { user: "owner@example.test", sessionId: "own-connection" });
+    await f.service.audit("operation.received", { user: "owner@example.test", sessionId: "own-connection", connectionId: "own-connection", operationId: "operation-own", tool: "file_read", target: "own-file.txt", receivedAt: "2026-09-27T00:00:00.000Z", status: "running" });
+    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "own-connection", connectionId: "own-connection", operationId: "operation-own", tool: "file_read", target: "own-file.txt", startAt: "2026-09-27T00:00:01.000Z", endedAt: "2026-09-27T00:00:02.000Z", durationMs: 1000, status: "succeeded" });
+    await f.service.audit("operation.received", { user: "owner@example.test", operationId: "operation-open", tool: "session_open", target: "—", receivedAt: "2026-09-27T00:01:00.000Z", status: "running" });
+    await f.service.audit("operation.started", { user: "owner@example.test", operationId: "operation-open", tool: "session_open", target: "—", startAt: "2026-09-27T00:01:01.000Z", status: "running" });
+    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "own-connection", connectionId: "own-connection", operationId: "operation-open", tool: "session_open", target: "—", endedAt: "2026-09-27T00:01:02.000Z", durationMs: 2000, status: "succeeded" });
+    await f.service.audit("operation.received", { user: "owner@example.test", operationId: "operation-rejected-open", tool: "session_open", target: "—", receivedAt: "2026-09-27T00:02:00.000Z", status: "running" });
+    await f.service.audit("operation.rejected", { user: "owner@example.test", operationId: "operation-rejected-open", tool: "session_open", target: "—", endedAt: "2026-09-27T00:02:01.000Z", status: "rejected", reason: "USER_STOP_REQUESTED" });
+    await f.service.audit("process.start", { user: "owner@example.test", sessionId: "own-connection", processId: "own-process", command: "echo private command", output: "same-process-output" });
+    await f.service.audit("process.exit", { user: "owner@example.test", sessionId: "own-connection", processId: "own-process", output: "same-process-output", exitCode: 0 });
+    await f.service.audit("operation.received", { user: "other@example.test", sessionId: "other-connection", connectionId: "other-connection", operationId: "operation-other", tool: "file_read", target: "secret-other.txt", receivedAt: "2026-09-27T00:00:00.000Z", status: "running" });
+    await f.service.audit("operation.rejected", { user: "other@example.test", sessionId: "own-connection", connectionId: "own-connection", operationId: "spoofed-operation", tool: "file_read", target: "foreign secret", status: "rejected" });
+    await f.service.audit("operation.rejected", { user: "owner@example.test", sessionId: "other-connection", connectionId: "other-connection", operationId: "spoofed-session", tool: "file_read", target: "other owner's secret", status: "rejected" });
+    assert.equal((await fetch(`${base}/user`, { redirect: "manual" })).headers.get("location"), "/user/login");
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    assert.equal(login.status, 303);
+    const loginCookie = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1];
+    assert.ok(loginCookie);
+    const cookie = `rdmcp_user=${loginCookie}`;
+    const page = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
+    assert.match(page, /RDMCP User Console/);
+    assert.match(page, /own-connection/);
+    assert.match(page, /operation-own/);
+    assert.match(page, /file_read/);
+    assert.match(page, /succeeded/);
+    assert.match(page, /1000 ms/);
+    assert.match(page, /operation-open/);
+    assert.match(page, /9:01:01/);
+    assert.match(page, /operation-rejected-open/);
+    assert.match(page, /request:operation-rejected-open/);
+    assert.match(page, /停止を再試行/);
+    assert.match(page, /停止担当機能から終了確認応答がありません/);
+    assert.match(page, /PID 444/);
+    assert.match(page, /実行中の操作はありません/);
+    assert.equal(page.split("same-process-output").length - 1, 1, "one process detail shows its final output once");
+    assert.doesNotMatch(page, /other-connection|PID 555/);
+    assert.doesNotMatch(page, /operation-other|secret-other\.txt|spoofed-operation|foreign secret|spoofed-session|other owner's secret/);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    assert.equal((await fetch(`${base}/user/emergency-stop`, { method: "POST", headers: { cookie, origin: f.service.cfg.baseUrl }, redirect: "manual" })).status, 403, "Origin alone must not satisfy CSRF validation");
+    const stopped = await fetch(`${base}/user/emergency-stop`, { method: "POST", headers: { cookie, origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }), redirect: "manual" });
+    assert.equal(stopped.status, 303);
+    assert.equal(f.service.userExecutionState("owner@example.test").stopped, true);
+    const afterRetry = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
+    assert.doesNotMatch(afterRetry, /PID 444/, "warnings from the previous stopId disappear after retry");
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("custom Desktop Commander launchers remain bootstrap-managed", () => {
+  const shared = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: '[{"email":"u","passwordHash":"scrypt$x$y"}]', FILE_ROOTS_JSON: '[{"id":"r","path":"reference"}]', DESKTOP_COMMANDER_COMMAND: process.execPath, DESKTOP_COMMANDER_ARGS: "entry.mjs" };
+  assert.throws(() => configFromEnv(shared), /managed Desktop Commander launcher is supported/i);
+  assert.throws(() => configFromEnv({ ...shared, DESKTOP_COMMANDER_ARGS: "" }), /managed Desktop Commander launcher is supported/i);
+});
+
+test("Google user login binds callback cookie at the callback path and rechecks approval", async () => {
+  const identity = { iss: "https://accounts.google.com", sub: "user-sub" };
+  const state: OAuthState = { version: 1, epoch: 1, allowedSubjects: [identity], refreshes: [], families: {} };
+  const cfg = configFromEnv({ BASE_URL: "https://example.test", TOKEN_SECRET: "x".repeat(40), REMOTE_AUTH_MODE: "google", GOOGLE_CLIENT_ID: "client", GOOGLE_CLIENT_SECRET: "secret", FILE_ROOTS_JSON: '[{"id":"files","path":"reference"}]' });
+  cfg.publicAuthOptions = { store: { load: async () => structuredClone(state), save: async () => undefined }, verifier: { authorizationUrl: ({ state }) => `https://accounts.google.com/?state=${state}`, exchangeCode: async () => identity } };
+  const service = new RemoteDesktopService(cfg);
+  const server = createApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const begin = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: cfg.baseUrl }, redirect: "manual" });
+    assert.equal(begin.status, 303);
+    assert.match(begin.headers.get("content-security-policy")!, /default-src 'none'/);
+    const callbackUrl = new URL(begin.headers.get("location")!);
+    const flowState = callbackUrl.searchParams.get("state")!;
+    const setCookie = begin.headers.get("set-cookie")!;
+    const binding = /rdmcp_user_google_binding=([^;,]+)/.exec(setCookie)?.[1];
+    assert.ok(binding);
+    const callback = await fetch(`${base}/google/callback?state=${encodeURIComponent(flowState)}&code=valid`, { headers: { cookie: `rdmcp_user_google_binding=${binding}` }, redirect: "manual" });
+    assert.equal(callback.status, 303);
+    assert.equal(callback.headers.get("cache-control"), "no-store");
+    assert.equal(callback.headers.get("x-content-type-options"), "nosniff");
+    const userCookie = /rdmcp_user=([^;,]+)/.exec(callback.headers.get("set-cookie")!)?.[1];
+    assert.ok(userCookie);
+    const csrfGuard = { method: "POST", headers: { cookie: `rdmcp_user=${userCookie}`, origin: cfg.baseUrl }, redirect: "manual" as RequestRedirect };
+    assert.equal((await fetch(`${base}/user/resume`, csrfGuard)).status, 403, "an approved browser session reaches the CSRF guard");
+    state.allowedSubjects = [];
+    const revoked = await fetch(`${base}/user/resume`, csrfGuard);
+    assert.equal(revoked.status, 303);
+    assert.equal(revoked.headers.get("location"), "/user/login");
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});

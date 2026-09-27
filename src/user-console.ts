@@ -1,0 +1,144 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import type { Express, Request, Response } from "express";
+import { readSessionLogs } from "./admin.js";
+import type { RemoteDesktopService } from "./index.js";
+import { GoogleOidcClient, type GoogleIdentity } from "./public-auth.js";
+import { verifyPassword } from "./hash-password.js";
+
+const id = () => randomBytes(32).toString("base64url");
+const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
+const cookieName = "rdmcp_user";
+const cookie = (header: string | undefined, name = cookieName) => header?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
+const principalFor = (identity: GoogleIdentity) => `google:${identity.iss}:${identity.sub}`;
+const jst = (value: unknown) => { const date = new Date(String(value ?? "")); return value === undefined || value === "—" || Number.isNaN(date.getTime()) ? "—" : `${new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "medium", hourCycle: "h23" }).format(date)} JST`; };
+const page = (body: string) => `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RDMCP User Console</title><style>body{font:16px system-ui,sans-serif;background:#f4f6fa;color:#17243b;margin:0}main{max-width:1100px;margin:40px auto;padding:24px}header{display:flex;gap:12px;align-items:center;flex-wrap:wrap}header h1{margin-right:auto}section,form{background:#fff;border:1px solid #dbe2ec;border-radius:12px;padding:20px;margin:18px 0}button{font:inherit;padding:10px;margin:4px}.danger{background:#b42318;color:#fff;border:0;font-weight:700}.ok{background:#147a43;color:#fff;border:0;font-weight:700}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:10px;border-bottom:1px solid #dbe2ec;vertical-align:top}.scroll{overflow:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef2f7;padding:12px;border-radius:8px}.stopped{color:#b42318;font-weight:700}.running{color:#a15c00;font-weight:700}small{color:#526078}@media(max-width:600px){main{margin:10px auto;padding:10px}section,form{padding:12px}th,td{padding:7px;white-space:nowrap}}</style><main>${body}</main></html>`;
+
+type Login = { principal: string; expires: number; csrf: string; email?: string; identity?: GoogleIdentity };
+type Pending = { binding: string; nonce: string; expires: number };
+type Budget = { attempts: number; reset: number };
+
+export function mountUserConsole(app: Express, service: RemoteDesktopService) {
+  const logins = new Map<string, Login>();
+  const pending = new Map<string, Pending>();
+  const loginBudgets = new Map<string, Budget>();
+  const passwordBudgets = new Map<string, Budget>();
+  const google = service.cfg.publicAuth;
+  const verifier = google ? service.cfg.publicAuthOptions?.verifier ?? new GoogleOidcClient(google.googleClientId, google.googleClientSecret) : undefined;
+  const setCookie = (res: Response, value: string, age: number, name = cookieName, cookiePath = "/user") => res.append("Set-Cookie", `${name}=${value}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Max-Age=${age}${service.cfg.baseUrl.startsWith("https:") ? "; Secure" : ""}`);
+  const setLoginCookie = (res: Response, value: string, age: number) => setCookie(res, value, age);
+  const clean = () => { const now = Date.now(); for (const [key, value] of logins) if (value.expires <= now) logins.delete(key); for (const [key, value] of pending) if (value.expires <= now) pending.delete(key); for (const [key, value] of loginBudgets) if (value.reset <= now) loginBudgets.delete(key); for (const [key, value] of passwordBudgets) if (value.reset <= now) passwordBudgets.delete(key); };
+  const remember = <T>(map: Map<string, T>, key: string, value: T, maximum: number) => { map.delete(key); while (map.size >= maximum) map.delete(map.keys().next().value!); map.set(key, value); };
+  const consume = (map: Map<string, Budget>, key: string) => { const now = Date.now(); const prior = map.get(key); const budget = !prior || prior.reset <= now ? { attempts: 1, reset: now + 60_000 } : { ...prior, attempts: prior.attempts + 1 }; remember(map, key, budget, 2_000); return budget.attempts <= 10; };
+  const constantTimeEqual = (left: string, right: string) => { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); };
+  const loginAllowed = async (login: Login) => login.identity
+    ? Boolean(await service.publicAuth?.isAllowedIdentity(login.identity))
+    : Boolean(login.email && login.principal === login.email && service.cfg.users.some((entry) => entry.email === login.email));
+  const newLogin = (principal: string, extra: { email?: string; identity?: GoogleIdentity } = {}) => ({ principal, expires: Date.now() + 3600_000, csrf: id(), ...extra });
+  const passwordPrincipal = async (req: Request): Promise<string | undefined> => {
+    const email = typeof req.body?.email === "string" ? req.body.email : "";
+    const user = service.cfg.users.find((entry) => entry.email === email);
+    return user && typeof req.body?.password === "string" && await verifyPassword(req.body.password, user.passwordHash) ? user.email : undefined;
+  };
+  const current = (req: Request) => logins.get(cookie(req.header("cookie")) ?? "");
+  const requireCsrf = (req: Request, res: Response): boolean => {
+    const login = current(req);
+    const supplied = typeof req.body?.csrf === "string" ? req.body.csrf : req.header("x-csrf-token") ?? "";
+    if (req.header("origin") === new URL(service.cfg.baseUrl).origin && login && constantTimeEqual(supplied, login.csrf)) return true;
+    res.sendStatus(403); return false;
+  };
+
+  app.use("/user", (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); res.setHeader("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${google ? " https://accounts.google.com" : ""}; frame-ancestors 'none'; base-uri 'none'`); res.setHeader("Referrer-Policy", "same-origin"); res.setHeader("X-Content-Type-Options", "nosniff"); clean(); next(); });
+  app.get("/user/login", (_req, res) => res.type("html").send(page(`<h1>RDMCP User Console</h1>${google ? '<form method="post" action="/user/login"><button>Google でログイン</button></form>' : '<form method="post" action="/user/login"><label>メールアドレス <input name="email" type="email" required autocomplete="username"></label><label>パスワード <input name="password" type="password" required autocomplete="current-password"></label><button>ログイン</button></form>'}`)));
+  app.post("/user/login", async (req, res) => {
+    if (req.header("origin") !== new URL(service.cfg.baseUrl).origin) return res.sendStatus(403);
+    const offeredBudget = cookie(req.header("cookie"), "rdmcp_user_login_budget");
+    const browserKey = offeredBudget && loginBudgets.has(offeredBudget) ? offeredBudget : id();
+    const loginPermitted = consume(loginBudgets, browserKey);
+    setCookie(res, browserKey, 60, "rdmcp_user_login_budget");
+    if (!loginPermitted) return res.sendStatus(429);
+    if (google && verifier) {
+      const state = `user_${id()}`; const binding = id(); const nonce = id();
+      if (pending.size >= 1_000) return res.sendStatus(429);
+      pending.set(state, { binding, nonce, expires: Date.now() + 300_000 }); setCookie(res, binding, 300, "rdmcp_user_google_binding", "/");
+      return res.redirect(303, verifier.authorizationUrl({ redirectUri: google.googleRedirectUri, state, nonce }));
+    }
+    const email = typeof req.body?.email === "string" ? req.body.email.slice(0, 320) : "";
+    if (!consume(passwordBudgets, `ip:${req.socket.remoteAddress ?? "unknown"}`) || !consume(passwordBudgets, `account:${email}`)) return res.sendStatus(429);
+    const principal = await passwordPrincipal(req);
+    if (!principal) return res.status(403).type("html").send(page('<p>ログインできません。</p><a href="/user/login">再試行</a>'));
+    const token = id(); remember(logins, token, newLogin(principal, { email: principal }), 2_000); setLoginCookie(res, token, 3600); return res.redirect(303, "/user");
+  });
+  app.get("/google/callback", async (req, res, next) => {
+    res.setHeader("Cache-Control", "no-store"); res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"); res.setHeader("Referrer-Policy", "no-referrer"); res.setHeader("X-Content-Type-Options", "nosniff");
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    if (!state.startsWith("user_")) return next();
+    clean();
+    const flow = pending.get(state);
+    if (!flow || flow.expires <= Date.now() || flow.binding !== cookie(req.header("cookie"), "rdmcp_user_google_binding") || !google || !verifier || typeof req.query.code !== "string" || req.query.error) return res.status(403).send("ログインできません。");
+    pending.delete(state);
+    try {
+      const identity = await verifier.exchangeCode({ code: req.query.code, state, nonce: flow.nonce, redirectUri: google.googleRedirectUri });
+      if (!await service.publicAuth?.isAllowedIdentity(identity)) return res.status(403).send("ログインできません。");
+      const token = id(); remember(logins, token, newLogin(principalFor(identity), { identity }), 2_000); setLoginCookie(res, token, 3600); setCookie(res, "", 0, "rdmcp_user_google_binding", "/"); return res.redirect(303, "/user");
+    } catch { return res.status(403).send("ログインできません。"); }
+  });
+  app.use("/user", async (req, res, next) => { const login = current(req); if (!login || !await loginAllowed(login)) return res.redirect(303, "/user/login"); res.locals.principal = login.principal; res.locals.csrf = login.csrf; next(); });
+  app.post("/user/logout", (req, res) => { if (!requireCsrf(req, res)) return; logins.delete(cookie(req.header("cookie")) ?? ""); setLoginCookie(res, "", 0); return res.redirect(303, "/user/login"); });
+  app.post("/user/emergency-stop", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.stopUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "停止状態を保存できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
+  app.post("/user/resume", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.resumeUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "再開できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
+  app.get(["/user", "/user/"], async (req, res) => {
+    const principal = res.locals.principal as string;
+    const state = service.userExecutionState(principal);
+    const { sessions, stopWarnings } = await readSessionLogs(service);
+    const own = sessions.filter((session) => session.user === principal);
+    const stoppedAt = Date.parse(String(state.stoppedAt ?? ""));
+    const currentStopWarnings = state.stopped ? stopWarnings.filter((warning) => warning.user === principal && Date.parse(warning.at) >= stoppedAt && (!warning.stopId || warning.stopId === state.stopId)) : [];
+    const running = [...service.processes.values()].filter((process) => process.user === principal && (process.state === "running" || process.state === "terminating"));
+    const operationEvents = own.flatMap((session) => session.events.map((event) => ({ session, event })))
+      .filter(({ event }) => event.user === principal && ["operation.received", "operation.started", "operation.succeeded", "operation.failed", "operation.cancelled", "operation.rejected"].includes(event.event))
+      .sort((left, right) => Date.parse(left.event.at) - Date.parse(right.event.at));
+    const operationMap = new Map<string, { session: typeof own[number]; event: Record<string, unknown> & { event: string; at: string } }>();
+    for (const currentEvent of operationEvents) {
+      const key = String(currentEvent.event.operationId ?? `${currentEvent.session.id}:${currentEvent.event.at}:${currentEvent.event.event}`);
+      const previous = operationMap.get(key);
+      operationMap.set(key, { session: currentEvent.session, event: { ...(previous?.event ?? {}), ...currentEvent.event, receivedAt: previous?.event.receivedAt ?? currentEvent.event.receivedAt ?? currentEvent.event.at, startAt: currentEvent.event.startAt ?? previous?.event.startAt, endedAt: currentEvent.event.endedAt ?? previous?.event.endedAt, durationMs: currentEvent.event.durationMs ?? previous?.event.durationMs, connectionId: currentEvent.event.connectionId ?? previous?.event.connectionId } });
+    }
+    const operations = [...operationMap.values()].map(({ session, event }) => {
+      const status = typeof event.status === "string" ? event.status : event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(event.event) ? event.event.slice("operation.".length) : "running";
+      return { session, event, status };
+    }).sort((left, right) => Date.parse(String(right.event.receivedAt ?? right.event.at)) - Date.parse(String(left.event.receivedAt ?? left.event.at))).slice(0, 200);
+    const runningOperations = operations.filter((operation) => operation.status === "running");
+    const csrf = escape(res.locals.csrf);
+    const stopWarningLabels: Record<string, string> = { "process.owner_stop_unconfirmed": "停止担当機能から終了確認応答がありません。", "process.owner_stop_failed": "プロセスへの停止要求に失敗しました。", "process.stop_unconfirmed": "プロセスの終了を確認できませんでした。", "process.stop_unconfirmed_after_start": "停止中に開始したプロセスの終了を確認できませんでした。", "process.stop_requested_after_start": "停止中に返されたプロセス ID に停止要求を行いました。", "user.stop_marker_failed": "停止状態の復旧マーカーを保存できませんでした。", "user.stop_persistence_failed": "停止状態を保存できませんでした。" };
+    const warningRows = currentStopWarnings.map((warning) => `<li>${escape(stopWarningLabels[warning.event] ?? "停止処理に未確認の結果があります。")}${warning.pid ? ` PID ${escape(warning.pid)}` : ""}</li>`).join("");
+    let body = `<header><h1>RDMCP User Console</h1><form method="post" action="/user/logout"><input type="hidden" name="csrf" value="${csrf}"><button>ログアウト</button></form></header><section><h2>Remote execution: <span class="${state.stopped ? "stopped" : ""}">${state.stopped ? "STOPPED" : "READY"}</span></h2><p>Stop generation: ${state.stopGeneration}</p>${state.stopped ? `<p>Stopped at: ${jst(state.stoppedAt)}<br><span style="overflow-wrap:anywhere">Stop ID: ${escape(state.stopId)}</span></p><p class="stopped">停止状態は新しい実行を遮断します。既存プロセスの終了確認は別に行います。</p>${warningRows ? `<p class="stopped">この停止要求で終了を確認できなかった処理:</p><ul>${warningRows}</ul>` : ""}<p>停止要求を再試行して、応答を確認できなかったプロセスや開始処理中のプロセスを再走査できます。</p><form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">停止を再試行</button></form><form method="post" action="/user/resume"><input type="hidden" name="csrf" value="${csrf}"><button class="ok">実行を再開</button></form>` : `<form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">EMERGENCY STOP / 全実行停止</button></form>`}<p><small>終了を確認できていない処理が残る場合があります。停止中は停止要求を再試行できます。</small></p></section>`;
+    body += `<section><h2>接続状態</h2><p>有効な接続: ${own.filter((session) => session.state === "active").length}</p><p>現在実行中の操作: ${runningOperations.length + running.length}</p><p><small>停止後は再開しても以前の接続を再利用できません。</small></p></section>`;
+    const runningRows = [
+      ...runningOperations.map(({ session, event }) => ({ operationId: String(event.operationId ?? "—"), connectionId: String(event.connectionId ?? session.id), label: String(event.tool ?? "operation"), status: "running" })),
+      ...running.map((process) => ({ operationId: process.id, connectionId: process.sessionId, label: "process", status: `${process.state}${process.terminationUnconfirmed ? " (termination unconfirmed)" : ""}` })),
+    ];
+    body += `<section><h2>Running operations</h2>${runningRows.length ? `<div class="scroll"><table><thead><tr><th>Operation ID</th><th>Connection ID</th><th>Tool / 状態</th></tr></thead><tbody>${runningRows.map((item) => `<tr><td style="overflow-wrap:anywhere">${escape(item.operationId)}</td><td style="overflow-wrap:anywhere">${escape(item.connectionId)}</td><td class="running">${escape(item.label)} · ${escape(item.status)}</td></tr>`).join("")}</tbody></table></div>` : "<p>実行中の操作はありません。</p>"}</section>`;
+    const opRows = operations.map(({ session, event, status }) => {
+      const tool = String(event.tool ?? "—");
+      const receivedAt = String(event.receivedAt ?? event.at);
+      const started = typeof event.startAt === "string" ? event.startAt : "—";
+      const ended = typeof event.endedAt === "string" ? event.endedAt : "—";
+      const target = typeof event.target === "string" ? event.target : "—";
+      const operationId = String(event.operationId ?? "—");
+      const connectionId = String(event.connectionId ?? session.id ?? "—");
+      return `<tr><td>${jst(receivedAt)}</td><td style="overflow-wrap:anywhere">${escape(connectionId)}</td><td style="overflow-wrap:anywhere">${escape(operationId)}</td><td>${escape(tool)}</td><td>${escape(status)}</td><td>${escape(target)}</td><td>${jst(started)}</td><td>${jst(ended)}</td><td>${event.durationMs === undefined ? "—" : `${escape(event.durationMs)} ms`}</td></tr>`;
+    }).join("");
+    const ownedProcessIds = new Set(own.flatMap((session) => session.events.filter((event) => event.event === "process.start" && event.user === principal).map((event) => String(event.processId ?? ""))));
+    const processGroups = new Map<string, { session: typeof own[number]; start?: Record<string, unknown> & { event: string; at: string }; latest: Record<string, unknown> & { event: string; at: string } }>();
+    for (const session of own) for (const event of session.events) {
+      if (!["process.start", "process.output", "process.exit"].includes(event.event) || !(event.user === principal || (typeof event.processId === "string" && ownedProcessIds.has(event.processId)))) continue;
+      const key = typeof event.processId === "string" ? event.processId : `${session.id}:${event.at}:${event.event}`;
+      const previous = processGroups.get(key);
+      processGroups.set(key, { session, start: event.event === "process.start" ? event : previous?.start, latest: event });
+    }
+    const processDetails = [...processGroups.values()].slice(-100).reverse();
+    body += `<section><h2>Invocation log</h2><div class="scroll"><table><thead><tr><th>受信時刻</th><th>Connection ID</th><th>Operation ID</th><th>Tool</th><th>状態</th><th>対象</th><th>開始</th><th>終了</th><th>実行時間</th></tr></thead><tbody>${opRows}</tbody></table></div><p><small>この画面には現在ログインしている使用者自身の記録だけを表示します。</small></p></section>`;
+    if (processDetails.length) body += `<section><h2>コマンドと出力の詳細</h2>${processDetails.map(({ session, start, latest }) => `<article><p>${jst(latest.at)} · ${escape(session.id)} · ${escape(latest.event)}</p>${(start?.command ?? latest.command) === undefined ? "" : `<h3>コマンド</h3><pre>${escape(start?.command ?? latest.command)}</pre>`}${latest.output === undefined ? "" : `<h3>出力</h3><pre>${escape(latest.output)}</pre>`}${latest.result ? `<p>${escape(latest.result)}</p>` : ""}</article>`).join("")}</section>`;
+    return res.type("html").send(page(body));
+  });
+}

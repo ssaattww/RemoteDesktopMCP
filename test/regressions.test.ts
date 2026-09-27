@@ -417,7 +417,9 @@ test("NR003 and NR004: searches return every page and portable Node processes re
     await Promise.all([
       writeFile(linesScript, "for (let index = 0; index < 1005; index += 1) console.log(`line-${index}`);"),
       writeFile(naturalScript, "setTimeout(() => process.exit(7), 150);"),
-      writeFile(longScript, "console.log('ready'); setTimeout(() => process.exit(0), 4_500);"),
+      // Leave enough time for heavily loaded Windows CI to report a live
+      // process after the initial 200 ms start response and root preflight.
+      writeFile(longScript, "console.log('ready'); setTimeout(() => process.exit(0), 15_000);"),
     ]);
     const natural = await api.call("process_start", { session_id: session, command: nodeScriptCommand(naturalScript), timeout_ms: 10_000 });
     const naturalId = natural.process_id as string;
@@ -450,7 +452,7 @@ test("NR003 and NR004: searches return every page and portable Node processes re
       terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
       assert.match(terminationAudit, new RegExp(`"event":"process\\.exit"[^\\n]*"processId":"${killedId}"`));
     } else if (killed.termination_unconfirmed === true) {
-      await new Promise((resolve) => setTimeout(resolve, 4_700));
+      await new Promise((resolve) => setTimeout(resolve, 15_200));
       terminationAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
       assert.match(terminationAudit, new RegExp(`"event":"process\\.termination_unconfirmed"[^\\n]*"processId":"${killedId}"`));
     } else {
@@ -564,7 +566,7 @@ test("Desktop Commander stderr is drained before repeated get_config calls can b
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import readline from "node:readline";
-const names = ${JSON.stringify(["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"])};
+const names = ${JSON.stringify(["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"])};
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
