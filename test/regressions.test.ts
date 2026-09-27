@@ -101,7 +101,7 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
       assert.match(tools.get(name)!, /root_id/i);
       assert.match(tools.get(name)!, /relative_path/i);
     }
-    assert.match(tools.get("file_transfer_download_begin")!, /immutable snapshot/i);
+    assert.match(tools.get("file_transfer_download_begin")!, /snapshot copy/i);
     assert.match(tools.get("file_transfer_upload_commit")!, /SHA-256/i);
     assert.match(tools.get("file_transfer_upload_commit")!, /atomic/i);
     assert.match(tools.get("process_start")!, /OS user's permissions/i);
