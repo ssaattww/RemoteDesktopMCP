@@ -17,7 +17,7 @@ const cookie = (header: string | undefined, name = cookieName) => header?.split(
 const page = (body: string) => `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>サーバー管理 | Remote Desktop MCP</title><style>body{font:16px system-ui,sans-serif;background:#f4f6fa;color:#17243b;margin:0;overflow-x:hidden}main{max-width:1100px;margin:40px auto;padding:24px}h1{font-size:28px}h2{font-size:21px}section,form{background:white;padding:24px;border:1px solid #dbe2ec;border-radius:12px;margin:18px 0}header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header h1{margin:0 auto 0 0}.logout{display:inline;margin:0;padding:0;background:transparent;border:0}.logout button{margin:0;padding:6px 9px;font-size:14px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:12px;border-bottom:1px solid #dbe2ec;vertical-align:top}input,button{font:inherit;padding:10px;margin:8px}small{color:#526078}.scroll{overflow:auto}@media(max-width:600px){body{font-size:13px}main{margin:12px auto;padding:10px}h1{font-size:21px}h2{font-size:17px;margin:0 0 8px}section,form{padding:10px;margin:10px 0}header{gap:8px}header span{font-size:12px}th,td{padding:7px;white-space:nowrap}input,button{max-width:100%;margin:3px;padding:7px}}</style><main>${body}</main></html>`;
 
 type Entry = Record<string, unknown> & { event: string; at: string };
-export type SessionLog = { id: string; user: string; at: string; state: string; workingDirectory?: string; purpose?: string; latestCommandAt?: string; events: Entry[] };
+export type SessionLog = { id: string; user: string; at: string; lastAccessAt?: string; state: string; workingDirectory?: string; purpose?: string; latestCommandAt?: string; events: Entry[] };
 export type UserStopWarning = { user: string; event: string; at: string; stopId?: string; pid?: number };
 const dateValue = (value: string | undefined) => {
   const parsed = value ? Date.parse(value) : Number.NaN;
@@ -87,7 +87,7 @@ export async function readSessionLogs(service: RemoteDesktopService) {
     }
     if (processId) rememberProcess(processId, { sessionId: sid, command: entry.event === "process.start" && entry.command !== undefined ? entry.command : knownProcess?.command });
     let session = sessions.get(sid);
-    if (!session) { session = { id: sid, user: String(entry.user ?? "不明"), at: entry.at, state: "unavailable", events: [] }; sessions.set(sid, session); }
+    if (!session) { session = { id: sid, user: String(entry.user ?? "不明"), at: entry.at, lastAccessAt: entry.at, state: "unavailable", events: [] }; sessions.set(sid, session); }
     if (operationId && entry.event === "operation.succeeded" && sid !== `request:${operationId}`) {
       const provisional = sessions.get(`request:${operationId}`);
       if (provisional && provisional.user === session.user && entry.user === session.user) {
@@ -102,8 +102,10 @@ export async function readSessionLogs(service: RemoteDesktopService) {
         pendingOperations.delete(operationId);
       }
     }
+    if (entry.user === session.user && ["session.open", "session.close", "operation.received"].includes(entry.event) && dateValue(entry.at) >= dateValue(session.lastAccessAt)) session.lastAccessAt = entry.at;
     if (entry.event === "process.start") session.latestCommandAt = entry.at;
     if (entry.event === "session.open" && entry.user === session.user) {
+      session.at = entry.at;
       if (typeof entry.workingDirectory === "string") session.workingDirectory = entry.workingDirectory;
       if (typeof entry.purpose === "string") session.purpose = entry.purpose;
     }
@@ -126,6 +128,8 @@ export async function readSessionLogs(service: RemoteDesktopService) {
     let session = sessions.get(live.id);
     if (!session) { session = { id: live.id, user: live.user, at: new Date(live.created).toISOString(), state: live.state, events: [] }; sessions.set(live.id, session); }
     session.state = live.state === "active" && live.expires <= Date.now() ? "expired" : live.state;
+    session.at = new Date(live.created).toISOString();
+    session.lastAccessAt = new Date(live.touched).toISOString();
     session.workingDirectory = live.workingDirectory;
     session.purpose = live.purpose;
   }
