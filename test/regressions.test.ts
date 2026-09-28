@@ -121,12 +121,17 @@ test("Issue 20: root-scoped file operations expose their canonical path when the
   const f = await fixture(); const api = await mcp(f.service);
   try {
     const workingDirectory = path.join(f.base, "session-cwd");
+    const sourceDirectory = path.join(f.root, "actual-source");
+    const uploadDirectory = path.join(f.root, "actual-upload");
     const rootFile = path.join(f.root, "root-only.txt");
-    const uploadedName = "uploaded-from-root-base.bin";
-    const uploadedPath = path.join(f.root, uploadedName);
+    const downloadFile = path.join(sourceDirectory, "download-only.txt");
+    const uploadedName = "linked-upload/uploaded-from-root-base.bin";
+    const uploadedPath = path.join(uploadDirectory, "uploaded-from-root-base.bin");
     await mkdir(workingDirectory);
+    await Promise.all([mkdir(sourceDirectory), mkdir(uploadDirectory)]);
     await Promise.all([
       writeFile(rootFile, "root content before patch"),
+      writeFile(downloadFile, "download content through an in-root symlink"),
       writeFile(path.join(workingDirectory, "cwd-only.txt"), "session CWD content"),
       writeFile(path.join(workingDirectory, "report-cwd.cjs"), "process.stdout.write(process.cwd())"),
     ]);
@@ -139,8 +144,8 @@ test("Issue 20: root-scoped file operations expose their canonical path when the
     assert.deepEqual(node.roots, [{ root_id: "files", absolute_path: f.root }]);
     assert.equal(node.path_base, "root");
 
-    const process = await api.call("process_start", { session_id: session, command: nodeScriptCommand(path.join(workingDirectory, "report-cwd.cjs")), timeout_ms: 10_000 });
-    assert.match(String(process.output), new RegExp(workingDirectory.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")), "process_start uses the session working directory");
+    const startedProcess = await api.call("process_start", { session_id: session, command: nodeScriptCommand(path.join(workingDirectory, "report-cwd.cjs")), timeout_ms: 10_000 });
+    assert.match(String(startedProcess.output), new RegExp(workingDirectory.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")), "process_start uses the session working directory");
 
     const names = await api.call("file_search", { session_id: session, root_id: "files", query: "root-only" });
     assert.match(String(names.output), /root-only\.txt/, "file search uses root_id rather than the session working directory");
@@ -150,11 +155,15 @@ test("Issue 20: root-scoped file operations expose their canonical path when the
     await api.call("file_patch", { session_id: session, root_id: "files", relative_path: "root-only.txt", old_string: "before patch", new_string: "after patch" });
     assert.equal(await readFile(rootFile, "utf8"), "root content after patch");
     await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "../session-cwd/cwd-only.txt" }), /Path is outside/, "root escape protection remains in force");
+    await Promise.all([
+      symlink(sourceDirectory, path.join(f.root, "linked-source"), process.platform === "win32" ? "junction" : "dir"),
+      symlink(uploadDirectory, path.join(f.root, "linked-upload"), process.platform === "win32" ? "junction" : "dir"),
+    ]);
 
-    const download = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "root-only.txt" });
-    assert.equal(download.resolved_path, rootFile); assert.equal(download.root_id, "files"); assert.equal(download.path_base, "root");
+    const download = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "linked-source/download-only.txt" });
+    assert.equal(download.resolved_path, downloadFile); assert.equal(download.root_id, "files"); assert.equal(download.path_base, "root");
     const downloaded = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: download.transfer_id, offset: 0 });
-    assert.equal(Buffer.from(downloaded.data as string, "base64").toString("utf8"), "root content after patch");
+    assert.equal(Buffer.from(downloaded.data as string, "base64").toString("utf8"), "download content through an in-root symlink");
 
     const bytes = Buffer.from("upload bytes in configured root");
     const upload = await api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: uploadedName, size: bytes.length, sha256: sha256(bytes), overwrite: false });
