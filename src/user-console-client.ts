@@ -15,7 +15,7 @@ export function mergeBoundedItems(current: ConsoleLogItem[], incoming: ConsoleLo
 
 export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogItem[], direction: "older" | "newer", limit = 1000) {
   const byId = new Map(current.map((item) => [item.id, item]));
-  const unique = incoming.filter((item) => !byId.has(item.id));
+  const unique = incoming.filter((item) => { if (byId.has(item.id)) return false; byId.set(item.id, item); return true; });
   const combined = direction === "older" ? [...unique, ...current] : [...current, ...unique];
   return {
     items: direction === "older" ? combined.slice(0, limit) : combined.slice(-limit),
@@ -57,7 +57,7 @@ function clientBootstrap(): void {
   let baselineCaptured = false;
   let baselineCleared = false;
   const baselineOperations = new Map<string, Record<string, unknown>>();
-  const baselineProcesses = new Map<string, { session: string; process: string; events: Array<Record<string, unknown>> }>();
+  const baselineProcesses = new Map<string, { session: string; process: string; start?: Record<string, unknown> }>();
   let connection: EventSource | undefined;
   let generation = 0;
   let storeGeneration = 0;
@@ -94,23 +94,18 @@ function clientBootstrap(): void {
         if (key) baselineOperations.set(key, event);
       } catch { /* Ignore a malformed row; API items still populate the live view. */ }
     });
-    const all: Array<{ session: string; process: string; event: Record<string, unknown>; order: number }> = [];
-    processDetails?.querySelectorAll<HTMLElement>(".process-block[data-events-json]").forEach((block, order) => {
+    processDetails?.querySelectorAll<HTMLElement>(".process-block[data-events-json]").forEach((block) => {
       try {
         const session = block.dataset.sessionId ?? "";
         const process = block.dataset.processId ?? "";
         const events = JSON.parse(block.dataset.eventsJson ?? "[]") as Array<Record<string, unknown>>;
-        for (const event of events) all.push({ session, process, event, order: all.length + order });
+        const start = events.find((event) => event.event === "process.start");
+        if (process && start) baselineProcesses.set(processKey(session, process), {
+          session, process,
+          start: { event: "process.start", at: start.at, processId: start.processId ?? process, command: start.command, comment: start.comment },
+        });
       } catch { /* A malformed snapshot is discarded. */ }
     });
-    all.sort((left, right) => Date.parse(String(left.event.at ?? "")) - Date.parse(String(right.event.at ?? "")) || left.order - right.order);
-    const bounded = all.slice(-800);
-    for (const entry of bounded) {
-      const key = processKey(entry.session, entry.process);
-      const group = baselineProcesses.get(key) ?? { session: entry.session, process: entry.process, events: [] };
-      group.events.push(entry.event);
-      baselineProcesses.set(key, group);
-    }
   };
   const captureOpenStates = () => {
     const state = new Map<string, boolean>();
@@ -136,7 +131,11 @@ function clientBootstrap(): void {
   const renderOperations = () => {
     if (!operationRows) return;
     ensureInitialSnapshot();
-    const byKey = new Map<string, Record<string, unknown>>(baselineCleared ? [] : baselineOperations);
+    const byKey = new Map<string, Record<string, unknown>>();
+    if (!baselineCleared) {
+      const visibleOperationIds = new Set(items.map((item) => String(item.event.operationId ?? "")).filter(Boolean));
+      for (const [key, event] of baselineOperations) if (visibleOperationIds.has(key)) byKey.set(key, event);
+    }
     for (const item of items) {
       const event = item.event;
       if (typeof event.event !== "string" || !event.event.startsWith("operation.")) continue;
@@ -167,25 +166,21 @@ function clientBootstrap(): void {
     }
   };
   const processKey = (session: string, process: string) => session + ":" + process;
-  const eventSignature = (event: Record<string, unknown>) => JSON.stringify([event.event, event.at, event.processId, event.output, event.exitCode]);
   const renderProcesses = () => {
     if (!processDetails) return;
     ensureInitialSnapshot();
     const opened = captureOpenStates();
     const groups = new Map<string, { session: string; process: string; events: Array<Record<string, unknown>> }>();
-    if (!baselineCleared) for (const [key, group] of baselineProcesses) groups.set(key, { ...group, events: [...group.events] });
-    const signatures = new Map<string, Set<string>>();
-    for (const [key, group] of groups) signatures.set(key, new Set(group.events.map(eventSignature)));
+    const ids = new Map<string, Set<string>>();
     for (const item of items) {
       const event = item.event;
       if (!["process.start", "process.output", "process.exit"].includes(String(event.event)) || typeof event.processId !== "string") continue;
       const session = String(event.sessionId ?? "");
       const key = processKey(session, event.processId);
       const group = groups.get(key) ?? { session, process: event.processId, events: [] };
-      const known = signatures.get(key) ?? new Set<string>();
-      const signature = eventSignature(event);
-      if (!known.has(signature)) { group.events.push({ ...event, id: item.id }); known.add(signature); }
-      signatures.set(key, known);
+      const known = ids.get(key) ?? new Set<string>();
+      if (!known.has(item.id)) { group.events.push({ ...event, id: item.id }); known.add(item.id); }
+      ids.set(key, known);
       groups.set(key, group);
     }
     const retained = [...groups.values()].flatMap((group) => group.events.map((event, order) => ({ group, event, order })))
@@ -206,7 +201,7 @@ function clientBootstrap(): void {
     if (toolbar) processDetails.append(toolbar);
     for (const group of all.slice(0, 100)) {
       const events = group.events;
-      const start = events.find((event) => event.event === "process.start");
+      const start = events.find((event) => event.event === "process.start") ?? (baselineCleared ? undefined : baselineProcesses.get(processKey(group.session, group.process))?.start);
       const latest = events.at(-1) ?? {};
       const exit = events.filter((event) => event.event === "process.exit").at(-1);
       const command = start?.command ?? events.filter((event) => event.command !== undefined).at(-1)?.command;
@@ -246,7 +241,9 @@ function clientBootstrap(): void {
       if (exit) { const foot = document.createElement("p"); foot.textContent = "終了コード: " + String(exit.exitCode ?? "—") + (exit.result ? " · " + String(exit.result) : ""); article.append(foot); }
       processDetails.append(article);
     }
-    processDetails.hidden = all.length === 0;
+    // Keep the section (and its update toolbar) present even when there are no
+    // process events yet. The process articles themselves are the empty state.
+    processDetails.hidden = false;
   };
   const renderEvents = () => {
     const visible = processDetails ? [...processDetails.querySelectorAll<HTMLElement>(".process-block")].find((block) => {
@@ -271,7 +268,8 @@ function clientBootstrap(): void {
       baselineProcesses.clear();
       gapCount = 0;
     } else {
-      const unique = incoming.filter((item) => !seen.has(item.id));
+      const known = new Set(seen);
+      const unique = incoming.filter((item) => { if (known.has(item.id)) return false; known.add(item.id); return true; });
       const combined = direction === "older" ? [...unique, ...items] : [...items, ...unique];
       if (direction === "older" && combined.length > 1000) {
         gapCount = Math.min(1000, gapCount + combined.length - 1000);
