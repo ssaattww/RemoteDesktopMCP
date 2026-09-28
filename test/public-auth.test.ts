@@ -560,11 +560,13 @@ test("REMOTE-NR-002: startup, CLI, and state loading reject broad existing secre
       `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${data}`,
     ].join("\n"));
     await grantBuiltinUsersRead(envFile);
-    const cli = await runCli(base, ["authorize-google"], 3_000);
+    // Allow PowerShell ACL verification to finish; this is a hang guard, not a performance assertion.
+    const completionHangGuardMs = 15_000;
+    const cli = await runCli(base, ["authorize-google"], completionHangGuardMs);
     assert.equal(cli.timedOut, false, "CLI rejects an unsafe existing .env before opening the callback listener");
     assert.notEqual(cli.code, 0);
     assert.equal(`${cli.stdout}${cli.stderr}`.includes(sentinel), false);
-    const startup = await runBootstrap(base, 3_000);
+    const startup = await runBootstrap(base, completionHangGuardMs);
     assert.equal(startup.timedOut, false, "startup rejects an unsafe existing .env before service initialization");
     assert.notEqual(startup.code, 0);
   } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }

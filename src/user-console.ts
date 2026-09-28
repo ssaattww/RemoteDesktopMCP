@@ -4,6 +4,7 @@ import { readSessionLogs } from "./admin.js";
 import type { RemoteDesktopService } from "./index.js";
 import { GoogleOidcClient, type GoogleIdentity } from "./public-auth.js";
 import { verifyPassword } from "./hash-password.js";
+import { userConsoleClientScript } from "./user-console-client.js";
 
 const id = () => randomBytes(32).toString("base64url");
 const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
@@ -11,7 +12,7 @@ const cookieName = "rdmcp_user";
 const cookie = (header: string | undefined, name = cookieName) => header?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
 const principalFor = (identity: GoogleIdentity) => `google:${identity.iss}:${identity.sub}`;
 const jst = (value: unknown) => { const date = new Date(String(value ?? "")); return value === undefined || value === "—" || Number.isNaN(date.getTime()) ? "—" : `${new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "medium", hourCycle: "h23" }).format(date)} JST`; };
-const page = (body: string, refreshSeconds?: number) => `<!doctype html><html lang="ja"><meta charset="utf-8">${refreshSeconds ? `<meta http-equiv="refresh" content="${refreshSeconds}">` : ""}<meta name="viewport" content="width=device-width,initial-scale=1"><title>RDMCP User Console</title><style>body{font:13px system-ui,sans-serif;background:#f4f6fa;color:#17243b;margin:0}main{max-width:1100px;margin:12px auto;padding:12px}header{display:flex;gap:8px;align-items:center;flex-wrap:wrap}header h1{font-size:15px;margin:0 auto 0 0}h2{font-size:14px;margin:0 0 8px}p{margin:7px 0}section,form{background:#fff;border:1px solid #dbe2ec;border-radius:12px;padding:20px;margin:18px 0}section.session-list{font-size:12px;border-radius:8px;padding:12px;margin:10px 0}header form,.toolbar form{display:inline-flex;align-items:center;gap:6px;background:none;border:0;padding:0;margin:0}button,select{font:inherit;padding:5px 7px}button{white-space:nowrap}.toolbar form{flex-wrap:wrap}article p,.session-meta{overflow-wrap:anywhere}.danger{background:#b42318;color:#fff;border:0;font-weight:700}.ok{background:#147a43;color:#fff;border:0;font-weight:700}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:10px;border-bottom:1px solid #dbe2ec;vertical-align:top}th{font-weight:600}.session-list th,.session-list td{padding:6px}.scroll{overflow:auto}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}.session-link{white-space:nowrap;font-weight:600}.process-block{border:1px solid #dbe2ec;border-radius:8px;padding:10px;margin:10px 0}.process-block h3{font-size:inherit;margin:10px 0 4px}.output-part+ .output-part{margin-top:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef2f7;padding:12px;border-radius:8px}.stopped{color:#b42318;font-weight:700}.running{color:#a15c00;font-weight:700}small{color:#526078}@media(max-width:600px){main{margin:4px auto;padding:7px}section{padding:12px;margin:10px 0}section.session-list{padding:9px;margin:7px 0}header h1{font-size:14px}h2{font-size:13px}th,td{padding:7px;white-space:nowrap}.session-list th,.session-list td{padding:5px}}</style><main>${body}</main></html>`;
+const page = (body: string, nonce?: string) => `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RDMCP User Console</title><style>body{font:13px system-ui,sans-serif;background:#f4f6fa;color:#17243b;margin:0}main{max-width:1100px;margin:12px auto;padding:12px}header{display:flex;gap:8px;align-items:center;flex-wrap:wrap}header h1{font-size:15px;margin:0 auto 0 0}h2{font-size:14px;margin:0 0 8px}p{margin:7px 0}section,form{background:#fff;border:1px solid #dbe2ec;border-radius:12px;padding:20px;margin:18px 0}section.session-list{font-size:12px;border-radius:8px;padding:12px;margin:10px 0}header form,.toolbar form{display:inline-flex;align-items:center;gap:6px;background:none;border:0;padding:0;margin:0}button,select{font:inherit;padding:5px 7px}button{white-space:nowrap}#log-new-button{border:1px solid #9ab7df;background:#e8f1ff;color:#174f91;border-radius:999px;font-weight:650;box-shadow:0 1px 1px #17243b18}#log-new-button:hover{background:#dceaff}#log-new-button:focus-visible{outline:3px solid #70a5e8;outline-offset:2px}#log-new-button:disabled{opacity:.65;cursor:wait}@media(pointer:fine){#log-pull-hint{display:none}}.toolbar form{flex-wrap:wrap}article p,.session-meta{overflow-wrap:anywhere}.danger{background:#b42318;color:#fff;border:0;font-weight:700}.ok{background:#147a43;color:#fff;border:0;font-weight:700}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:10px;border-bottom:1px solid #dbe2ec;vertical-align:top}th{font-weight:600}.session-list th,.session-list td{padding:6px}.scroll{overflow:auto}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}.session-link{white-space:nowrap;font-weight:600}.process-block{border:1px solid #dbe2ec;border-radius:8px;padding:10px;margin:10px 0}.process-block h3{font-size:inherit;margin:10px 0 4px}.output-part+ .output-part{margin-top:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef2f7;padding:12px;border-radius:8px}.stopped{color:#b42318;font-weight:700}.running{color:#a15c00;font-weight:700}small{color:#526078}@media(max-width:600px){main{margin:4px auto;padding:7px}section{padding:12px;margin:10px 0}section.session-list{padding:9px;margin:7px 0}header h1{font-size:14px}h2{font-size:13px}th,td{padding:7px;white-space:nowrap}.session-list th,.session-list td{padding:5px}}</style><main>${body}</main>${nonce ? `<script nonce="${nonce}">${userConsoleClientScript}</script>` : ""}</html>`;
 
 type Login = { principal: string; expires: number; csrf: string; email?: string; identity?: GoogleIdentity };
 type Pending = { binding: string; nonce: string; expires: number };
@@ -25,7 +26,9 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
   const google = service.cfg.publicAuth;
   const verifier = google ? service.cfg.publicAuthOptions?.verifier ?? new GoogleOidcClient(google.googleClientId, google.googleClientSecret) : undefined;
   const setCookie = (res: Response, value: string, age: number, name = cookieName, cookiePath = "/user") => res.append("Set-Cookie", `${name}=${value}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Max-Age=${age}${service.cfg.baseUrl.startsWith("https:") ? "; Secure" : ""}`);
-  const setLoginCookie = (res: Response, value: string, age: number) => setCookie(res, value, age);
+  // The console's read-only HTTP and SSE APIs live under /api, so the login
+  // cookie must be sent there as well as to the rendered /user pages.
+  const setLoginCookie = (res: Response, value: string, age: number) => { setCookie(res, value, age, cookieName, "/"); setCookie(res, "", 0, cookieName, "/user"); };
   const clean = () => { const now = Date.now(); for (const [key, value] of logins) if (value.expires <= now) logins.delete(key); for (const [key, value] of pending) if (value.expires <= now) pending.delete(key); for (const [key, value] of loginBudgets) if (value.reset <= now) loginBudgets.delete(key); for (const [key, value] of passwordBudgets) if (value.reset <= now) passwordBudgets.delete(key); };
   const remember = <T>(map: Map<string, T>, key: string, value: T, maximum: number) => { map.delete(key); while (map.size >= maximum) map.delete(map.keys().next().value!); map.set(key, value); };
   const consume = (map: Map<string, Budget>, key: string) => { const now = Date.now(); const prior = map.get(key); const budget = !prior || prior.reset <= now ? { attempts: 1, reset: now + 60_000 } : { ...prior, attempts: prior.attempts + 1 }; remember(map, key, budget, 2_000); return budget.attempts <= 10; };
@@ -47,7 +50,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     res.sendStatus(403); return false;
   };
 
-  app.use("/user", (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); res.setHeader("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${google ? " https://accounts.google.com" : ""}; frame-ancestors 'none'; base-uri 'none'`); res.setHeader("Referrer-Policy", "same-origin"); res.setHeader("X-Content-Type-Options", "nosniff"); clean(); next(); });
+  app.use("/user", (_req, res, next) => { const nonce = id(); res.locals.userNonce = nonce; res.setHeader("Cache-Control", "no-store"); res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'${google ? " https://accounts.google.com" : ""}; frame-ancestors 'none'; base-uri 'none'`); res.setHeader("Referrer-Policy", "same-origin"); res.setHeader("X-Content-Type-Options", "nosniff"); clean(); next(); });
   app.get("/user/login", (_req, res) => res.type("html").send(page(`<h1>RDMCP User Console</h1>${google ? '<form method="post" action="/user/login"><button>Google でログイン</button></form>' : '<form method="post" action="/user/login"><label>メールアドレス <input name="email" type="email" required autocomplete="username"></label><label>パスワード <input name="password" type="password" required autocomplete="current-password"></label><button>ログイン</button></form>'}`)));
   app.post("/user/login", async (req, res) => {
     if (req.header("origin") !== new URL(service.cfg.baseUrl).origin) return res.sendStatus(403);
@@ -82,17 +85,124 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const token = id(); remember(logins, token, newLogin(principalFor(identity), { identity }), 2_000); setLoginCookie(res, token, 3600); setCookie(res, "", 0, "rdmcp_user_google_binding", "/"); return res.redirect(303, "/user");
     } catch { return res.status(403).send("ログインできません。"); }
   });
-  app.use("/user", async (req, res, next) => { const login = current(req); if (!login || !await loginAllowed(login)) return res.redirect(303, "/user/login"); res.locals.principal = login.principal; res.locals.csrf = login.csrf; next(); });
-  app.post("/user/logout", (req, res) => { if (!requireCsrf(req, res)) return; logins.delete(cookie(req.header("cookie")) ?? ""); setLoginCookie(res, "", 0); return res.redirect(303, "/user/login"); });
+  const userLogin = async (req: Request): Promise<Login | undefined> => {
+    const login = current(req);
+    if (!login || login.expires <= Date.now() || !await loginAllowed(login)) return undefined;
+    return login;
+  };
+  app.use("/api", async (req, res, next) => {
+    res.setHeader("Cache-Control", "no-store"); res.setHeader("X-Content-Type-Options", "nosniff"); clean();
+    const login = await userLogin(req);
+    if (!login) return res.status(401).json({ error: "unauthorized" });
+    res.locals.principal = login.principal; res.locals.login = login; next();
+  });
+  const apiSession = (req: Request, res: Response): string | undefined => {
+    if (req.query.session_id !== undefined && typeof req.query.session_id !== "string") { res.status(400).json({ error: "invalid_request" }); return undefined; }
+    const value = typeof req.query.session_id === "string" ? req.query.session_id : undefined;
+    if (value !== undefined && (!value || !service.userOwnsAuditSession(res.locals.principal as string, value))) { res.sendStatus(404); return undefined; }
+    return value;
+  };
+  app.get("/api/logs", async (req, res) => {
+    if ((req.query.limit !== undefined && typeof req.query.limit !== "string") || (req.query.before !== undefined && typeof req.query.before !== "string") || (req.query.after !== undefined && typeof req.query.after !== "string")) return res.status(400).json({ error: "invalid_request" });
+    const supplied = typeof req.query.limit === "string" ? Number(req.query.limit) : 100;
+    if (!Number.isInteger(supplied) || supplied < 1 || supplied > 200) return res.status(400).json({ error: "invalid_request" });
+    const before = typeof req.query.before === "string" ? req.query.before : undefined;
+    const after = typeof req.query.after === "string" ? req.query.after : undefined;
+    if (before !== undefined && after !== undefined) return res.status(400).json({ error: "invalid_request" });
+    await service.refreshAuditIndex();
+    const sessionId = apiSession(req, res); if (res.headersSent) return;
+    try { return res.json(service.getUserAuditPage(res.locals.principal as string, sessionId, { limit: supplied, before, after })); }
+    catch (error) { return res.status(error instanceof Error && error.message === "Log cursor expired." ? 409 : 400).json({ error: error instanceof Error && error.message === "Log cursor expired." ? "cursor_expired" : "invalid_cursor" }); }
+  });
+  app.get("/api/console-state", async (req, res) => {
+    const principal = res.locals.principal as string;
+    await service.refreshAuditIndex();
+    const sessionId = apiSession(req, res); if (res.headersSent) return;
+    const { sessions: allSessions } = await readSessionLogs(service);
+    const activeLive = [...service.sessions.values()].filter((session) => session.user === principal && session.state === "active" && session.expires > Date.now());
+    const activeIds = new Set(activeLive.map((session) => session.id));
+    const sessions = allSessions.filter((session) => session.user === principal && !session.id.startsWith("request:")).map((session) => ({
+      session_id: session.id,
+      working_directory: session.workingDirectory ?? null,
+      purpose: session.purpose ?? null,
+      created_at: session.at,
+      last_used_at: session.lastAccessAt ?? session.at,
+      state: activeIds.has(session.id) ? "active" : session.state,
+      active: activeIds.has(session.id),
+    }));
+    const operationEvents = allSessions.filter((session) => session.user === principal && (sessionId === undefined || session.id === sessionId)).flatMap((session) => session.events.map((event) => ({ session, event })))
+      .filter(({ event }) => ["operation.received", "operation.started", "operation.succeeded", "operation.failed", "operation.cancelled", "operation.rejected"].includes(event.event))
+      .sort((left, right) => Date.parse(left.event.at) - Date.parse(right.event.at));
+    const operationMap = new Map<string, { sessionId: string; event: Record<string, unknown> & { event: string; at: string } }>();
+    for (const currentEvent of operationEvents) {
+      const key = String(currentEvent.event.operationId ?? `${currentEvent.session.id}:${currentEvent.event.at}:${currentEvent.event.event}`);
+      const previous = operationMap.get(key);
+      operationMap.set(key, { sessionId: currentEvent.session.id, event: { ...(previous?.event ?? {}), ...currentEvent.event, receivedAt: previous?.event.receivedAt ?? currentEvent.event.receivedAt ?? currentEvent.event.at, startAt: currentEvent.event.startAt ?? previous?.event.startAt, endedAt: currentEvent.event.endedAt ?? previous?.event.endedAt, durationMs: currentEvent.event.durationMs ?? previous?.event.durationMs, connectionId: currentEvent.event.connectionId ?? previous?.event.connectionId } });
+    }
+    const running = [
+      ...[...operationMap.entries()].flatMap(([operationId, operation]) => {
+        const status = typeof operation.event.status === "string" ? operation.event.status : operation.event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(operation.event.event) ? operation.event.event.slice("operation.".length) : "running";
+        return status === "running" ? [{ operation_id: operationId, connection_id: String(operation.event.connectionId ?? operation.sessionId), label: String(operation.event.tool ?? "operation"), status }] : [];
+      }),
+      ...[...service.processes.values()].filter((process) => process.user === principal && (sessionId === undefined || process.sessionId === sessionId) && (process.state === "running" || process.state === "terminating")).map((process) => ({ operation_id: process.id, connection_id: process.sessionId, label: "process", status: process.state, termination_unconfirmed: process.terminationUnconfirmed || undefined })),
+    ];
+    const state = service.userExecutionState(principal);
+    return res.json({ stopped: state.stopped, activeSessions: activeLive.length, runningProcesses: running.length, sessions, running, updatedAt: new Date().toISOString() });
+  });
+  app.get("/api/events", async (req, res) => {
+    if ((req.header("content-length") !== undefined && req.header("content-length") !== "0") || req.header("transfer-encoding") !== undefined) return res.status(400).json({ error: "invalid_request" });
+    if (req.query.after !== undefined && typeof req.query.after !== "string") return res.status(400).json({ error: "invalid_request" });
+    const after = typeof req.query.after === "string" ? req.query.after : undefined;
+    await service.refreshAuditIndex();
+    const sessionId = apiSession(req, res); if (res.headersSent) return;
+    const principal = res.locals.principal as string;
+    let initialCursorExpired = false;
+    try { service.countNewUserAuditEvents(principal, sessionId, after); }
+    catch (error) {
+      if (error instanceof Error && error.message === "Log cursor expired.") initialCursorExpired = true;
+      else return res.status(400).json({ error: "invalid_cursor" });
+    }
+    res.status(200).set({ "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+    res.flushHeaders();
+    let closed = false; let timer: NodeJS.Timeout | undefined; let notifiedAfter = after;
+    const send = (name: string, data: Record<string, unknown> = {}) => { if (!closed && !res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)) close(); };
+    const notify = (event: Record<string, unknown>) => {
+      if (!service.userCanViewAuditEvent(principal, sessionId, event)) return;
+      if (timer || closed) return;
+      timer = setTimeout(async () => {
+        timer = undefined;
+        try { await service.refreshAuditIndex(); const count = service.countNewUserAuditEvents(principal, sessionId, notifiedAfter); notifiedAfter = count.latestCursor; send("logs-available", { addedCount: count.count, latestCursor: count.latestCursor, overflow: count.overflow }); }
+        catch { send("resync-required"); close(); }
+      }, 150);
+    };
+    const unsubscribe = service.subscribeAudit(notify);
+    const heartbeat = setInterval(async () => {
+      try {
+        const login = await userLogin(req);
+        if (!login || login.principal !== principal) { send("auth-expired"); close(); return; }
+        await service.refreshAuditIndex(); service.countNewUserAuditEvents(principal, sessionId, notifiedAfter); send("heartbeat");
+      }
+      catch { send("resync-required"); close(); }
+    }, 20_000);
+    const close = () => { if (closed) return; closed = true; if (timer) clearTimeout(timer); clearInterval(heartbeat); unsubscribe(); unregisterClose(); res.end(); };
+    const unregisterClose = service.subscribeAuditConnection(close);
+    try {
+      if (initialCursorExpired) { send("resync-required"); close(); return; }
+      const count = service.countNewUserAuditEvents(principal, sessionId, notifiedAfter); notifiedAfter = count.latestCursor; send("logs-available", { addedCount: count.count, latestCursor: count.latestCursor, overflow: count.overflow });
+    }
+    catch { send("resync-required"); close(); return; }
+    // IncomingMessage `close` can describe request completion rather than a
+    // cancelled long-lived response. Tie SSE teardown to the response socket
+    // itself so a normal heartbeat does not terminate the EventSource.
+    res.on("close", close);
+  });
+  app.use("/user", async (req, res, next) => { const login = await userLogin(req); if (!login) return res.redirect(303, "/user/login"); setLoginCookie(res, cookie(req.header("cookie")) ?? "", Math.max(0, Math.floor((login.expires - Date.now()) / 1000))); res.locals.principal = login.principal; res.locals.csrf = login.csrf; next(); });
+  app.post("/user/logout", (req, res) => { if (!requireCsrf(req, res)) return; logins.delete(cookie(req.header("cookie")) ?? ""); setLoginCookie(res, "", 0); setCookie(res, "", 0, cookieName, "/user"); return res.redirect(303, "/user/login"); });
   app.post("/user/emergency-stop", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.stopUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "停止状態を保存できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
   app.post("/user/resume", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.resumeUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "再開できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
   app.get(["/user", "/user/", "/user/sessions/:sessionId"], async (req, res) => {
     const principal = res.locals.principal as string;
-    const refreshChoices = [0, 5, 10, 30, 60];
-    const requestedRefresh = typeof req.query.refresh === "string" ? Number(req.query.refresh) : undefined;
-    const savedRefresh = Number(cookie(req.header("cookie"), "rdmcp_user_refresh") ?? "5");
-    const refreshSeconds = requestedRefresh !== undefined && refreshChoices.includes(requestedRefresh) ? requestedRefresh : refreshChoices.includes(savedRefresh) ? savedRefresh : 5;
-    if (requestedRefresh !== undefined && refreshChoices.includes(requestedRefresh)) setCookie(res, String(refreshSeconds), 365 * 24 * 3600, "rdmcp_user_refresh");
+    await service.refreshAuditIndex();
     const requestedFilter = typeof req.query.filter === "string" ? req.query.filter : undefined;
     const savedFilter = cookie(req.header("cookie"), "rdmcp_user_filter");
     const filter = requestedFilter === "active" || requestedFilter === "all" ? requestedFilter : savedFilter === "active" ? "active" : "all";
@@ -105,6 +215,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     const requestedSession = req.params.sessionId;
     const selectedSession = requestedSession === undefined ? undefined : own.find((session) => session.id === requestedSession);
     if (requestedSession !== undefined && !selectedSession) return res.sendStatus(404);
+    const initialLogPage = service.getUserAuditPage(principal, selectedSession?.id, { limit: 200 });
     const visibleSessions = selectedSession ? [selectedSession] : own;
     const stoppedAt = Date.parse(String(state.stoppedAt ?? ""));
     const currentStopWarnings = state.stopped ? stopWarnings.filter((warning) => warning.user === principal && Date.parse(warning.at) >= stoppedAt && (!warning.stopId || warning.stopId === state.stopId)) : [];
@@ -129,20 +240,20 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     const csrf = escape(res.locals.csrf);
     const stopWarningLabels: Record<string, string> = { "process.owner_stop_unconfirmed": "停止担当機能から終了確認応答がありません。", "process.owner_stop_failed": "プロセスへの停止要求に失敗しました。", "process.stop_unconfirmed": "プロセスの終了を確認できませんでした。", "process.stop_unconfirmed_after_start": "停止中に開始したプロセスの終了を確認できませんでした。", "process.stop_requested_after_start": "停止中に返されたプロセス ID に停止要求を行いました。", "user.stop_marker_failed": "停止状態の復旧マーカーを保存できませんでした。", "user.stop_persistence_failed": "停止状態を保存できませんでした。" };
     const warningRows = currentStopWarnings.map((warning) => `<li>${escape(stopWarningLabels[warning.event] ?? "停止処理に未確認の結果があります。")}${warning.pid ? ` PID ${escape(warning.pid)}` : ""}</li>`).join("");
-    let body = `<header><h1>RDMCP User Console</h1><span class="${state.stopped ? "stopped" : ""}">${state.stopped ? "STOPPED" : "READY"}</span>${state.stopped ? `<form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">停止を再試行</button></form><form method="post" action="/user/resume"><input type="hidden" name="csrf" value="${csrf}"><button class="ok">実行を再開</button></form>` : `<form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">EMERGENCY STOP / 全実行停止</button></form>`}<form method="post" action="/user/logout"><input type="hidden" name="csrf" value="${csrf}"><button>ログアウト</button></form></header>`;
+    let body = `<header><h1>RDMCP User Console</h1><span id="execution-state" class="${state.stopped ? "stopped" : ""}">${state.stopped ? "STOPPED" : "READY"}</span><span id="log-status">接続中</span><small id="state-updated-at">${jst(new Date().toISOString())}</small>${state.stopped ? `<form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">停止を再試行</button></form><form method="post" action="/user/resume"><input type="hidden" name="csrf" value="${csrf}"><button class="ok">実行を再開</button></form>` : `<form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">EMERGENCY STOP / 全実行停止</button></form>`}<form method="post" action="/user/logout"><input type="hidden" name="csrf" value="${csrf}"><button>ログアウト</button></form></header>`;
+    const logControls = `<div id="log-console" class="toolbar" data-session-id="${escape(selectedSession?.id ?? "")}" data-newest-cursor="${escape(initialLogPage.newestCursor)}" data-oldest-cursor="${escape(initialLogPage.oldestCursor)}" data-has-more-older="${initialLogPage.hasMoreOlder}" data-filter="${filter}" data-initial-items="${escape(JSON.stringify(selectedSession ? initialLogPage.items : []))}"><button id="log-new-button" type="button">↻ 更新（新着 0件）</button><button id="log-older-button" type="button"${initialLogPage.hasMoreOlder ? "" : " hidden"}>過去のログを読み込む</button>${selectedSession && initialLogPage.items.some((item) => ["process.start", "process.output", "process.exit"].includes(String(item.event.event))) ? `<small id="log-pull-hint">下へ引いて更新</small>` : ""}</div>`;
     const stopDetails = `<section><details${warningRows ? " open" : ""}><summary>実行状態の詳細</summary><p>Stop generation: ${state.stopGeneration}</p>${state.stopped ? `<p>Stopped at: ${jst(state.stoppedAt)}<br><span style="overflow-wrap:anywhere">Stop ID: ${escape(state.stopId)}</span></p><p class="stopped">停止状態は新しい実行を遮断します。既存プロセスの終了確認は別に行います。</p>${warningRows ? `<p class="stopped">この停止要求で終了を確認できなかった処理:</p><ul>${warningRows}</ul>` : ""}<p>停止要求を再試行して、応答を確認できなかったプロセスや開始処理中のプロセスを再走査できます。</p>` : ""}<p><small>終了を確認できていない処理が残る場合があります。停止中は停止要求を再試行できます。停止後は再開しても以前の接続を再利用できません。</small></p></details></section>`;
-    const refreshOptions = refreshChoices.map((seconds) => `<option value="${seconds}"${refreshSeconds === seconds ? " selected" : ""}>${seconds === 0 ? "自動更新なし" : `${seconds}秒`}</option>`).join("");
     if (!selectedSession) {
-      body += `<section class="session-list"><div class="toolbar"><h2>セッション一覧</h2><span>有効な接続: ${activeSessions.length} · 現在実行中の操作: ${runningOperations.length + running.length}</span><form method="get" action="/user"><label>表示 <select name="filter"><option value="all"${filter === "all" ? " selected" : ""}>すべて</option><option value="active"${filter === "active" ? " selected" : ""}>有効のみ</option></select></label><label>更新間隔 <select name="refresh">${refreshOptions}</select></label><button>適用</button></form></div>${shownSessions.length ? `<div class="scroll"><table><thead><tr><th>内容</th><th>作成日時</th><th>最終アクセス日時</th><th>状態</th><th>用途</th><th>Connection ID</th><th>作業ディレクトリ</th></tr></thead><tbody>${shownSessions.map((session) => `<tr><td><a class="session-link" href="/user/sessions/${encodeURIComponent(session.id)}">詳細を見る</a></td><td>${jst(session.at)}</td><td>${jst(session.lastAccessAt ?? session.at)}</td><td>${escape(activeIds.has(session.id) ? "有効" : session.state === "closed" ? "終了" : "履歴")}</td><td style="overflow-wrap:anywhere">${escape(session.purpose ?? "—")}</td><td style="overflow-wrap:anywhere">${escape(session.id)}</td><td style="overflow-wrap:anywhere">${escape(session.workingDirectory ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : `<p>${filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。"}</p>`}</section>`;
+      body += `${logControls}<section class="session-list"><div class="toolbar"><h2>セッション一覧</h2><span>有効な接続: <span id="active-session-count">${activeSessions.length}</span> · 現在実行中の操作: <span id="running-count">${runningOperations.length + running.length}</span></span><form method="get" action="/user"><label>表示 <select name="filter"><option value="all"${filter === "all" ? " selected" : ""}>すべて</option><option value="active"${filter === "active" ? " selected" : ""}>有効のみ</option></select></label><button>適用</button></form></div><div class="scroll"><table><thead><tr><th>内容</th><th>作成日時</th><th>最終アクセス日時</th><th>状態</th><th>用途</th><th>Connection ID</th><th>作業ディレクトリ</th></tr></thead><tbody id="session-rows">${shownSessions.length ? shownSessions.map((session) => `<tr><td><a class="session-link" href="/user/sessions/${encodeURIComponent(session.id)}">詳細を見る</a></td><td>${jst(session.at)}</td><td>${jst(session.lastAccessAt ?? session.at)}</td><td>${escape(activeIds.has(session.id) ? "有効" : session.state === "closed" ? "終了" : "履歴")}</td><td style="overflow-wrap:anywhere">${escape(session.purpose ?? "—")}</td><td style="overflow-wrap:anywhere">${escape(session.id)}</td><td style="overflow-wrap:anywhere">${escape(session.workingDirectory ?? "—")}</td></tr>`).join("") : `<tr><td colspan="7">${filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。"}</td></tr>`}</tbody></table></div></section>`;
       if (unassignedOperations.length) body += `<section><h2>セッション外の操作</h2><ul>${unassignedOperations.map((session) => `<li>${jst(session.at)} · <a href="/user/sessions/${encodeURIComponent(session.id)}">${escape(session.id)}</a></li>`).join("")}</ul></section>`;
-      return res.type("html").send(page(body + stopDetails, refreshSeconds));
+      return res.type("html").send(page(body + stopDetails, res.locals.userNonce));
     }
-    body += `<section><div class="toolbar"><h2>${selectedSession.id.startsWith("request:") ? "セッション外の操作" : "セッションの内容"}</h2><a href="/user">一覧に戻る</a><form method="get"><label>更新間隔 <select name="refresh">${refreshOptions}</select></label><button>適用</button></form></div><p class="session-meta">Connection ID: ${escape(selectedSession.id)}<br>作成日時: ${jst(selectedSession.at)}<br>最終アクセス日時: ${jst(selectedSession.lastAccessAt ?? selectedSession.at)}<br>作業ディレクトリ: ${escape(selectedSession.workingDirectory ?? "—")}<br>用途: ${escape(selectedSession.purpose ?? "—")}</p></section>`;
+    body += `<section><div class="toolbar"><h2>${selectedSession.id.startsWith("request:") ? "セッション外の操作" : "セッションの内容"}</h2><a href="/user">一覧に戻る</a></div><p class="session-meta">Connection ID: ${escape(selectedSession.id)}<br>作成日時: ${jst(selectedSession.at)}<br>最終アクセス日時: ${jst(selectedSession.lastAccessAt ?? selectedSession.at)}<br>作業ディレクトリ: ${escape(selectedSession.workingDirectory ?? "—")}<br>用途: ${escape(selectedSession.purpose ?? "—")}</p></section>`;
     const runningRows = [
       ...runningOperations.map(({ session, event }) => ({ operationId: String(event.operationId ?? "—"), connectionId: String(event.connectionId ?? session.id), label: String(event.tool ?? "operation"), status: "running" })),
       ...running.map((process) => ({ operationId: process.id, connectionId: process.sessionId, label: "process", status: `${process.state}${process.terminationUnconfirmed ? " (termination unconfirmed)" : ""}` })),
     ];
-    body += `<section><h2>Running operations</h2>${runningRows.length ? `<div class="scroll"><table><thead><tr><th>Operation ID</th><th>Connection ID</th><th>Tool / 状態</th></tr></thead><tbody>${runningRows.map((item) => `<tr><td style="overflow-wrap:anywhere">${escape(item.operationId)}</td><td style="overflow-wrap:anywhere">${escape(item.connectionId)}</td><td class="running">${escape(item.label)} · ${escape(item.status)}</td></tr>`).join("")}</tbody></table></div>` : "<p>実行中の操作はありません。</p>"}</section>`;
+    body += `<section><h2>Running operations</h2><div id="running-table" class="scroll"${runningRows.length ? "" : " hidden"}><table><thead><tr><th>Operation ID</th><th>Connection ID</th><th>Tool / 状態</th></tr></thead><tbody id="running-rows">${runningRows.map((item) => `<tr><td style="overflow-wrap:anywhere">${escape(item.operationId)}</td><td style="overflow-wrap:anywhere">${escape(item.connectionId)}</td><td class="running">${escape(item.label)} · ${escape(item.status)}</td></tr>`).join("")}</tbody></table></div><p id="running-empty"${runningRows.length ? " hidden" : ""}>実行中の操作はありません。</p></section>`;
     const opRows = operations.map(({ session, event, status }) => {
       const tool = String(event.tool ?? "—");
       const receivedAt = String(event.receivedAt ?? event.at);
@@ -151,7 +262,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const target = typeof event.target === "string" ? event.target : "—";
       const operationId = String(event.operationId ?? "—");
       const connectionId = String(event.connectionId ?? session.id ?? "—");
-      return `<tr><td>${jst(receivedAt)}</td><td style="overflow-wrap:anywhere">${escape(connectionId)}</td><td style="overflow-wrap:anywhere">${escape(operationId)}</td><td>${escape(tool)}</td><td>${escape(status)}</td><td>${escape(target)}</td><td>${jst(started)}</td><td>${jst(ended)}</td><td>${event.durationMs === undefined ? "—" : `${escape(event.durationMs)} ms`}</td></tr>`;
+      return `<tr data-operation-id="${escape(operationId)}" data-connection-id="${escape(connectionId)}" data-event-json="${escape(JSON.stringify(event))}"><td>${jst(receivedAt)}</td><td style="overflow-wrap:anywhere">${escape(connectionId)}</td><td style="overflow-wrap:anywhere">${escape(operationId)}</td><td>${escape(tool)}</td><td>${escape(status)}</td><td>${escape(target)}</td><td>${jst(started)}</td><td>${jst(ended)}</td><td>${event.durationMs === undefined ? "—" : `${escape(event.durationMs)} ms`}</td></tr>`;
     }).join("");
     const ownedProcessIds = new Set(visibleSessions.flatMap((session) => session.events.filter((event) => event.event === "process.start" && event.user === principal).map((event) => String(event.processId ?? ""))));
     const processGroups = new Map<string, { session: typeof own[number]; events: Array<Record<string, unknown> & { event: string; at: string }> }>();
@@ -162,8 +273,8 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       processGroups.set(key, { session, events: [...(previous?.events ?? []), event] });
     }
     const processDetails = [...processGroups.values()].sort((left, right) => Date.parse(right.events.at(-1)!.at) - Date.parse(left.events.at(-1)!.at)).slice(0, 100);
-    body += `<section><details><summary>操作履歴</summary><div class="scroll"><table><thead><tr><th>受信時刻</th><th>Connection ID</th><th>Operation ID</th><th>Tool</th><th>状態</th><th>対象</th><th>開始</th><th>終了</th><th>実行時間</th></tr></thead><tbody>${opRows}</tbody></table></div><p><small>この画面には現在ログインしている使用者自身の記録だけを表示します。</small></p></details></section>`;
-    if (processDetails.length) body += `<section><h2>コマンドと出力の詳細</h2>${processDetails.map(({ session, events }) => {
+    body += `<section><details><summary>操作履歴</summary><div class="scroll"><table><thead><tr><th>受信時刻</th><th>Connection ID</th><th>Operation ID</th><th>Tool</th><th>状態</th><th>対象</th><th>開始</th><th>終了</th><th>実行時間</th></tr></thead><tbody id="operation-rows">${opRows}</tbody></table></div><p><small>この画面には現在ログインしている使用者自身の記録だけを表示します。</small></p></details></section>`;
+    body += `<section id="process-details"><h2>コマンドと出力の詳細</h2>${logControls}${processDetails.map(({ session, events }) => {
       const start = events.find((event) => event.event === "process.start");
       const latest = events.at(-1)!;
       const exit = events.filter((event) => event.event === "process.exit").at(-1);
@@ -176,8 +287,8 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
         const remaining = snapshot.startsWith(earlierOutput) ? snapshot.slice(earlierOutput.length).replace(/^\n/, "") : snapshot;
         if (remaining) outputEvents.push({ ...exit, output: remaining });
       }
-      return `<article class="process-block"><p>${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</p>${comment === undefined ? "" : `<h3>実行目的</h3><pre>${escape(comment)}</pre>`}${command === undefined ? "" : `<h3>コマンド</h3><pre>${escape(command)}</pre>`}${outputEvents.length ? `<h3>出力</h3>${outputEvents.map((event) => `<div class="output-part"><small>${event.event === "process.exit" ? "終了時の出力 · " : ""}${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
+      return `<article class="process-block" data-process-id="${escape(latest.processId ?? "—")}" data-session-id="${escape(session.id)}" data-events-json="${escape(JSON.stringify(events))}"><p>${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</p>${comment === undefined ? "" : `<h3>実行目的</h3><pre>${escape(comment)}</pre>`}${command === undefined ? "" : `<h3>コマンド</h3><pre>${escape(command)}</pre>`}${outputEvents.length ? `<details><summary>出力</summary>${outputEvents.map((event) => `<div class="output-part"><small>${event.event === "process.exit" ? "終了時の出力 · " : ""}${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}</details>` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
     }).join("")}</section>`;
-    return res.type("html").send(page(body + stopDetails, refreshSeconds));
+    return res.type("html").send(page(body + stopDetails, res.locals.userNonce));
   });
 }

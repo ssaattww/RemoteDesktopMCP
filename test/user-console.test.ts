@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { createApp, RemoteDesktopService, configFromEnv } from "../src/index.js";
 import { readSessionLogs } from "../src/admin.js";
@@ -17,6 +18,95 @@ test("every tool requires a comment that is retained in operation audit history"
     const event = (await readSessionLogs(f.service)).sessions.flatMap((session) => session.events).findLast((entry) => entry.event === "operation.succeeded" && entry.tool === "session_list");
     assert.equal(event?.comment, "Check currently active work sessions");
   } finally { await api.close(); await f.cleanup(); }
+});
+
+test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE notifications without bodies", async () => {
+  const f = await fixture(); const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string"); const base = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${base}/api/logs`)).status, 401);
+    await f.service.audit("session.open", { user: "owner@example.test", sessionId: "owner-session", workingDirectory: "owner-work", purpose: "Owner test" });
+    await f.service.audit("operation.received", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-operation", tool: "file_read", target: "owner.txt" });
+    await f.service.audit("operation.received", { user: "other@example.test", sessionId: "other-session", operationId: "other-operation", tool: "file_read", target: "other-secret.txt" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(token);
+    const cookie = `rdmcp_user=${token}`;
+    const consoleState = await fetch(`${base}/api/console-state`, { headers: { cookie } }); assert.equal(consoleState.status, 200);
+    const stateBody = await consoleState.json() as { updatedAt: unknown; sessions: Array<{ session_id: string; active: boolean }>; running: Array<{ operation_id: string }> };
+    assert.equal(typeof stateBody.updatedAt, "string");
+    assert.deepEqual(stateBody.sessions.map((session) => session.session_id), ["owner-session"]);
+    assert.equal(stateBody.running[0]?.operation_id, "owner-operation");
+    const first = await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } }); assert.equal(first.status, 200);
+    const firstPage = await first.json() as { items: Array<{ id: string; cursor: string; event: Record<string, unknown> }>; newestCursor: string };
+    assert.equal(firstPage.items.length, 1); assert.equal(firstPage.items[0]?.event.target, "owner.txt"); assert.ok(firstPage.items[0]?.id);
+    assert.equal((await fetch(`${base}/api/logs?session_id=other-session`, { headers: { cookie } })).status, 404);
+    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-operation", tool: "file_read", target: "owner.txt", status: "succeeded" });
+    const after = await fetch(`${base}/api/logs?after=${encodeURIComponent(firstPage.newestCursor)}&limit=1`, { headers: { cookie } }); assert.equal(after.status, 200);
+    const afterPage = await after.json() as { items: Array<{ event: Record<string, unknown> }> }; assert.equal(afterPage.items[0]?.event.status, "succeeded");
+    await f.service.audit("operation.rejected", { user: "owner@example.test", operationId: "unassigned-owner", tool: "session_open", status: "rejected" });
+    await f.service.audit("operation.rejected", { user: "other@example.test", operationId: "unassigned-other", tool: "session_open", status: "rejected" });
+    const ownUnassigned = await fetch(`${base}/api/logs?session_id=request%3Aunassigned-owner`, { headers: { cookie } });
+    assert.equal(ownUnassigned.status, 200, "the server-rendered request:<operationId> detail has an owner-scoped API log");
+    assert.equal((await ownUnassigned.json() as { items: Array<{ event: { operationId?: string } }> }).items[0]?.event.operationId, "unassigned-owner");
+    assert.equal((await fetch(`${base}/api/logs?session_id=request%3Aunassigned-other`, { headers: { cookie } })).status, 404);
+    assert.equal((await fetch(`${base}/api/logs?before=${encodeURIComponent(firstPage.newestCursor)}&after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } })).status, 400);
+    const events = await fetch(`${base}/api/events?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } }); assert.equal(events.status, 200); assert.match(events.headers.get("content-type") ?? "", /text\/event-stream/); events.body?.cancel();
+    const livePage = await (await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } })).json() as { newestCursor: string };
+    const stream = await fetch(`${base}/api/events?after=${encodeURIComponent(livePage.newestCursor)}`, { headers: { cookie } });
+    const reader = stream.body!.getReader(); const decoder = new TextDecoder();
+    const initialNotice = decoder.decode((await reader.read()).value); assert.match(initialNotice, /event: logs-available\ndata: \{[^\n]*"addedCount":0/);
+    await f.service.audit("operation.succeeded", { user: "other@example.test", sessionId: "other-session", operationId: "foreign-live", status: "succeeded" });
+    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-live", status: "succeeded" });
+    const liveNotice = decoder.decode((await reader.read()).value); assert.match(liveNotice, /event: logs-available\ndata: \{[^\n]*"addedCount":1/);
+    await reader.cancel();
+    await f.service.audit("operation.received", { user: "owner@example.test", operationId: "stream-unassigned", tool: "session_open" });
+    const syntheticPage = await (await fetch(`${base}/api/logs?session_id=request%3Astream-unassigned&limit=1`, { headers: { cookie } })).json() as { newestCursor: string };
+    const syntheticStream = await fetch(`${base}/api/events?session_id=request%3Astream-unassigned&after=${encodeURIComponent(syntheticPage.newestCursor)}`, { headers: { cookie } });
+    const syntheticReader = syntheticStream.body!.getReader(); await syntheticReader.read();
+    await f.service.audit("operation.rejected", { user: "owner@example.test", operationId: "stream-unassigned", tool: "session_open", status: "rejected" });
+    const syntheticNotice = decoder.decode((await syntheticReader.read()).value); assert.match(syntheticNotice, /event: logs-available\ndata: \{[^\n]*"addedCount":1/);
+    await syntheticReader.cancel();
+    await writeFile(`${f.data}/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), event: "operation.received", user: "owner@example.test", sessionId: "owner-session", operationId: "replacement", tool: "file_read" })}\n`);
+    const stale = await fetch(`${base}/api/logs?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } });
+    assert.equal(stale.status, 409, "audit replacement invalidates cursors rather than mixing generations");
+    const staleEvents = await fetch(`${base}/api/events?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } });
+    assert.equal(staleEvents.status, 200, "an expired EventSource cursor receives a resync event instead of retrying HTTP 409 forever");
+    assert.match(await staleEvents.text(), /event: resync-required\ndata: \{\}/);
+    const replacementPage = await (await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } })).json() as { newestCursor: string };
+    await writeFile(`${f.data}/audit.jsonl`, "");
+    const truncated = await fetch(`${base}/api/logs?after=${encodeURIComponent(replacementPage.newestCursor)}`, { headers: { cookie } });
+    assert.equal(truncated.status, 409, "audit truncation invalidates cursors even when the pathname is unchanged");
+    const retainedAudit = Array.from({ length: 20_001 }, (_, index) => JSON.stringify({ at: new Date(1_700_000_000_000 + index).toISOString(), event: "operation.succeeded", user: "owner@example.test", sessionId: "owner-session", operationId: `retained-${index}` })).join("\n") + "\n";
+    await writeFile(`${f.data}/audit.jsonl`, retainedAudit);
+    await f.service.refreshAuditIndex();
+    assert.equal(f.service.auditEntriesForConsole().length, 20_000, "the shared audit index evicts the oldest event at its 20,000-event retention bound");
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("Issue 22: SSE stays open through its heartbeat", async () => {
+  const f = await fixture(); const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string"); const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
+    const malformedStatus = await new Promise<number>((resolve, reject) => {
+      const malformed = httpRequest(`${base}/api/events`, { method: "GET", headers: { cookie: `rdmcp_user=${token}`, "content-length": "1" } }, (response) => { response.resume(); response.once("end", () => resolve(response.statusCode ?? 0)); });
+      malformed.once("error", reject); malformed.end("x");
+    });
+    assert.equal(malformedStatus, 400, "event streams reject bodies instead of bypassing request-input protection");
+    const stream = await fetch(`${base}/api/events`, { headers: { cookie: `rdmcp_user=${token}` } }); assert.equal(stream.status, 200);
+    const reader = stream.body!.getReader(); const decoder = new TextDecoder();
+    assert.match(decoder.decode((await reader.read()).value), /event: logs-available/);
+    let timeout: NodeJS.Timeout | undefined;
+    let heartbeat: ReadableStreamReadResult<Uint8Array>;
+    try { heartbeat = await Promise.race([reader.read(), new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("SSE heartbeat was not delivered")), 25_000); })]); }
+    finally { if (timeout) clearTimeout(timeout); }
+    const heartbeatText = decoder.decode(heartbeat.value); await reader.cancel();
+    assert.equal(heartbeat.done, false, "the heartbeat must not close the EventSource response");
+    assert.match(heartbeatText, /event: heartbeat\ndata: \{\}/);
+  } finally { await f.service.close(); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
 test("user console lists each active connection's working directory and purpose for its owner", async () => {
@@ -49,13 +139,13 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(html, /Build &lt;safe&gt; feature/);
     assert.match(html, /作業ディレクトリ/);
     assert.match(html, /セッション一覧/);
-    assert.match(html, /http-equiv="refresh" content="5"/);
+    assert.doesNotMatch(html, /http-equiv="refresh"/, "log history does not use whole-page periodic reloads");
     assert.match(html, /作成日時.*最終アクセス日時/);
     assert.match(html, /<th>内容<\/th><th>作成日時/);
     assert.match(html, /Second task/);
     assert.match(html, /終了/);
-    assert.match(html, /現在実行中の操作: 0/);
-    assert.doesNotMatch(html, /request:/, "successful session opens must not leave provisional entries");
+    assert.match(html, /現在実行中の操作: <span id="running-count">0/);
+    assert.doesNotMatch(html.replace(/<script[\s\S]*<\/script>/, ""), /request:/, "successful session opens must not leave provisional entries");
     assert.ok(html.includes(f.root));
     assert.doesNotMatch(html, /Other user's private work/);
     assert.ok(!html.includes(f.data));
@@ -63,7 +153,7 @@ test("user console lists each active connection's working directory and purpose 
     const detail = await (await fetch(`${base}/user/sessions/${encodeURIComponent(String(own.session_id))}`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(detail, /セッションの内容/);
     assert.match(detail, /<details><summary>操作履歴<\/summary>/);
-    assert.match(detail, /http-equiv="refresh" content="5"/);
+    assert.doesNotMatch(detail, /http-equiv="refresh"/);
     assert.match(detail, /作成日時: .*最終アクセス日時:/);
     assert.match(detail, /first-only\.txt/);
     assert.match(detail, /first-command/);
@@ -74,9 +164,10 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(detail, /third-output/);
     assert.match(detail, /final-only-output/);
     assert.match(detail, /終了時の出力/);
-    assert.equal(detail.split("first-output").length - 1, 1, "the final snapshot does not repeat earlier output");
+    const renderedOutput = [...detail.replace(/<script[\s\S]*<\/script>/, "").matchAll(/<pre>([\s\S]*?)<\/pre>/g)].map((match) => match[1]).join("\n");
+    assert.equal(renderedOutput.split("first-output").length - 1, 1, "the final snapshot does not repeat earlier output");
     assert.match(detail, /終了コード: 0/);
-    const processBlocks = [...detail.matchAll(/<article class="process-block">([\s\S]*?)<\/article>/g)].map((match) => match[1]!);
+    const processBlocks = [...detail.matchAll(/<article class="process-block"[^>]*>([\s\S]*?)<\/article>/g)].map((match) => match[1]!);
     assert.equal(processBlocks.length, 2);
     assert.ok(processBlocks.some((block) => block.includes("first-command") && block.includes("third-output") && !block.includes("another-output")));
     assert.ok(processBlocks.some((block) => block.includes("another-command") && block.includes("another-output") && !block.includes("first-output")));
@@ -89,14 +180,13 @@ test("user console lists each active connection's working directory and purpose 
     const preferences = await fetch(`${base}/user?filter=active&refresh=30`, { headers: { cookie: `rdmcp_user=${token}` } });
     const preferenceCookies = preferences.headers.get("set-cookie") ?? "";
     assert.match(preferenceCookies, /rdmcp_user_filter=active/);
-    assert.match(preferenceCookies, /rdmcp_user_refresh=30/);
-    const persistedCookie = `rdmcp_user=${token}; rdmcp_user_filter=active; rdmcp_user_refresh=30`;
+    const persistedCookie = `rdmcp_user=${token}; rdmcp_user_filter=active`;
     const filtered = await (await fetch(`${base}/user`, { headers: { cookie: persistedCookie } })).text();
-    assert.match(filtered, /http-equiv="refresh" content="30"/);
+    assert.doesNotMatch(filtered, /http-equiv="refresh"/);
     assert.match(filtered, new RegExp(String(own.session_id)));
     assert.doesNotMatch(filtered, new RegExp(String(second.session_id)));
     const persistedDetail = await (await fetch(`${base}/user/sessions/${encodeURIComponent(String(own.session_id))}`, { headers: { cookie: persistedCookie } })).text();
-    assert.match(persistedDetail, /http-equiv="refresh" content="30"/);
+    assert.doesNotMatch(persistedDetail, /http-equiv="refresh"/);
     const paused = await (await fetch(`${base}/user?refresh=0`, { headers: { cookie: persistedCookie } })).text();
     assert.doesNotMatch(paused, /http-equiv="refresh"/);
     await assert.rejects(owner.call("file_read", { session_id: own.session_id, root_id: "missing", relative_path: "missing.txt" }));
@@ -193,7 +283,8 @@ test("user console authenticates the principal, applies CSRF checks, and hides a
     assert.match(detail, /succeeded|1000 ms/);
     assert.match(detail, /operation-open|9:01:01/);
     assert.match(detail, /実行中の操作はありません/);
-    assert.equal(detail.split("same-process-output").length - 1, 1, "one process detail shows its final output once");
+    const visibleProcessOutput = [...detail.replace(/<script[\s\S]*<\/script>/, "").matchAll(/<pre>([\s\S]*?)<\/pre>/g)].map((match) => match[1]).join("\n");
+    assert.equal(visibleProcessOutput.split("same-process-output").length - 1, 1, "one process detail shows its final output once");
     assert.doesNotMatch(detail, /other-connection|operation-other|secret-other\.txt|spoofed-operation|foreign secret|spoofed-session|other owner's secret/);
     const beforeSession = await (await fetch(`${base}/user/sessions/${encodeURIComponent("request:operation-rejected-open")}`, { headers: { cookie } })).text();
     assert.match(beforeSession, /operation-rejected-open|rejected/);
