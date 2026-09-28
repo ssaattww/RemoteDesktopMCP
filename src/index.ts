@@ -307,7 +307,14 @@ export class RemoteDesktopService {
     return sequence;
   }
   private ownsAuditEvent(event: AuditLogEntry["event"], user: string, sessionId?: string): boolean {
-    return event.user === user && (sessionId === undefined || event.sessionId === sessionId);
+    if (event.user !== user) return false;
+    if (sessionId === undefined || event.sessionId === sessionId) return true;
+    // A session-less rejected/open operation is rendered as `request:<operationId>`.
+    // Only accept that server-derived identifier when its exact operation record
+    // belongs to this principal; never turn an arbitrary supplied session ID into
+    // an owner correlation.
+    const operationId = sessionId.startsWith("request:") ? sessionId.slice("request:".length) : "";
+    return Boolean(operationId && event.sessionId === undefined && event.operationId === operationId);
   }
   getUserAuditPage(user: string, sessionId: string | undefined, query: { limit: number; before?: string; after?: string }) {
     if (query.before && query.after) throw new Error("before and after cannot be combined.");
@@ -332,7 +339,10 @@ export class RemoteDesktopService {
     return { count: Math.min(count, 1_000), latestCursor: this.auditCursor(user, sessionId, this.auditSequence), overflow: count > 1_000 };
   }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
-    return this.sessions.get(sessionId)?.user === user || this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId);
+    if (this.sessions.get(sessionId)?.user === user) return true;
+    if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
+    const operationId = sessionId.startsWith("request:") ? sessionId.slice("request:".length) : "";
+    return Boolean(operationId && this.auditEntries.some((entry) => entry.event.user === user && entry.event.sessionId === undefined && entry.event.operationId === operationId));
   }
   auditEntriesForConsole(): Array<Record<string, unknown> & { event: string; at: string }> { return this.auditEntries.map((entry) => entry.event); }
   subscribeAudit(listener: (event: Record<string, unknown> & { event: string; at: string }) => void): () => void { this.auditListeners.add(listener); return () => this.auditListeners.delete(listener); }

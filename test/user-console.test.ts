@@ -25,13 +25,17 @@ test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE
   const address = server.address(); assert.ok(address && typeof address !== "string"); const base = `http://127.0.0.1:${address.port}`;
   try {
     assert.equal((await fetch(`${base}/api/logs`)).status, 401);
+    await f.service.audit("session.open", { user: "owner@example.test", sessionId: "owner-session", workingDirectory: "owner-work", purpose: "Owner test" });
     await f.service.audit("operation.received", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-operation", tool: "file_read", target: "owner.txt" });
     await f.service.audit("operation.received", { user: "other@example.test", sessionId: "other-session", operationId: "other-operation", tool: "file_read", target: "other-secret.txt" });
     const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
     const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(token);
     const cookie = `rdmcp_user=${token}`;
     const consoleState = await fetch(`${base}/api/console-state`, { headers: { cookie } }); assert.equal(consoleState.status, 200);
-    assert.equal(typeof (await consoleState.json() as { updatedAt: unknown }).updatedAt, "string");
+    const stateBody = await consoleState.json() as { updatedAt: unknown; sessions: Array<{ session_id: string; active: boolean }>; running: Array<{ operation_id: string }> };
+    assert.equal(typeof stateBody.updatedAt, "string");
+    assert.deepEqual(stateBody.sessions.map((session) => session.session_id), ["owner-session"]);
+    assert.equal(stateBody.running[0]?.operation_id, "owner-operation");
     const first = await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } }); assert.equal(first.status, 200);
     const firstPage = await first.json() as { items: Array<{ id: string; cursor: string; event: Record<string, unknown> }>; newestCursor: string };
     assert.equal(firstPage.items.length, 1); assert.equal(firstPage.items[0]?.event.target, "owner.txt"); assert.ok(firstPage.items[0]?.id);
@@ -39,14 +43,32 @@ test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE
     await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-operation", tool: "file_read", target: "owner.txt", status: "succeeded" });
     const after = await fetch(`${base}/api/logs?after=${encodeURIComponent(firstPage.newestCursor)}&limit=1`, { headers: { cookie } }); assert.equal(after.status, 200);
     const afterPage = await after.json() as { items: Array<{ event: Record<string, unknown> }> }; assert.equal(afterPage.items[0]?.event.status, "succeeded");
+    await f.service.audit("operation.rejected", { user: "owner@example.test", operationId: "unassigned-owner", tool: "session_open", status: "rejected" });
+    await f.service.audit("operation.rejected", { user: "other@example.test", operationId: "unassigned-other", tool: "session_open", status: "rejected" });
+    const ownUnassigned = await fetch(`${base}/api/logs?session_id=request%3Aunassigned-owner`, { headers: { cookie } });
+    assert.equal(ownUnassigned.status, 200, "the server-rendered request:<operationId> detail has an owner-scoped API log");
+    assert.equal((await ownUnassigned.json() as { items: Array<{ event: { operationId?: string } }> }).items[0]?.event.operationId, "unassigned-owner");
+    assert.equal((await fetch(`${base}/api/logs?session_id=request%3Aunassigned-other`, { headers: { cookie } })).status, 404);
     assert.equal((await fetch(`${base}/api/logs?before=${encodeURIComponent(firstPage.newestCursor)}&after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } })).status, 400);
     const events = await fetch(`${base}/api/events?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } }); assert.equal(events.status, 200); assert.match(events.headers.get("content-type") ?? "", /text\/event-stream/); events.body?.cancel();
+    const livePage = await (await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } })).json() as { newestCursor: string };
+    const stream = await fetch(`${base}/api/events?after=${encodeURIComponent(livePage.newestCursor)}`, { headers: { cookie } });
+    const reader = stream.body!.getReader(); const decoder = new TextDecoder();
+    const initialNotice = decoder.decode((await reader.read()).value); assert.match(initialNotice, /event: logs-available\ndata: \{[^\n]*"addedCount":0/);
+    await f.service.audit("operation.succeeded", { user: "other@example.test", sessionId: "other-session", operationId: "foreign-live", status: "succeeded" });
+    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-live", status: "succeeded" });
+    const liveNotice = decoder.decode((await reader.read()).value); assert.match(liveNotice, /event: logs-available\ndata: \{[^\n]*"addedCount":1/);
+    await reader.cancel();
     await writeFile(`${f.data}/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), event: "operation.received", user: "owner@example.test", sessionId: "owner-session", operationId: "replacement", tool: "file_read" })}\n`);
     const stale = await fetch(`${base}/api/logs?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } });
     assert.equal(stale.status, 409, "audit replacement invalidates cursors rather than mixing generations");
     const staleEvents = await fetch(`${base}/api/events?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } });
     assert.equal(staleEvents.status, 200, "an expired EventSource cursor receives a resync event instead of retrying HTTP 409 forever");
     assert.match(await staleEvents.text(), /event: resync-required\ndata: \{\}/);
+    const replacementPage = await (await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } })).json() as { newestCursor: string };
+    await writeFile(`${f.data}/audit.jsonl`, "");
+    const truncated = await fetch(`${base}/api/logs?after=${encodeURIComponent(replacementPage.newestCursor)}`, { headers: { cookie } });
+    assert.equal(truncated.status, 409, "audit truncation invalidates cursors even when the pathname is unchanged");
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
@@ -224,7 +246,8 @@ test("user console authenticates the principal, applies CSRF checks, and hides a
     assert.match(detail, /succeeded|1000 ms/);
     assert.match(detail, /operation-open|9:01:01/);
     assert.match(detail, /実行中の操作はありません/);
-    assert.equal(detail.split("same-process-output").length - 1, 1, "one process detail shows its final output once");
+    const visibleProcessOutput = [...detail.replace(/<script[\s\S]*<\/script>/, "").matchAll(/<pre>([\s\S]*?)<\/pre>/g)].map((match) => match[1]).join("\n");
+    assert.equal(visibleProcessOutput.split("same-process-output").length - 1, 1, "one process detail shows its final output once");
     assert.doesNotMatch(detail, /other-connection|operation-other|secret-other\.txt|spoofed-operation|foreign secret|spoofed-session|other owner's secret/);
     const beforeSession = await (await fetch(`${base}/user/sessions/${encodeURIComponent("request:operation-rejected-open")}`, { headers: { cookie } })).text();
     assert.match(beforeSession, /operation-rejected-open|rejected/);
