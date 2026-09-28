@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type Express, type Request, type Response } from "express";
@@ -32,6 +34,8 @@ type Transfer = { id: string; direction: "download" | "upload"; sessionId: strin
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
 type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; sessionAccessAt?: string };
+export type AuditLogItem = { id: string; cursor: string; event: Record<string, unknown> & { event: string; at: string } };
+type AuditLogEntry = { sequence: number; event: Record<string, unknown> & { event: string; at: string } };
 
 class UserStopRequested extends Error {
   constructor(readonly state: UserExecutionState) { super("USER_STOP_REQUESTED"); }
@@ -43,6 +47,7 @@ const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_TRANSFERS = 20;
 const MAX_TERMINAL_TRANSFERS = 100;
 const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
+const MAX_AUDIT_EVENTS = 20_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
@@ -211,12 +216,20 @@ export class RemoteDesktopService {
   private readonly executionStateLock = new Mutex();
   private readonly executionResumes = new Set<string>();
   private readonly operationContext = new AsyncLocalStorage<ExecutionOperation>();
+  private readonly auditGeneration = makeId();
+  private readonly auditEntries: AuditLogEntry[] = [];
+  private readonly auditListeners = new Set<() => void>();
+  private readonly auditConnectionClosers = new Set<() => void>();
+  private readonly auditProcessOwners = new Map<string, { user: string; sessionId?: string }>();
+  private readonly auditLock = new Mutex();
+  private auditSequence = 0;
   private executionStateUnavailable = false;
   readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
   async initialize(): Promise<void> {
     await ensurePrivateDirectory(this.cfg.dataDir);
+    await this.loadAuditIndex();
     await this.loadExecutionStates();
     const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
     const actualData = await realpath(this.cfg.dataDir);
@@ -238,8 +251,77 @@ export class RemoteDesktopService {
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
     this.expiryTimer.unref();
   }
-  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
-  async audit(event: string, fields: Record<string, unknown>): Promise<void> { const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); } await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), event, ...fields })}\n`); }
+  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); for (const close of this.auditConnectionClosers) close(); this.auditConnectionClosers.clear(); this.auditListeners.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
+  async audit(event: string, fields: Record<string, unknown>): Promise<void> { await this.auditLock.run(async () => { const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); } const entry = { at: new Date().toISOString(), event, ...fields }; await appendFile(file, `${JSON.stringify(entry)}\n`); this.rememberAuditEntry(entry); }); }
+  private rememberAuditEntry(value: Record<string, unknown>): void {
+    if (typeof value.event !== "string" || typeof value.at !== "string") return;
+    const processId = typeof value.processId === "string" ? value.processId : undefined;
+    const known = processId ? this.auditProcessOwners.get(processId) : undefined;
+    const user = typeof value.user === "string" ? value.user : known?.user;
+    const sessionId = typeof value.sessionId === "string" ? value.sessionId : known?.sessionId;
+    const event = { ...value, ...(user ? { user } : {}), ...(sessionId ? { sessionId } : {}) } as Record<string, unknown> & { event: string; at: string };
+    if (processId && typeof event.user === "string") { this.auditProcessOwners.delete(processId); while (this.auditProcessOwners.size >= 2_000) this.auditProcessOwners.delete(this.auditProcessOwners.keys().next().value!); this.auditProcessOwners.set(processId, { user: event.user, ...(typeof event.sessionId === "string" ? { sessionId: event.sessionId } : {}) }); }
+    this.auditEntries.push({ sequence: ++this.auditSequence, event });
+    while (this.auditEntries.length > MAX_AUDIT_EVENTS) this.auditEntries.shift();
+    for (const listener of this.auditListeners) listener();
+  }
+  private async loadAuditIndex(): Promise<void> {
+    const file = path.join(this.cfg.dataDir, "audit.jsonl");
+    try { await assertPrivateAuditStorage(this.cfg.dataDir, file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+    for await (const line of lines) {
+      try { this.rememberAuditEntry(JSON.parse(line) as Record<string, unknown>); }
+      catch { /* Keep valid persisted entries available when one historical line is malformed. */ }
+    }
+  }
+  private auditCursor(user: string, sessionId: string | undefined, sequence: number): string {
+    const encoded = Buffer.from(JSON.stringify({ generation: this.auditGeneration, sequence, user, sessionId: sessionId ?? null })).toString("base64url");
+    return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`;
+  }
+  private parseAuditCursor(cursor: string, user: string, sessionId: string | undefined): number {
+    const [encoded, signature, extra] = cursor.split(".");
+    if (!encoded || !signature || extra || !equal(createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url"), signature)) throw new Error("Invalid log cursor.");
+    let body: { generation?: unknown; sequence?: unknown; user?: unknown; sessionId?: unknown };
+    try { body = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")); } catch { throw new Error("Invalid log cursor."); }
+    if (body.generation !== this.auditGeneration) throw new Error("Log cursor expired.");
+    const sequence = body.sequence;
+    if (body.user !== user || body.sessionId !== (sessionId ?? null) || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0 || sequence > this.auditSequence) throw new Error("Invalid log cursor.");
+    const first = this.auditEntries[0]?.sequence;
+    if (first !== undefined && sequence < first - 1) throw new Error("Log cursor expired.");
+    return sequence;
+  }
+  private ownsAuditEvent(event: AuditLogEntry["event"], user: string, sessionId?: string): boolean {
+    return event.user === user && (sessionId === undefined || event.sessionId === sessionId);
+  }
+  getUserAuditPage(user: string, sessionId: string | undefined, query: { limit: number; before?: string; after?: string }) {
+    if (query.before && query.after) throw new Error("before and after cannot be combined.");
+    const boundary = query.before ? this.parseAuditCursor(query.before, user, sessionId) : query.after ? this.parseAuditCursor(query.after, user, sessionId) : undefined;
+    const available = this.auditEntries.filter((entry) => this.ownsAuditEvent(entry.event, user, sessionId));
+    const selected = query.after
+      ? available.filter((entry) => entry.sequence > boundary!).slice(0, query.limit).reverse()
+      : available.filter((entry) => boundary === undefined || entry.sequence < boundary).slice(-query.limit).reverse();
+    const newest = selected[0]?.sequence ?? (boundary ?? this.auditSequence);
+    const oldest = selected.at(-1)?.sequence ?? (boundary ?? this.auditSequence);
+    return {
+      items: selected.map((entry) => ({ id: `${this.auditGeneration}:${entry.sequence}`, cursor: this.auditCursor(user, sessionId, entry.sequence), event: entry.event })),
+      newestCursor: this.auditCursor(user, sessionId, newest),
+      oldestCursor: this.auditCursor(user, sessionId, oldest),
+      hasMoreOlder: available.some((entry) => entry.sequence < oldest),
+      hasMoreNewer: available.some((entry) => entry.sequence > newest),
+    };
+  }
+  countNewUserAuditEvents(user: string, sessionId: string | undefined, after?: string): { count: number; latestCursor: string; overflow: boolean } {
+    const boundary = after ? this.parseAuditCursor(after, user, sessionId) : this.auditSequence;
+    const count = this.auditEntries.filter((entry) => entry.sequence > boundary && this.ownsAuditEvent(entry.event, user, sessionId)).length;
+    return { count: Math.min(count, 1_000), latestCursor: this.auditCursor(user, sessionId, this.auditSequence), overflow: count > 1_000 };
+  }
+  userOwnsAuditSession(user: string, sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.user === user || this.auditEntries.some((entry) => entry.event.user === user && (entry.event.sessionId === sessionId || entry.event.connectionId === sessionId));
+  }
+  auditEntriesForConsole(): Array<Record<string, unknown> & { event: string; at: string }> { return this.auditEntries.map((entry) => entry.event); }
+  subscribeAudit(listener: () => void): () => void { this.auditListeners.add(listener); return () => this.auditListeners.delete(listener); }
+  subscribeAuditConnection(close: () => void): () => void { this.auditConnectionClosers.add(close); return () => this.auditConnectionClosers.delete(close); }
   sign(body: object): string { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
   validRedirect(uri: string): boolean { try { return this.cfg.allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; } }
   authenticate(header?: string): string | undefined {

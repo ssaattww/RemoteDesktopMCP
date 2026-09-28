@@ -19,6 +19,29 @@ test("every tool requires a comment that is retained in operation audit history"
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE notifications without bodies", async () => {
+  const f = await fixture(); const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string"); const base = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${base}/api/logs`)).status, 401);
+    await f.service.audit("operation.received", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-operation", tool: "file_read", target: "owner.txt" });
+    await f.service.audit("operation.received", { user: "other@example.test", sessionId: "other-session", operationId: "other-operation", tool: "file_read", target: "other-secret.txt" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(token);
+    const cookie = `rdmcp_user=${token}`;
+    const first = await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } }); assert.equal(first.status, 200);
+    const firstPage = await first.json() as { items: Array<{ id: string; cursor: string; event: Record<string, unknown> }>; newestCursor: string };
+    assert.equal(firstPage.items.length, 1); assert.equal(firstPage.items[0]?.event.target, "owner.txt"); assert.ok(firstPage.items[0]?.id);
+    assert.equal((await fetch(`${base}/api/logs?session_id=other-session`, { headers: { cookie } })).status, 404);
+    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-operation", tool: "file_read", target: "owner.txt", status: "succeeded" });
+    const after = await fetch(`${base}/api/logs?after=${encodeURIComponent(firstPage.newestCursor)}&limit=1`, { headers: { cookie } }); assert.equal(after.status, 200);
+    const afterPage = await after.json() as { items: Array<{ event: Record<string, unknown> }> }; assert.equal(afterPage.items[0]?.event.status, "succeeded");
+    assert.equal((await fetch(`${base}/api/logs?before=${encodeURIComponent(firstPage.newestCursor)}&after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } })).status, 400);
+    const events = await fetch(`${base}/api/events?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } }); assert.equal(events.status, 200); assert.match(events.headers.get("content-type") ?? "", /text\/event-stream/); events.body?.cancel();
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
 test("user console lists each active connection's working directory and purpose for its owner", async () => {
   const f = await fixture();
   const owner = await mcp(f.service);
@@ -49,7 +72,7 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(html, /Build &lt;safe&gt; feature/);
     assert.match(html, /作業ディレクトリ/);
     assert.match(html, /セッション一覧/);
-    assert.match(html, /http-equiv="refresh" content="5"/);
+    assert.doesNotMatch(html, /http-equiv="refresh"/, "log history does not use whole-page periodic reloads");
     assert.match(html, /作成日時.*最終アクセス日時/);
     assert.match(html, /<th>内容<\/th><th>作成日時/);
     assert.match(html, /Second task/);
@@ -63,7 +86,7 @@ test("user console lists each active connection's working directory and purpose 
     const detail = await (await fetch(`${base}/user/sessions/${encodeURIComponent(String(own.session_id))}`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(detail, /セッションの内容/);
     assert.match(detail, /<details><summary>操作履歴<\/summary>/);
-    assert.match(detail, /http-equiv="refresh" content="5"/);
+    assert.doesNotMatch(detail, /http-equiv="refresh"/);
     assert.match(detail, /作成日時: .*最終アクセス日時:/);
     assert.match(detail, /first-only\.txt/);
     assert.match(detail, /first-command/);
@@ -92,11 +115,11 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(preferenceCookies, /rdmcp_user_refresh=30/);
     const persistedCookie = `rdmcp_user=${token}; rdmcp_user_filter=active; rdmcp_user_refresh=30`;
     const filtered = await (await fetch(`${base}/user`, { headers: { cookie: persistedCookie } })).text();
-    assert.match(filtered, /http-equiv="refresh" content="30"/);
+    assert.doesNotMatch(filtered, /http-equiv="refresh"/);
     assert.match(filtered, new RegExp(String(own.session_id)));
     assert.doesNotMatch(filtered, new RegExp(String(second.session_id)));
     const persistedDetail = await (await fetch(`${base}/user/sessions/${encodeURIComponent(String(own.session_id))}`, { headers: { cookie: persistedCookie } })).text();
-    assert.match(persistedDetail, /http-equiv="refresh" content="30"/);
+    assert.doesNotMatch(persistedDetail, /http-equiv="refresh"/);
     const paused = await (await fetch(`${base}/user?refresh=0`, { headers: { cookie: persistedCookie } })).text();
     assert.doesNotMatch(paused, /http-equiv="refresh"/);
     await assert.rejects(owner.call("file_read", { session_id: own.session_id, root_id: "missing", relative_path: "missing.txt" }));

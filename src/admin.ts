@@ -24,7 +24,6 @@ const dateValue = (value: string | undefined) => {
   return Number.isNaN(parsed) ? 0 : parsed;
 };
 export async function readSessionLogs(service: RemoteDesktopService) {
-  const file = path.join(service.cfg.dataDir, "audit.jsonl");
   const sessions = new Map<string, SessionLog>();
   // This is deliberately separate from the rendered event history. Commands are
   // capped at 4,000 characters when written, so 2,000 active correlations stay bounded.
@@ -51,14 +50,8 @@ export async function readSessionLogs(service: RemoteDesktopService) {
     session.events[session.events.indexOf(target)] = associated;
     associatedCommands.add(associated);
   };
-  let skipped = 0;
-  try { await assertPrivateAuditStorage(service.cfg.dataDir, file); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; return { sessions: [], skipped, stopWarnings: [] as UserStopWarning[] }; }
-  const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-  for await (const line of lines) {
-    let entry: Entry;
-    try { entry = JSON.parse(line) as Entry; if (!entry || typeof entry.event !== "string" || typeof entry.at !== "string") throw new Error(); }
-    catch { skipped++; continue; }
+  const skipped = 0;
+  for (const entry of service.auditEntriesForConsole()) {
     if (["process.owner_stop_unconfirmed", "process.owner_stop_failed", "process.stop_unconfirmed", "process.stop_unconfirmed_after_start", "process.stop_requested_after_start", "user.stop_marker_failed", "user.stop_persistence_failed"].includes(entry.event) && typeof entry.user === "string") {
       const userWarnings = stopWarnings.get(entry.user) ?? [];
       userWarnings.push({ user: entry.user, event: entry.event, at: entry.at, ...(typeof entry.stopId === "string" ? { stopId: entry.stopId } : {}), ...(typeof entry.pid === "number" ? { pid: entry.pid } : {}) });
