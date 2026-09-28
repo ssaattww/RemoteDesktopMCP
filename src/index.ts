@@ -216,13 +216,15 @@ export class RemoteDesktopService {
   private readonly executionStateLock = new Mutex();
   private readonly executionResumes = new Set<string>();
   private readonly operationContext = new AsyncLocalStorage<ExecutionOperation>();
-  private readonly auditGeneration = makeId();
+  private auditGeneration = makeId();
   private readonly auditEntries: AuditLogEntry[] = [];
-  private readonly auditListeners = new Set<() => void>();
+  private readonly auditListeners = new Set<(event: Record<string, unknown> & { event: string; at: string }) => void>();
   private readonly auditConnectionClosers = new Set<() => void>();
   private readonly auditProcessOwners = new Map<string, { user: string; sessionId?: string }>();
   private readonly auditLock = new Mutex();
   private auditSequence = 0;
+  private auditFileIdentity?: FileIdentity;
+  private auditFileBytes = 0n;
   private executionStateUnavailable = false;
   readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
@@ -252,8 +254,10 @@ export class RemoteDesktopService {
     this.expiryTimer.unref();
   }
   async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); for (const close of this.auditConnectionClosers) close(); this.auditConnectionClosers.clear(); this.auditListeners.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
-  async audit(event: string, fields: Record<string, unknown>): Promise<void> { await this.auditLock.run(async () => { const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); } const entry = { at: new Date().toISOString(), event, ...fields }; await appendFile(file, `${JSON.stringify(entry)}\n`); this.rememberAuditEntry(entry); }); }
-  private rememberAuditEntry(value: Record<string, unknown>): void {
+  async audit(event: string, fields: Record<string, unknown>): Promise<void> { await this.auditLock.run(async () => { await this.refreshAuditIndexLocked(); const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); await this.refreshAuditIndexLocked(); } const entry = { at: new Date().toISOString(), event, ...fields }; const line = `${JSON.stringify(entry)}\n`; await appendFile(file, line); this.rememberAuditEntry(entry); const stats = await lstat(file, { bigint: true }); const identity = this.identityFromStats(stats); const expectedBytes = this.auditFileBytes + BigInt(Buffer.byteLength(line)); if (this.auditFileIdentity && this.auditFileIdentity.dev === identity.dev && this.auditFileIdentity.ino === identity.ino && stats.size === expectedBytes) this.auditFileBytes = stats.size;
+    else await this.loadAuditIndex(true);
+  }); }
+  private rememberAuditEntry(value: Record<string, unknown>, notify = true): void {
     if (typeof value.event !== "string" || typeof value.at !== "string") return;
     const processId = typeof value.processId === "string" ? value.processId : undefined;
     const known = processId ? this.auditProcessOwners.get(processId) : undefined;
@@ -263,18 +267,29 @@ export class RemoteDesktopService {
     if (processId && typeof event.user === "string") { this.auditProcessOwners.delete(processId); while (this.auditProcessOwners.size >= 2_000) this.auditProcessOwners.delete(this.auditProcessOwners.keys().next().value!); this.auditProcessOwners.set(processId, { user: event.user, ...(typeof event.sessionId === "string" ? { sessionId: event.sessionId } : {}) }); }
     this.auditEntries.push({ sequence: ++this.auditSequence, event });
     while (this.auditEntries.length > MAX_AUDIT_EVENTS) this.auditEntries.shift();
-    for (const listener of this.auditListeners) listener();
+    if (notify) for (const listener of this.auditListeners) listener(event);
   }
-  private async loadAuditIndex(): Promise<void> {
+  private async loadAuditIndex(reset = false): Promise<void> {
     const file = path.join(this.cfg.dataDir, "audit.jsonl");
+    if (reset) { this.auditGeneration = makeId(); this.auditEntries.length = 0; this.auditProcessOwners.clear(); this.auditSequence = 0; }
     try { await assertPrivateAuditStorage(this.cfg.dataDir, file); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.auditFileIdentity = undefined; this.auditFileBytes = 0n; return; } throw error; }
     const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
     for await (const line of lines) {
-      try { this.rememberAuditEntry(JSON.parse(line) as Record<string, unknown>); }
+      try { this.rememberAuditEntry(JSON.parse(line) as Record<string, unknown>, false); }
       catch { /* Keep valid persisted entries available when one historical line is malformed. */ }
     }
+    const stats = await lstat(file, { bigint: true }); this.auditFileIdentity = this.identityFromStats(stats); this.auditFileBytes = stats.size;
   }
+  private async refreshAuditIndexLocked(): Promise<void> {
+    const file = path.join(this.cfg.dataDir, "audit.jsonl");
+    let stats: Awaited<ReturnType<typeof lstat>>;
+    try { stats = await lstat(file, { bigint: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { if (this.auditFileIdentity || this.auditFileBytes !== 0n || this.auditEntries.length) await this.loadAuditIndex(true); return; } throw error; }
+    const identity = this.identityFromStats(stats as Awaited<ReturnType<typeof lstat>> & { dev: bigint; ino: bigint });
+    if (!this.auditFileIdentity || this.auditFileIdentity.dev !== identity.dev || this.auditFileIdentity.ino !== identity.ino || this.auditFileBytes !== (stats as { size: bigint }).size) await this.loadAuditIndex(true);
+  }
+  async refreshAuditIndex(): Promise<void> { await this.auditLock.run(() => this.refreshAuditIndexLocked()); }
   private auditCursor(user: string, sessionId: string | undefined, sequence: number): string {
     const encoded = Buffer.from(JSON.stringify({ generation: this.auditGeneration, sequence, user, sessionId: sessionId ?? null })).toString("base64url");
     return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`;
@@ -317,10 +332,10 @@ export class RemoteDesktopService {
     return { count: Math.min(count, 1_000), latestCursor: this.auditCursor(user, sessionId, this.auditSequence), overflow: count > 1_000 };
   }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
-    return this.sessions.get(sessionId)?.user === user || this.auditEntries.some((entry) => entry.event.user === user && (entry.event.sessionId === sessionId || entry.event.connectionId === sessionId));
+    return this.sessions.get(sessionId)?.user === user || this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId);
   }
   auditEntriesForConsole(): Array<Record<string, unknown> & { event: string; at: string }> { return this.auditEntries.map((entry) => entry.event); }
-  subscribeAudit(listener: () => void): () => void { this.auditListeners.add(listener); return () => this.auditListeners.delete(listener); }
+  subscribeAudit(listener: (event: Record<string, unknown> & { event: string; at: string }) => void): () => void { this.auditListeners.add(listener); return () => this.auditListeners.delete(listener); }
   subscribeAuditConnection(close: () => void): () => void { this.auditConnectionClosers.add(close); return () => this.auditConnectionClosers.delete(close); }
   sign(body: object): string { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
   validRedirect(uri: string): boolean { try { return this.cfg.allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; } }

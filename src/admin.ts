@@ -24,6 +24,7 @@ const dateValue = (value: string | undefined) => {
   return Number.isNaN(parsed) ? 0 : parsed;
 };
 export async function readSessionLogs(service: RemoteDesktopService) {
+  await service.refreshAuditIndex();
   const sessions = new Map<string, SessionLog>();
   // This is deliberately separate from the rendered event history. Commands are
   // capped at 4,000 characters when written, so 2,000 active correlations stay bounded.

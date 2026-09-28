@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { createApp, RemoteDesktopService, configFromEnv } from "../src/index.js";
 import { readSessionLogs } from "../src/admin.js";
@@ -30,6 +30,8 @@ test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE
     const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
     const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(token);
     const cookie = `rdmcp_user=${token}`;
+    const consoleState = await fetch(`${base}/api/console-state`, { headers: { cookie } }); assert.equal(consoleState.status, 200);
+    assert.equal(typeof (await consoleState.json() as { updatedAt: unknown }).updatedAt, "string");
     const first = await fetch(`${base}/api/logs?limit=1`, { headers: { cookie } }); assert.equal(first.status, 200);
     const firstPage = await first.json() as { items: Array<{ id: string; cursor: string; event: Record<string, unknown> }>; newestCursor: string };
     assert.equal(firstPage.items.length, 1); assert.equal(firstPage.items[0]?.event.target, "owner.txt"); assert.ok(firstPage.items[0]?.id);
@@ -39,6 +41,12 @@ test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE
     const afterPage = await after.json() as { items: Array<{ event: Record<string, unknown> }> }; assert.equal(afterPage.items[0]?.event.status, "succeeded");
     assert.equal((await fetch(`${base}/api/logs?before=${encodeURIComponent(firstPage.newestCursor)}&after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } })).status, 400);
     const events = await fetch(`${base}/api/events?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } }); assert.equal(events.status, 200); assert.match(events.headers.get("content-type") ?? "", /text\/event-stream/); events.body?.cancel();
+    await writeFile(`${f.data}/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), event: "operation.received", user: "owner@example.test", sessionId: "owner-session", operationId: "replacement", tool: "file_read" })}\n`);
+    const stale = await fetch(`${base}/api/logs?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } });
+    assert.equal(stale.status, 409, "audit replacement invalidates cursors rather than mixing generations");
+    const staleEvents = await fetch(`${base}/api/events?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } });
+    assert.equal(staleEvents.status, 200, "an expired EventSource cursor receives a resync event instead of retrying HTTP 409 forever");
+    assert.match(await staleEvents.text(), /event: resync-required\ndata: \{\}/);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
@@ -77,8 +85,8 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(html, /<th>内容<\/th><th>作成日時/);
     assert.match(html, /Second task/);
     assert.match(html, /終了/);
-    assert.match(html, /現在実行中の操作: 0/);
-    assert.doesNotMatch(html, /request:/, "successful session opens must not leave provisional entries");
+    assert.match(html, /現在実行中の操作: <span id="running-count">0/);
+    assert.doesNotMatch(html.replace(/<script[\s\S]*<\/script>/, ""), /request:/, "successful session opens must not leave provisional entries");
     assert.ok(html.includes(f.root));
     assert.doesNotMatch(html, /Other user's private work/);
     assert.ok(!html.includes(f.data));
@@ -97,9 +105,10 @@ test("user console lists each active connection's working directory and purpose 
     assert.match(detail, /third-output/);
     assert.match(detail, /final-only-output/);
     assert.match(detail, /終了時の出力/);
-    assert.equal(detail.split("first-output").length - 1, 1, "the final snapshot does not repeat earlier output");
+    const renderedOutput = [...detail.replace(/<script[\s\S]*<\/script>/, "").matchAll(/<pre>([\s\S]*?)<\/pre>/g)].map((match) => match[1]).join("\n");
+    assert.equal(renderedOutput.split("first-output").length - 1, 1, "the final snapshot does not repeat earlier output");
     assert.match(detail, /終了コード: 0/);
-    const processBlocks = [...detail.matchAll(/<article class="process-block">([\s\S]*?)<\/article>/g)].map((match) => match[1]!);
+    const processBlocks = [...detail.matchAll(/<article class="process-block"[^>]*>([\s\S]*?)<\/article>/g)].map((match) => match[1]!);
     assert.equal(processBlocks.length, 2);
     assert.ok(processBlocks.some((block) => block.includes("first-command") && block.includes("third-output") && !block.includes("another-output")));
     assert.ok(processBlocks.some((block) => block.includes("another-command") && block.includes("another-output") && !block.includes("first-output")));
@@ -112,8 +121,7 @@ test("user console lists each active connection's working directory and purpose 
     const preferences = await fetch(`${base}/user?filter=active&refresh=30`, { headers: { cookie: `rdmcp_user=${token}` } });
     const preferenceCookies = preferences.headers.get("set-cookie") ?? "";
     assert.match(preferenceCookies, /rdmcp_user_filter=active/);
-    assert.match(preferenceCookies, /rdmcp_user_refresh=30/);
-    const persistedCookie = `rdmcp_user=${token}; rdmcp_user_filter=active; rdmcp_user_refresh=30`;
+    const persistedCookie = `rdmcp_user=${token}; rdmcp_user_filter=active`;
     const filtered = await (await fetch(`${base}/user`, { headers: { cookie: persistedCookie } })).text();
     assert.doesNotMatch(filtered, /http-equiv="refresh"/);
     assert.match(filtered, new RegExp(String(own.session_id)));
