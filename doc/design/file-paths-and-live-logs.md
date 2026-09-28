@@ -140,6 +140,8 @@ cursor 失効時は `resync-required` とし、ページ全体を再読み込み
 
 Windows の Node.js 22 テストは標準の `--test-shard` で3分割し、全テストファイルを各 shard に一度ずつ割り当てる。shard ごとに診断 artifact 名を分け、1 shard の失敗で残りを停止しない。型検査・ビルドは既存の Windows 検証として各 shard で実施し、簡潔な同一ジョブ構成を保つ。workflow の concurrency group は同じ PR またはブランチの古い実行をキャンセルする。変更後は YAML 構文、Node 22 の shard オプション、shard ごとの対象一覧と artifact 名を軽量に確認し、重いテスト一式を開発端末では再実行しない。
 
+Windows の CLI と bootstrap のセキュリティ回帰試験では、PowerShell ACL 検証を含む子プロセスが完了するための hang guard を15秒とする。これは処理速度の性能基準ではなく、完了しないプロセスを止める上限であり、危険な ACL の拒否、異常終了、秘密値を出さないという機能 assertion は維持する。
+
 CI では性能測定だけの subtest を明示的に skip し、通常のローカル `npm test` では実行する。CI は再試行の回数上限、fail-closed、状態・監査などの機能契約を検証し、ACL やプロセス起動を含む壁時計時間を合否にしない。ローカル性能 subtest は対象の retry phase や停止要求だけを測り、初期化全体を測らない。認証期限、heartbeat、受信期限、停止確認のように製品契約そのものを検証する時間は、この原則と区別する。
 
 - セッションの作業ディレクトリと root が異なる条件で、列挙・検索・読取・編集・転送の基準を確認する。

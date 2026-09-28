@@ -10,6 +10,14 @@ const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex
 const configPath = (data: string) => path.join(data, "desktop-commander-home", ".claude-server-commander", "config.json");
 const openSession = async (api: Awaited<ReturnType<typeof mcp>>) => (await api.call("session_open", {})).session_id as string;
 const auditEvents = async (data: string) => (await readFile(path.join(data, "audit.jsonl"), "utf8")).split("\n").flatMap((line) => { try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; } });
+const waitFor = async (predicate: () => boolean | Promise<boolean>, timeoutMs = 15_000): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await predicate()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  } while (true);
+};
 
 function pauseProcessWatchers(service: RemoteDesktopService) {
   const watchers = (service as unknown as { processWatchers: Map<string, NodeJS.Timeout> }).processWatchers;
@@ -254,11 +262,11 @@ test("RDMCP-MVP-IFR-004: a termination timeout becomes an observed single finish
     assert.ok([...owners.values()].includes(processId), "active terminating process must retain current-process ownership");
     active = false;
     let exits: Record<string, unknown>[] = [];
-    for (let attempt = 0; attempt < 20; attempt++) {
+    const durablyFinished = await waitFor(async () => {
       exits = (await auditEvents(f.data)).filter((entry) => entry.event === "process.exit" && entry.processId === processId);
-      if (service.processes.get(processId)?.state === "finished" && exits.length === 1) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+      return service.processes.get(processId)?.state === "finished" && exits.length === 1;
+    });
+    assert.equal(durablyFinished, true, "the watcher must durably record and publish the later exit");
     assert.equal(service.processes.get(processId)?.state, "finished", "the watcher must observe the later exit without a status/output poll");
     assert.equal(exits.length, 1, "late observation must emit exactly one exit audit event");
     assert.equal(exits[0]?.exitCode, 9);
@@ -301,10 +309,8 @@ test("RDMCP-MVP-IFR-004: completion with 100 remaining pages keeps ownership unt
     assert.ok([...owners.values()].includes(processId), "completion before the final page must retain current-process ownership");
     assert.equal((await auditEvents(f.data)).filter((entry) => entry.event === "process.exit" && entry.processId === processId).length, 0);
     releaseTail!();
-    for (let attempt = 0; attempt < 20; attempt++) {
-      if (service.processes.get(processId)?.state === "finished") break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    const tailFinished = await waitFor(() => service.processes.get(processId)?.state === "finished");
+    assert.equal(tailFinished, true, "the watcher must durably finish after the final tail drains");
     assert.equal(service.processes.get(processId)?.state, "finished");
     assert.match(String(service.processes.get(processId)?.output), /final-tail/);
     assert.equal((await auditEvents(f.data)).filter((entry) => entry.event === "process.exit" && entry.processId === processId).length, 1);
