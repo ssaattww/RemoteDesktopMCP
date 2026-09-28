@@ -955,7 +955,17 @@ const publicAuthorizeRequest = (service: RemoteDesktopService, req: Request) => 
   return { clientId, redirectUri, resource, state, challenge };
 };
 export function createApp(service: RemoteDesktopService): Express {
-  const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => { let timer: NodeJS.Timeout | undefined = setTimeout(() => req.destroy(), 15_000); const clearDeadline = () => { if (timer) { clearTimeout(timer); timer = undefined; } }; req.once("end", clearDeadline); req.once("aborted", clearDeadline); res.once("close", clearDeadline); if (["/authorize", "/authorize/confirm", "/authorize/consent", "/token", "/google/callback"].includes(req.path) && Number(req.header("content-length") ?? 0) > 16 * 1024) { clearDeadline(); return res.status(413).type("text").send("Request is too large."); } next(); }); app.use(express.urlencoded({ extended: false, limit: "16kb" })); app.use(["/token", "/authorize/confirm", "/authorize/consent"], express.json({ limit: "16kb" })); app.use(express.json({ limit: "1mb" }));
+  const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => {
+    // The audit EventSource is an authenticated, body-less GET that deliberately
+    // keeps its response open. Only that exact body-less form avoids the generic
+    // request-body deadline; malformed event-stream requests retain it.
+    const bodylessEvents = req.method === "GET" && req.path === "/api/events" && (req.header("content-length") === undefined || req.header("content-length") === "0") && req.header("transfer-encoding") === undefined;
+    let timer: NodeJS.Timeout | undefined = bodylessEvents ? undefined : setTimeout(() => req.destroy(), 15_000);
+    const clearDeadline = () => { if (timer) { clearTimeout(timer); timer = undefined; } };
+    req.once("end", clearDeadline); req.once("aborted", clearDeadline); res.once("close", clearDeadline);
+    if (["/authorize", "/authorize/confirm", "/authorize/consent", "/token", "/google/callback"].includes(req.path) && Number(req.header("content-length") ?? 0) > 16 * 1024) { clearDeadline(); return res.status(413).type("text").send("Request is too large."); }
+    next();
+  }); app.use(express.urlencoded({ extended: false, limit: "16kb" })); app.use(["/token", "/authorize/confirm", "/authorize/consent"], express.json({ limit: "16kb" })); app.use(express.json({ limit: "1mb" }));
   mountAdmin(app, service);
   mountUserConsole(app, service);
   app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: service.publicAuth ? "google" : "local-development" }));

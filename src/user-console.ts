@@ -150,6 +150,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     return res.json({ stopped: state.stopped, activeSessions: activeLive.length, runningProcesses: running.length, sessions, running, updatedAt: new Date().toISOString() });
   });
   app.get("/api/events", async (req, res) => {
+    if ((req.header("content-length") !== undefined && req.header("content-length") !== "0") || req.header("transfer-encoding") !== undefined) return res.status(400).json({ error: "invalid_request" });
     if (req.query.after !== undefined && typeof req.query.after !== "string") return res.status(400).json({ error: "invalid_request" });
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
     await service.refreshAuditIndex();
@@ -190,7 +191,10 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const count = service.countNewUserAuditEvents(principal, sessionId, notifiedAfter); notifiedAfter = count.latestCursor; send("logs-available", { addedCount: count.count, latestCursor: count.latestCursor, overflow: count.overflow });
     }
     catch { send("resync-required"); close(); return; }
-    req.on("close", close);
+    // IncomingMessage `close` can describe request completion rather than a
+    // cancelled long-lived response. Tie SSE teardown to the response socket
+    // itself so a normal heartbeat does not terminate the EventSource.
+    res.on("close", close);
   });
   app.use("/user", async (req, res, next) => { const login = await userLogin(req); if (!login) return res.redirect(303, "/user/login"); setLoginCookie(res, cookie(req.header("cookie")) ?? "", Math.max(0, Math.floor((login.expires - Date.now()) / 1000))); res.locals.principal = login.principal; res.locals.csrf = login.csrf; next(); });
   app.post("/user/logout", (req, res) => { if (!requireCsrf(req, res)) return; logins.delete(cookie(req.header("cookie")) ?? ""); setLoginCookie(res, "", 0); setCookie(res, "", 0, cookieName, "/user"); return res.redirect(303, "/user/login"); });

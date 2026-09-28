@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { createApp, RemoteDesktopService, configFromEnv } from "../src/index.js";
 import { readSessionLogs } from "../src/admin.js";
@@ -76,7 +77,36 @@ test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE
     await writeFile(`${f.data}/audit.jsonl`, "");
     const truncated = await fetch(`${base}/api/logs?after=${encodeURIComponent(replacementPage.newestCursor)}`, { headers: { cookie } });
     assert.equal(truncated.status, 409, "audit truncation invalidates cursors even when the pathname is unchanged");
+    const retainedAudit = Array.from({ length: 20_001 }, (_, index) => JSON.stringify({ at: new Date(1_700_000_000_000 + index).toISOString(), event: "operation.succeeded", user: "owner@example.test", sessionId: "owner-session", operationId: `retained-${index}` })).join("\n") + "\n";
+    await writeFile(`${f.data}/audit.jsonl`, retainedAudit);
+    await f.service.refreshAuditIndex();
+    assert.equal(f.service.auditEntriesForConsole().length, 20_000, "the shared audit index evicts the oldest event at its 20,000-event retention bound");
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("Issue 22: SSE stays open through its heartbeat", async () => {
+  const f = await fixture(); const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string"); const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
+    const malformedStatus = await new Promise<number>((resolve, reject) => {
+      const malformed = httpRequest(`${base}/api/events`, { method: "GET", headers: { cookie: `rdmcp_user=${token}`, "content-length": "1" } }, (response) => { response.resume(); response.once("end", () => resolve(response.statusCode ?? 0)); });
+      malformed.once("error", reject); malformed.end("x");
+    });
+    assert.equal(malformedStatus, 400, "event streams reject bodies instead of bypassing request-input protection");
+    const stream = await fetch(`${base}/api/events`, { headers: { cookie: `rdmcp_user=${token}` } }); assert.equal(stream.status, 200);
+    const reader = stream.body!.getReader(); const decoder = new TextDecoder();
+    assert.match(decoder.decode((await reader.read()).value), /event: logs-available/);
+    let timeout: NodeJS.Timeout | undefined;
+    let heartbeat: ReadableStreamReadResult<Uint8Array>;
+    try { heartbeat = await Promise.race([reader.read(), new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("SSE heartbeat was not delivered")), 25_000); })]); }
+    finally { if (timeout) clearTimeout(timeout); }
+    const heartbeatText = decoder.decode(heartbeat.value); await reader.cancel();
+    assert.equal(heartbeat.done, false, "the heartbeat must not close the EventSource response");
+    assert.match(heartbeatText, /event: heartbeat\ndata: \{\}/);
+  } finally { await f.service.close(); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
 test("user console lists each active connection's working directory and purpose for its owner", async () => {
