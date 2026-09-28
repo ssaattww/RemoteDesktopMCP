@@ -166,7 +166,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     let closed = false; let timer: NodeJS.Timeout | undefined; let notifiedAfter = after;
     const send = (name: string, data: Record<string, unknown> = {}) => { if (!closed && !res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)) close(); };
     const notify = (event: Record<string, unknown>) => {
-      if (event.user !== principal || (sessionId !== undefined && event.sessionId !== sessionId)) return;
+      if (!service.userCanViewAuditEvent(principal, sessionId, event)) return;
       if (timer || closed) return;
       timer = setTimeout(async () => {
         timer = undefined;

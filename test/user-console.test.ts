@@ -59,6 +59,13 @@ test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE
     await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: "owner-session", operationId: "owner-live", status: "succeeded" });
     const liveNotice = decoder.decode((await reader.read()).value); assert.match(liveNotice, /event: logs-available\ndata: \{[^\n]*"addedCount":1/);
     await reader.cancel();
+    await f.service.audit("operation.received", { user: "owner@example.test", operationId: "stream-unassigned", tool: "session_open" });
+    const syntheticPage = await (await fetch(`${base}/api/logs?session_id=request%3Astream-unassigned&limit=1`, { headers: { cookie } })).json() as { newestCursor: string };
+    const syntheticStream = await fetch(`${base}/api/events?session_id=request%3Astream-unassigned&after=${encodeURIComponent(syntheticPage.newestCursor)}`, { headers: { cookie } });
+    const syntheticReader = syntheticStream.body!.getReader(); await syntheticReader.read();
+    await f.service.audit("operation.rejected", { user: "owner@example.test", operationId: "stream-unassigned", tool: "session_open", status: "rejected" });
+    const syntheticNotice = decoder.decode((await syntheticReader.read()).value); assert.match(syntheticNotice, /event: logs-available\ndata: \{[^\n]*"addedCount":1/);
+    await syntheticReader.cancel();
     await writeFile(`${f.data}/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), event: "operation.received", user: "owner@example.test", sessionId: "owner-session", operationId: "replacement", tool: "file_read" })}\n`);
     const stale = await fetch(`${base}/api/logs?after=${encodeURIComponent(firstPage.newestCursor)}`, { headers: { cookie } });
     assert.equal(stale.status, 409, "audit replacement invalidates cursors rather than mixing generations");

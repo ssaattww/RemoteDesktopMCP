@@ -13,6 +13,17 @@ export function mergeBoundedItems(current: ConsoleLogItem[], incoming: ConsoleLo
   return [...byId.values()].slice(-limit);
 }
 
+export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogItem[], direction: "older" | "newer", limit = 1000) {
+  const byId = new Map(current.map((item) => [item.id, item]));
+  const unique = incoming.filter((item) => !byId.has(item.id));
+  const combined = direction === "older" ? [...unique, ...current] : [...current, ...unique];
+  return {
+    items: direction === "older" ? combined.slice(0, limit) : combined.slice(-limit),
+    droppedOlder: direction === "newer" && combined.length > limit,
+    droppedNewer: direction === "older" && combined.length > limit,
+  };
+}
+
 function clientBootstrap(): void {
   const consoleRoot = document.getElementById("log-console");
   if (!consoleRoot) return;
@@ -28,19 +39,33 @@ function clientBootstrap(): void {
   const status = document.getElementById("log-status");
   const newButton = document.getElementById("log-new-button") as HTMLButtonElement | null;
   const olderButton = document.getElementById("log-older-button") as HTMLButtonElement | null;
-  const stateButton = document.getElementById("state-refresh") as HTMLButtonElement | null;
   const eventSourceFactory = (url: string) => new EventSource(url);
   let appliedCursor = root.dataset.newestCursor ?? "";
   let oldestCursor = root.dataset.oldestCursor ?? "";
+  let displayNewestCursor = appliedCursor;
   let hasMoreOlder = root.dataset.hasMoreOlder === "true";
   let items: LogItem[] = [];
-  let seen = new Set<string>();
+  try {
+    const initialItems = JSON.parse(root.dataset.initialItems ?? "[]") as LogItem[];
+    items = [...initialItems].reverse().slice(-1000);
+    if (items.length) {
+      oldestCursor = items[0]!.cursor;
+      displayNewestCursor = items.at(-1)!.cursor;
+    }
+  } catch { /* The server-rendered view remains available if bootstrap data is malformed. */ }
+  let seen = new Set(items.map((item) => item.id));
+  let baselineCaptured = false;
+  let baselineCleared = false;
+  const baselineOperations = new Map<string, Record<string, unknown>>();
+  const baselineProcesses = new Map<string, { session: string; process: string; events: Array<Record<string, unknown>> }>();
   let connection: EventSource | undefined;
   let generation = 0;
+  let storeGeneration = 0;
   let connectionState: ConnectionState = "connecting";
   let logState: LogState = "current";
   let pendingCount = 0;
   let pendingOverflow = false;
+  let gapCount = 0;
   const pageLimit = 200;
 
   const query = (name: string, value: string) => name + "=" + encodeURIComponent(value);
@@ -53,11 +78,40 @@ function clientBootstrap(): void {
   };
   const showPending = () => {
     if (!newButton) return;
-    if (!pendingCount && !pendingOverflow) { newButton.hidden = true; return; }
     newButton.hidden = false;
-    newButton.textContent = pendingOverflow || pendingCount >= 1000 ? "新しいログ 1000件以上" : "新しいログ " + pendingCount + "件";
+    const count = Math.min(1000, pendingCount + gapCount);
+    const countText = pendingOverflow || count >= 1000 ? "1000件以上" : count + "件";
+    newButton.textContent = "↻ 更新（新着 " + countText + "）";
   };
   const updateLogState = (next: LogState) => { logState = next; setStatus(); };
+  const ensureInitialSnapshot = () => {
+    if (baselineCaptured) return;
+    baselineCaptured = true;
+    operationRows?.querySelectorAll<HTMLTableRowElement>("tr[data-event-json]").forEach((row) => {
+      try {
+        const event = JSON.parse(row.dataset.eventJson ?? "") as Record<string, unknown>;
+        const key = String(row.dataset.operationId ?? event.operationId ?? "");
+        if (key) baselineOperations.set(key, event);
+      } catch { /* Ignore a malformed row; API items still populate the live view. */ }
+    });
+    const all: Array<{ session: string; process: string; event: Record<string, unknown>; order: number }> = [];
+    processDetails?.querySelectorAll<HTMLElement>(".process-block[data-events-json]").forEach((block, order) => {
+      try {
+        const session = block.dataset.sessionId ?? "";
+        const process = block.dataset.processId ?? "";
+        const events = JSON.parse(block.dataset.eventsJson ?? "[]") as Array<Record<string, unknown>>;
+        for (const event of events) all.push({ session, process, event, order: all.length + order });
+      } catch { /* A malformed snapshot is discarded. */ }
+    });
+    all.sort((left, right) => Date.parse(String(left.event.at ?? "")) - Date.parse(String(right.event.at ?? "")) || left.order - right.order);
+    const bounded = all.slice(-800);
+    for (const entry of bounded) {
+      const key = processKey(entry.session, entry.process);
+      const group = baselineProcesses.get(key) ?? { session: entry.session, process: entry.process, events: [] };
+      group.events.push(entry.event);
+      baselineProcesses.set(key, group);
+    }
+  };
   const captureOpenStates = () => {
     const state = new Map<string, boolean>();
     processDetails?.querySelectorAll<HTMLDetailsElement>(".process-block").forEach((block) => {
@@ -81,14 +135,8 @@ function clientBootstrap(): void {
   const operationStatus = (event: Record<string, unknown>) => typeof event.status === "string" ? event.status : typeof event.event === "string" && event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(event.event) ? event.event.slice("operation.".length) : "running";
   const renderOperations = () => {
     if (!operationRows) return;
-    const byKey = new Map<string, Record<string, unknown>>();
-    operationRows.querySelectorAll<HTMLTableRowElement>("tr[data-event-json]").forEach((row) => {
-      try {
-        const event = JSON.parse(row.dataset.eventJson ?? "") as Record<string, unknown>;
-        const operationId = String(row.dataset.operationId ?? event.operationId ?? "");
-        byKey.set(operationId, event);
-      } catch { /* Leave malformed server-rendered rows alone until the next render. */ }
-    });
+    ensureInitialSnapshot();
+    const byKey = new Map<string, Record<string, unknown>>(baselineCleared ? [] : baselineOperations);
     for (const item of items) {
       const event = item.event;
       if (typeof event.event !== "string" || !event.event.startsWith("operation.")) continue;
@@ -119,31 +167,43 @@ function clientBootstrap(): void {
     }
   };
   const processKey = (session: string, process: string) => session + ":" + process;
+  const eventSignature = (event: Record<string, unknown>) => JSON.stringify([event.event, event.at, event.processId, event.output, event.exitCode]);
   const renderProcesses = () => {
     if (!processDetails) return;
+    ensureInitialSnapshot();
     const opened = captureOpenStates();
     const groups = new Map<string, { session: string; process: string; events: Array<Record<string, unknown>> }>();
-    processDetails.querySelectorAll<HTMLElement>(".process-block[data-events-json]").forEach((block) => {
-      try {
-        const session = block.dataset.sessionId ?? "";
-        const process = block.dataset.processId ?? "";
-        const events = JSON.parse(block.dataset.eventsJson ?? "[]") as Array<Record<string, unknown>>;
-        if (process) groups.set(processKey(session, process), { session, process, events });
-      } catch { /* A later valid update can still be rendered. */ }
-    });
+    if (!baselineCleared) for (const [key, group] of baselineProcesses) groups.set(key, { ...group, events: [...group.events] });
+    const signatures = new Map<string, Set<string>>();
+    for (const [key, group] of groups) signatures.set(key, new Set(group.events.map(eventSignature)));
     for (const item of items) {
       const event = item.event;
       if (!["process.start", "process.output", "process.exit"].includes(String(event.event)) || typeof event.processId !== "string") continue;
       const session = String(event.sessionId ?? "");
       const key = processKey(session, event.processId);
       const group = groups.get(key) ?? { session, process: event.processId, events: [] };
-      if (!group.events.some((existing) => existing.id === item.id)) group.events.push({ ...event, id: item.id });
+      const known = signatures.get(key) ?? new Set<string>();
+      const signature = eventSignature(event);
+      if (!known.has(signature)) { group.events.push({ ...event, id: item.id }); known.add(signature); }
+      signatures.set(key, known);
+      groups.set(key, group);
+    }
+    const retained = [...groups.values()].flatMap((group) => group.events.map((event, order) => ({ group, event, order })))
+      .sort((left, right) => Date.parse(String(left.event.at ?? "")) - Date.parse(String(right.event.at ?? "")) || left.order - right.order)
+      .slice(-1000);
+    groups.clear();
+    for (const entry of retained) {
+      const key = processKey(entry.group.session, entry.group.process);
+      const group = groups.get(key) ?? { session: entry.group.session, process: entry.group.process, events: [] };
+      group.events.push(entry.event);
       groups.set(key, group);
     }
     const all = [...groups.values()].sort((a, b) => Date.parse(String(b.events.at(-1)?.at ?? "")) - Date.parse(String(a.events.at(-1)?.at ?? "")));
     const heading = processDetails.querySelector("h2");
+    const toolbar = document.getElementById("log-console");
     processDetails.replaceChildren();
     if (heading) processDetails.append(heading);
+    if (toolbar) processDetails.append(toolbar);
     for (const group of all.slice(0, 100)) {
       const events = group.events;
       const start = events.find((event) => event.event === "process.start");
@@ -189,22 +249,47 @@ function clientBootstrap(): void {
     processDetails.hidden = all.length === 0;
   };
   const renderEvents = () => {
+    const visible = processDetails ? [...processDetails.querySelectorAll<HTMLElement>(".process-block")].find((block) => {
+      const rect = block.getBoundingClientRect();
+      return rect.bottom > 0 && rect.top < window.innerHeight;
+    }) : undefined;
+    const anchor = visible ? { session: visible.dataset.sessionId ?? "", process: visible.dataset.processId ?? "", top: visible.getBoundingClientRect().top } : undefined;
     const scrollY = window.scrollY;
     renderOperations();
     renderProcesses();
-    window.scrollTo(window.scrollX, scrollY);
+    const replacement = anchor ? [...(processDetails?.querySelectorAll<HTMLElement>(".process-block") ?? [])].find((block) => block.dataset.sessionId === anchor.session && block.dataset.processId === anchor.process) : undefined;
+    const shift = replacement ? replacement.getBoundingClientRect().top - anchor!.top : 0;
+    window.scrollTo(window.scrollX, scrollY + shift);
   };
   const commitItems = (incoming: LogItem[], direction: "newer" | "older" | "replace") => {
     if (direction === "replace") {
+      storeGeneration += 1;
       items = incoming.slice(-1000);
       seen = new Set(items.map((item) => item.id));
+      baselineCleared = true;
+      baselineOperations.clear();
+      baselineProcesses.clear();
+      gapCount = 0;
     } else {
       const unique = incoming.filter((item) => !seen.has(item.id));
-      for (const item of unique) seen.add(item.id);
-      items = direction === "older" ? [...unique, ...items].slice(-1000) : [...items, ...unique].slice(-1000);
+      const combined = direction === "older" ? [...unique, ...items] : [...items, ...unique];
+      if (direction === "older" && combined.length > 1000) {
+        gapCount = Math.min(1000, gapCount + combined.length - 1000);
+      }
+      if (direction === "newer" && combined.length > 1000) hasMoreOlder = true;
+      items = direction === "older" ? combined.slice(0, 1000) : combined.slice(-1000);
       seen = new Set(items.map((item) => item.id));
     }
+    if (items.length) {
+      oldestCursor = items[0]!.cursor;
+      displayNewestCursor = items.at(-1)!.cursor;
+      root.dataset.oldestCursor = oldestCursor;
+      root.dataset.windowNewestCursor = displayNewestCursor;
+    }
+    root.dataset.hasMoreOlder = String(hasMoreOlder);
+    if (olderButton) olderButton.hidden = !hasMoreOlder;
     renderEvents();
+    showPending();
   };
   const fetchPage = async (params: URLSearchParams): Promise<{ response: Response; page?: LogPage }> => {
     if (sessionId) params.set("session_id", sessionId);
@@ -214,34 +299,38 @@ function clientBootstrap(): void {
   };
   const applyNewLogs = async () => {
     if (logState === "refreshing") return;
-    const startCursor = appliedCursor;
+    const startCursor = displayNewestCursor || appliedCursor;
     updateLogState("refreshing");
-    const fetched: LogItem[][] = [];
+    const fetched: LogItem[] = [];
     let cursor = startCursor;
     let newest = startCursor;
+    const operationGeneration = storeGeneration;
     try {
       while (true) {
         const params = new URLSearchParams({ limit: String(pageLimit) });
         if (cursor) params.set("after", cursor);
         const result = await fetchPage(params);
+        if (operationGeneration !== storeGeneration) return;
         if (result.response.status === 409) { await resync(); return; }
         if (!result.response.ok || !result.page) throw new Error("logs request failed");
         const page = result.page;
         if (!Array.isArray(page.items)) throw new Error("invalid logs response");
-        fetched.push(page.items);
+        fetched.push(...[...page.items].reverse());
+        if (fetched.length > 1000) fetched.splice(0, fetched.length - 1000);
         newest = page.newestCursor || newest;
         if (!page.hasMoreNewer || !page.items.length || page.newestCursor === cursor) break;
         cursor = page.newestCursor;
       }
-      commitItems(fetched.flatMap((page) => [...page].reverse()), "newer");
+      commitItems(fetched, "newer");
       appliedCursor = newest;
       root.dataset.newestCursor = newest;
-      pendingCount = 0; pendingOverflow = false; showPending();
+      pendingCount = 0; pendingOverflow = false; gapCount = 0; showPending();
       restartEvents();
       void refreshState();
       updateLogState("current");
     } catch {
       updateLogState("pending");
+      void refreshState();
     }
   };
   async function resync() {
@@ -258,20 +347,22 @@ function clientBootstrap(): void {
       root.dataset.oldestCursor = oldestCursor;
       root.dataset.hasMoreOlder = String(hasMoreOlder);
       if (olderButton) olderButton.hidden = !hasMoreOlder;
-      pendingCount = 0; pendingOverflow = false; showPending();
+      pendingCount = 0; pendingOverflow = false; gapCount = 0; showPending();
       restartEvents();
       void refreshState();
       updateLogState("current");
-    } catch { updateLogState("pending"); }
+    } catch { updateLogState("pending"); void refreshState(); }
   }
   const chronological = (pageItems: LogItem[]) => [...pageItems].reverse();
   const loadOlder = async () => {
     if (!hasMoreOlder || !oldestCursor || olderButton?.disabled) return;
     if (olderButton) { olderButton.disabled = true; olderButton.textContent = "取得中…"; }
     const before = oldestCursor;
+    const operationGeneration = storeGeneration;
     try {
       const params = new URLSearchParams({ limit: String(pageLimit), before });
       const result = await fetchPage(params);
+      if (operationGeneration !== storeGeneration) return;
       if (result.response.status === 409) { await resync(); return; }
       if (!result.response.ok || !result.page) throw new Error("older logs request failed");
       commitItems(chronological(result.page.items), "older");
@@ -284,11 +375,14 @@ function clientBootstrap(): void {
     finally { if (olderButton) { olderButton.disabled = false; olderButton.textContent = "過去のログを読み込む"; } }
   };
   const refreshState = async () => {
-    if (stateButton) stateButton.disabled = true;
     try {
       const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (!response.ok) return;
-      const state = await response.json() as { stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string };
+      const state = await response.json() as {
+        stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
+        sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
+        running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
+      };
       const stopped = document.getElementById("execution-state");
       const active = document.getElementById("active-session-count");
       const running = document.getElementById("running-count");
@@ -297,8 +391,41 @@ function clientBootstrap(): void {
       if (active) active.textContent = String(state.activeSessions);
       if (running) running.textContent = String(state.runningProcesses);
       if (updated) updated.textContent = timeText(state.updatedAt);
+      const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
+      if (sessionRows && state.sessions) {
+        const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
+        sessionRows.replaceChildren();
+        if (!visibleSessions.length) {
+          const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 7;
+          cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
+        } else for (const session of visibleSessions) {
+          const row = sessionRows.insertRow();
+          const linkCell = row.insertCell(); const link = document.createElement("a");
+          link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
+          addCell(row, timeText(session.created_at));
+          addCell(row, timeText(session.last_used_at ?? session.created_at));
+          addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
+          addCell(row, session.purpose ?? "—");
+          addCell(row, session.session_id);
+          addCell(row, session.working_directory ?? "—");
+        }
+      }
+      const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
+      if (runningRows && state.running) {
+        runningRows.replaceChildren();
+        for (const operation of state.running) {
+          const row = runningRows.insertRow();
+          addCell(row, operation.operation_id);
+          addCell(row, operation.connection_id);
+          const stateCell = addCell(row, operation.label + " · " + operation.status);
+          stateCell.className = "running";
+        }
+        const table = document.getElementById("running-table");
+        const empty = document.getElementById("running-empty");
+        if (table) table.hidden = state.running.length === 0;
+        if (empty) empty.hidden = state.running.length !== 0;
+      }
     } catch { /* Keep the last successful state visible. */ }
-    finally { if (stateButton) stateButton.disabled = false; }
   };
   function restartEvents() {
     if (connection) connection.close();
@@ -310,7 +437,15 @@ function clientBootstrap(): void {
     const source = eventSourceFactory("/api/events?" + params.toString());
     connection = source;
     let firstNotice = true;
-    source.onopen = () => { if (generation !== currentGeneration) return; connectionState = "connected"; setStatus(); };
+    source.onopen = () => {
+      if (generation !== currentGeneration) return;
+      // EventSource can reconnect the same object. Each transport connection
+      // starts a fresh server-side notification count from appliedCursor, so
+      // its first notice replaces the old count instead of adding to it.
+      firstNotice = true;
+      connectionState = "connected";
+      setStatus();
+    };
     source.onerror = () => { if (generation !== currentGeneration) return; connectionState = "reconnecting"; setStatus(); };
     source.addEventListener("logs-available", (raw: Event) => {
       if (generation !== currentGeneration) return;
@@ -329,7 +464,41 @@ function clientBootstrap(): void {
 
   newButton?.addEventListener("click", () => { void applyNewLogs(); });
   olderButton?.addEventListener("click", () => { void loadOlder(); });
-  stateButton?.addEventListener("click", () => { void refreshState(); });
+  if (processDetails) {
+    const hint = document.getElementById("log-pull-hint");
+    let pull: { startX: number; startY: number; distance: number; cancelled: boolean } | undefined;
+    const resetPull = () => { pull = undefined; if (hint) hint.textContent = "下へ引いて更新"; };
+    processDetails.addEventListener("touchstart", (event: TouchEvent) => {
+      if (event.touches.length !== 1 || logState === "refreshing") { resetPull(); return; }
+      const target = event.target instanceof Element ? event.target : undefined;
+      if (!target || target.closest("button,a,input,select,textarea,summary,[role=button]")) { resetPull(); return; }
+      const block = target.closest<HTMLElement>(".process-block");
+      const newest = processDetails.querySelector<HTMLElement>(".process-block");
+      if (!block || block !== newest) { resetPull(); return; }
+      const rect = block.getBoundingClientRect();
+      if (rect.top < 0 || rect.top >= window.innerHeight || rect.bottom <= 0 || window.getSelection()?.toString()) { resetPull(); return; }
+      const touch = event.touches[0]!;
+      pull = { startX: touch.clientX, startY: touch.clientY, distance: 0, cancelled: false };
+    }, { passive: true });
+    processDetails.addEventListener("touchmove", (event: TouchEvent) => {
+      if (!pull || event.touches.length !== 1) { resetPull(); return; }
+      const touch = event.touches[0]!;
+      const dx = touch.clientX - pull.startX;
+      const dy = touch.clientY - pull.startY;
+      if (Math.abs(dx) > Math.abs(dy) + 8 || dy < 0) { pull.cancelled = true; resetPull(); return; }
+      pull.distance = dy;
+      if (dy >= 72) {
+        event.preventDefault();
+        if (hint) hint.textContent = "離すと更新";
+      } else if (dy > 10 && hint) hint.textContent = "あと " + Math.ceil(72 - dy) + "px";
+    }, { passive: false });
+    processDetails.addEventListener("touchend", () => {
+      const shouldRefresh = Boolean(pull && !pull.cancelled && pull.distance >= 72 && !window.getSelection()?.toString() && logState !== "refreshing");
+      resetPull();
+      if (shouldRefresh) void applyNewLogs();
+    });
+    processDetails.addEventListener("touchcancel", resetPull);
+  }
   window.addEventListener("scroll", () => {
     if (!hasMoreOlder || !oldestCursor || (olderButton && olderButton.disabled)) return;
     if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 120) void loadOlder();

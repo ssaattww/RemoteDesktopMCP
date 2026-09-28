@@ -338,6 +338,9 @@ export class RemoteDesktopService {
     const count = this.auditEntries.filter((entry) => entry.sequence > boundary && this.ownsAuditEvent(entry.event, user, sessionId)).length;
     return { count: Math.min(count, 1_000), latestCursor: this.auditCursor(user, sessionId, this.auditSequence), overflow: count > 1_000 };
   }
+  userCanViewAuditEvent(user: string, sessionId: string | undefined, event: Record<string, unknown>): boolean {
+    return typeof event.event === "string" && typeof event.at === "string" && this.ownsAuditEvent(event as AuditLogEntry["event"], user, sessionId);
+  }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
     if (this.sessions.get(sessionId)?.user === user) return true;
     if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
