@@ -117,6 +117,56 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("Issue 20: root-scoped file operations expose their canonical path when the session CWD differs", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const workingDirectory = path.join(f.base, "session-cwd");
+    const rootFile = path.join(f.root, "root-only.txt");
+    const uploadedName = "uploaded-from-root-base.bin";
+    const uploadedPath = path.join(f.root, uploadedName);
+    await mkdir(workingDirectory);
+    await Promise.all([
+      writeFile(rootFile, "root content before patch"),
+      writeFile(path.join(workingDirectory, "cwd-only.txt"), "session CWD content"),
+      writeFile(path.join(workingDirectory, "report-cwd.cjs"), "process.stdout.write(process.cwd())"),
+    ]);
+    const opened = await api.call("session_open", { working_directory: workingDirectory, purpose: "Verify root-relative file paths" });
+    const session = opened.session_id as string;
+
+    const listed = await api.call("node_list", { session_id: session });
+    const node = (listed.nodes as Array<Record<string, unknown>>)[0]!;
+    assert.deepEqual(node.root_ids, ["files"], "the compatible root-ID list remains available");
+    assert.deepEqual(node.roots, [{ root_id: "files", absolute_path: f.root }]);
+    assert.equal(node.path_base, "root");
+
+    const process = await api.call("process_start", { session_id: session, command: nodeScriptCommand(path.join(workingDirectory, "report-cwd.cjs")), timeout_ms: 10_000 });
+    assert.match(String(process.output), new RegExp(workingDirectory.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")), "process_start uses the session working directory");
+
+    const names = await api.call("file_search", { session_id: session, root_id: "files", query: "root-only" });
+    assert.match(String(names.output), /root-only\.txt/, "file search uses root_id rather than the session working directory");
+    const contents = await api.call("content_search", { session_id: session, root_id: "files", query: "before patch" });
+    assert.match(String(contents.output), /root-only\.txt/, "content search uses root_id rather than the session working directory");
+    assert.match(String((await api.call("file_read", { session_id: session, root_id: "files", relative_path: "root-only.txt" })).output), /root content before patch/);
+    await api.call("file_patch", { session_id: session, root_id: "files", relative_path: "root-only.txt", old_string: "before patch", new_string: "after patch" });
+    assert.equal(await readFile(rootFile, "utf8"), "root content after patch");
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "../session-cwd/cwd-only.txt" }), /Path is outside/, "root escape protection remains in force");
+
+    const download = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "root-only.txt" });
+    assert.equal(download.resolved_path, rootFile); assert.equal(download.root_id, "files"); assert.equal(download.path_base, "root");
+    const downloaded = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: download.transfer_id, offset: 0 });
+    assert.equal(Buffer.from(downloaded.data as string, "base64").toString("utf8"), "root content after patch");
+
+    const bytes = Buffer.from("upload bytes in configured root");
+    const upload = await api.call("file_transfer_upload_begin", { session_id: session, root_id: "files", relative_path: uploadedName, size: bytes.length, sha256: sha256(bytes), overwrite: false });
+    assert.equal(upload.resolved_path, uploadedPath); assert.equal(upload.root_id, "files"); assert.equal(upload.path_base, "root");
+    await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: bytes.toString("base64") });
+    const committed = await api.call("file_transfer_upload_commit", { session_id: session, transfer_id: upload.transfer_id });
+    assert.equal(committed.resolved_path, uploadedPath); assert.equal(committed.root_id, "files"); assert.equal(committed.path_base, "root");
+    assert.deepEqual(await readFile(uploadedPath), bytes);
+    await assert.rejects(readFile(path.join(workingDirectory, uploadedName)), "upload does not silently write relative to the session working directory");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("Issue 9: sessions require a working directory and purpose, and commands start there", async () => {
   const f = await fixture();
   const api = await mcp(f.service);

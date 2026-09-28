@@ -64,6 +64,20 @@ npm.cmd run lint
 
 通常のファイル操作とプロセス操作は、固定版
 `@wonderwhy-er/desktop-commander@0.2.51` の stdio MCP 接続へ委譲します。
+
+## ファイル操作のパス基準
+
+`file_search`、`content_search`、`file_read`、`file_patch`、`file_transfer_*` は、
+`root_id` で選んだ設定済み root を基準にします。`relative_path` はその root
+からの相対パスであり、同じ session の `working_directory` を基準にしません。
+`node_list` の `roots` で各 `root_id` の `absolute_path` を確認してください。
+転送の upload begin、download begin、upload commit でも、対象の
+`resolved_path`、`root_id`、`path_base: "root"` を返します。
+
+`process_start` だけは session の `working_directory` からコマンドを開始します。
+ファイル操作とプロセス操作で同じ相対パスを使う場合は、それぞれの基準が一致する
+ことを確認してください。
+
 RemoteDesktopMCP 専用の Desktop Commander 設定と private cache は `DATA_DIR` 内に隔離し、
 既存ユーザーの Desktop Commander 設定を変更しません。Desktop Commander と
 `process_start` の子プロセスは、サーバー起動時の `USERPROFILE`、`APPDATA`、
