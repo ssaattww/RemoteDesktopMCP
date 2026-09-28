@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Lint, check, build, and test (Ubuntu)
@@ -112,9 +116,15 @@ jobs:
           retention-days: 14
 
   windows:
-    name: Check, build, and test (Windows)
+    name: Check, build, and test (Windows shard ${{ matrix.shard }}/3)
     runs-on: windows-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      TEST_SHARD: ${{ matrix.shard }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -169,10 +179,12 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          & npm.cmd test 1> ci-artifacts/test.stdout.log 2> ci-artifacts/test.stderr.log
+          $testFiles = @(Get-ChildItem -Path test -Recurse -File -Filter '*.test.ts' | Sort-Object FullName | ForEach-Object { $_.FullName })
+          if ($testFiles.Count -eq 0) { throw 'No test/**/*.test.ts files were discovered.' }
+          & node --import tsx --test "--test-shard=$env:TEST_SHARD/3" $testFiles 1> ci-artifacts/test.stdout.log 2> ci-artifacts/test.stderr.log
           $status = $LASTEXITCODE
           "test_exit_code=$status" | Add-Content ci-artifacts/test-results.txt
-          "command=npm.cmd test`nexit_code=$status" | Set-Content ci-artifacts/test.result.txt
+          "command=node --import tsx --test --test-shard=$env:TEST_SHARD/3 test/**/*.test.ts`nfiles=$($testFiles.Count)`nexit_code=$status" | Set-Content ci-artifacts/test.result.txt
           Get-Content ci-artifacts/test.stdout.log
           Get-Content ci-artifacts/test.stderr.log | ForEach-Object { [Console]::Error.WriteLine($_) }
           exit $status
@@ -191,7 +203,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-diagnostics-${{ github.sha }}
+          name: windows-diagnostics-shard-${{ matrix.shard }}-${{ github.sha }}
           path: ci-artifacts
           if-no-files-found: error
           retention-days: 14
