@@ -33,7 +33,7 @@ async function configure(source: string) {
   const lines = [
     `BASE_URL=${baseUrl}`, "PORT=3000", "REMOTE_AUTH_MODE=google", `TOKEN_SECRET=${secret()}`,
     `GOOGLE_CLIENT_ID=${(client as { client_id: string }).client_id}`, `GOOGLE_CLIENT_SECRET=${(client as { client_secret: string }).client_secret}`, `GOOGLE_REDIRECT_URI=${baseUrl}/google/callback`, `GOOGLE_LOCAL_REDIRECT_URI=${LOCAL_CALLBACK}`,
-    `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${dataDir}`, "LOCAL_NODE_ID=local", "LOCAL_NODE_LABEL=This PC", "TRANSFER_CHUNK_BYTES=131072",
+    `FILE_ROOTS_JSON=${JSON.stringify([{ id: "workspace", path: root }])}`, `DATA_DIR=${dataDir}`, "LOCAL_NODE_ID=local", "LOCAL_NODE_LABEL=This PC", "TRANSFER_CHUNK_BYTES=524288",
   ];
   await createPrivateFile(envPath, `${lines.join("\n")}\n`);
   console.log("Created .env with Google mode. Keep the Google client JSON and .env outside the permitted workspace.");

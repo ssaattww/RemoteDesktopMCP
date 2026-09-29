@@ -101,6 +101,8 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
       assert.match(tools.get(name)!, /relative_path/i);
     }
     assert.match(tools.get("file_transfer_download_begin")!, /snapshot copy/i);
+    assert.match(tools.get("file_transfer_download_begin")!, /inline=true/i);
+    assert.match(tools.get("file_transfer_upload_begin")!, /single call/i);
     assert.match(tools.get("file_transfer_upload_commit")!, /SHA-256/i);
     assert.match(tools.get("file_transfer_upload_commit")!, /atomic/i);
     assert.match(tools.get("process_start")!, /OS user's existing permissions/i);
@@ -173,6 +175,55 @@ test("Issue 20: root-scoped file operations expose their canonical path when the
     assert.equal(committed.resolved_path, uploadedPath); assert.equal(committed.root_id, "files"); assert.equal(committed.path_base, "root");
     assert.deepEqual(await readFile(uploadedPath), bytes);
     await assert.rejects(readFile(path.join(workingDirectory, uploadedName)), "upload does not silently write relative to the session working directory");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("Issue 29: small transfers complete in one MCP call while large transfers keep the chunked fallback", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+
+    const downloadBytes = Buffer.from("single-call download");
+    const downloadPath = path.join(f.root, "single-download.bin");
+    await writeFile(downloadPath, downloadBytes);
+    const downloaded = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "single-download.bin", inline: true });
+    assert.equal(downloaded.complete, true);
+    assert.equal(downloaded.next_offset, downloadBytes.length);
+    assert.deepEqual(Buffer.from(downloaded.data as string, "base64"), downloadBytes);
+    assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: downloaded.transfer_id })).state, "complete");
+
+    const uploadBytes = Buffer.from("single-call upload");
+    const uploaded = await api.call("file_transfer_upload_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "single-upload.bin",
+      size: uploadBytes.length,
+      sha256: sha256(uploadBytes),
+      overwrite: false,
+      data: uploadBytes.toString("base64"),
+    });
+    assert.equal(uploaded.complete, true);
+    assert.equal(uploaded.size, uploadBytes.length);
+    assert.deepEqual(await readFile(path.join(f.root, "single-upload.bin")), uploadBytes);
+    assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: uploaded.transfer_id })).state, "complete");
+
+    const largeBytes = Buffer.alloc(1025, 0x5a);
+    await writeFile(path.join(f.root, "large-download.bin"), largeBytes);
+    const largeDownload = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "large-download.bin", inline: true });
+    assert.equal(largeDownload.complete, false);
+    assert.equal(largeDownload.data, undefined);
+    await api.call("file_transfer_cancel", { session_id: session, transfer_id: largeDownload.transfer_id });
+
+    await assert.rejects(api.call("file_transfer_upload_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "large-upload.bin",
+      size: largeBytes.length,
+      sha256: sha256(largeBytes),
+      overwrite: false,
+      data: largeBytes.toString("base64"),
+    }));
   } finally { await api.close(); await f.cleanup(); }
 });
 
