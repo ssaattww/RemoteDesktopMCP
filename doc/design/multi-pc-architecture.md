@@ -114,8 +114,8 @@ TCP 接続後10秒以内に相互認証と `ready` まで完了しない接続�
 
 実行ノードは接続を維持したまま双方向にリクエストと結果をやり取りする。
 統括ノードは認証済みの実行ノードごとに有効な接続を1本だけ保持する。
-同じ `node_id` から新しい接続が相互認証まで成功した場合は、新しい接続を現在の接続として原子的に採用し、
-以前の接続を閉じる。
+同じ `node_id` から新しい接続が相互認証まで成功しても、`ready` と使用者状態の初期同期が完了するまでは現在の操作可能な接続を置き換えない。
+新しい接続の同期まで成功した時点で、新しい接続を現在の接続として原子的に採用し、以前の接続を閉じる。
 各リクエストは送信時の `connection_id` に固定し、旧接続から遅れて到着した応答は現在の要求結果として採用しない。
 
 認証後、統括ノードは通信がない間も15秒ごとに認証済みの生存確認を送り、
@@ -274,13 +274,14 @@ PSKそのものを接続相手へ送るのではなく、PSKから計算したHM
 4. 照合に成功した実行ノードは、実行ノード用のHMAC値を `proof` として返す。
 5. 統括ノードも受け取ったHMAC値を一定時間比較で照合する。双方の照合が成功した場合だけセッション鍵を有効にする。
 6. 実行ノードは認証済みフレームとして `ready` を送り、現在の `desktop_commander_generation`、利用可能な操作、ファイルルート情報を通知する。
-7. 統括ノードは `ready` を検証して現在の接続へ原子的に採用した後、そのノードを接続済みとして扱う。
+7. 統括ノードは `ready` を検証し、新しい接続を `synchronizing` 状態の接続候補として保持する。この時点では現在の操作可能な接続を置き換えず、新しい接続も操作可能として公開しない。
+8. 統括ノードは保存済みの使用者状態を認証済み `user_state` フレームで同期する。実行ノードがすべての状態を反映して `user_state_ack` を返した後、新しい接続を現在接続へ原子的に切り替え、その時点で以前の接続を閉じる。保存済み状態が0件なら同期は直ちに完了したものとする。
 
 `client_nonce` と `server_nonce` は接続ごとに新しく生成し、base64url で転送する。
 以前の認証メッセージを再送しても、今回のnonceを使った計算結果とは一致しないため受け付けない。
-認証と `ready` が完了するまでは、ファイル操作、プロセス操作、転送、ノード状態更新を受け付けない。
+認証、`ready`、使用者状態の初期同期が完了するまでは、ファイル操作、プロセス操作、転送、ノード状態更新を受け付けない。
 未登録 `node_id`、プロトコル版不一致、照合失敗では接続を閉じ、リクエストを実行しない。
-TCP 接続確立後10秒以内に相互認証と `ready` まで完了しない接続は閉じる。
+TCP 接続確立後10秒以内に相互認証と `ready` まで完了しない接続は閉じる。`ready` 後10秒以内に使用者状態の初期同期が完了しない接続も閉じ、接続済みとして扱わない。
 統括ノードが同時に保持する未認証接続は32件を上限とし、上限を超える接続は認証処理へ進めず閉じる。
 認証前に受け付けるフレーム本文は8 KiB以下とし、`hello`、`challenge`、`proof` 以外の種別や過大な本文を受信した場合も接続を閉じる。
 
@@ -332,7 +333,7 @@ connection_id = base64url(SHA-256(UTF8("rdmcp-node-connection-v1") || client_non
 
 | 項目 | 内容 |
 | --- | --- |
-| `type` | `ready`、`request`、`response`、`heartbeat`、`heartbeat_ack`、`capabilities`、`user_stop`、`user_stop_ack`、`error` のいずれか |
+| `type` | `ready`、`request`、`response`、`heartbeat`、`heartbeat_ack`、`capabilities`、`user_state`、`user_state_ack`、`error` のいずれか |
 | `connection_id` | どの接続のメッセージかを示すID |
 | `direction` | `coordinator_to_executor` または `executor_to_coordinator` |
 | `sequence` | 送信方向ごとに1から始まり、フレームごとに1増える安全な整数 |
@@ -341,7 +342,7 @@ connection_id = base64url(SHA-256(UTF8("rdmcp-node-connection-v1") || client_non
 | `mac` | 下記入力に対する HMAC-SHA-256 を base64url で表現した値 |
 
 `request`、`response` と要求に対応する `error` では同じ非空の `request_id` を使う。
-`ready`、`heartbeat`、`heartbeat_ack`、`capabilities`、`user_stop`、`user_stop_ack` と接続全体に対する `error` では `request_id` に空文字列を使う。
+`ready`、`heartbeat`、`heartbeat_ack`、`capabilities`、`user_state`、`user_state_ack` と接続全体に対する `error` では `request_id` に空文字列を使う。
 受信側は `type` と `request_id` の組合せを検証し、定義外の組合せを実行しない。
 本文は送信側が JSON 化した正確なバイト列を `payload` として転送し、
 受信側は base64url 復号後の同じバイト列をハッシュしてから JSON として解釈する。
@@ -352,7 +353,7 @@ body_hash = base64url(SHA-256(payload_bytes))
 rdmcp-node-frame-v1|connection_id|direction|sequence|type|request_id|body_hash
 ```
 
-`type` もHMAC入力へ含める。本文が同じでも `request` を `user_stop` など別の意味へ書き換えられないようにする。
+`type` もHMAC入力へ含める。本文が同じでも `request` を `user_state` など別の意味へ書き換えられないようにする。
 受信側は、接続IDが異なるフレーム、方向が不正なフレーム、`type` と `request_id` の組合せが不正なフレーム、HMAC値が一致しないフレーム、
 直前に受け付けた `sequence` 以下のフレームを拒否して接続を閉じる。
 `sequence` が `Number.MAX_SAFE_INTEGER` へ達する前にも接続を閉じ、新しい接続で再認証する。
@@ -366,6 +367,68 @@ rdmcp-node-frame-v1|connection_id|direction|sequence|type|request_id|body_hash
 実行ノードで Desktop Commander の世代または利用可能な操作が変わった場合は、
 新しい `desktop_commander_generation` と操作一覧を認証済みの `capabilities` で通知する。
 統括ノードは通知を受け取るまで、前回通知で利用不可だった操作を送らない。
+
+### 使用者状態の同期と遠隔要求
+
+使用者の実行可否は統括ノードを正とし、[使用者の画面と緊急停止](user-console-emergency-stop.md) の
+`stopped`、`stop_generation`、`stop_id` をノード間でも同じ意味で使う。
+実行ノードは外部認証情報から主体を推測せず、統括ノードが検証済み主体から作った `principal_id` だけを扱う。
+
+`user_state` の本文には少なくとも次を含める。
+
+- `principal_id`: 統括ノードで検証済みの使用者主体を表す内部ID。
+- `stopped`: 現在の停止状態。
+- `stop_generation`: 停止・再開の更新ごとに単調増加する世代。
+- `stop_id`: 現在または直近の停止操作を追跡するID。未発行なら `null`。
+
+新しい認証済み接続では、実行ノードは以前の接続で得た使用者状態をそのまま現在接続の同期済み状態として扱わない。
+統括ノードは保存済みの使用者状態をすべて送信し、実行ノードは各状態を実行中の状態へ反映してから同じ
+`principal_id` と `stop_generation` を含む `user_state_ack` を返す。
+初期同期中に停止または再開で状態が更新された場合は最新状態を再送し、接続を現在接続へ昇格する直前に、
+同期対象の各 `principal_id` について確認応答済みの世代が統括ノードの現在値と一致することを確認する。
+一致しない主体が1件でもあれば `synchronizing` を維持し、古い状態だけで接続済みにしない。
+
+停止状態の保存データにまだ項目がない検証済み主体の既定状態は
+`stopped=false`、`stop_generation=0`、`stop_id=null` とする。
+この主体を遠隔実行ノードで初めて使用する場合は、要求より先に既定状態を `user_state` で送り、
+そのノードから対応する確認応答を受け取るまで要求を送らない。
+したがって、初期同期時に保存済み状態が0件でも、未同期の新しい主体を状態同期なしで実行できることを意味しない。
+
+同じ世代・同じ内容の再送は冪等に受け付けてよいが、同じ世代で内容が異なる場合や、
+現在同期済みの値より小さい世代を受信した場合はプロトコル不整合として接続を閉じる。
+
+停止状態を反映する場合、実行ノードは新規実行を先に遮断し、その主体に属する待機中要求を実行前に拒否する。
+その後、当該主体に属する転送の中断と管理下プロセスの停止を要求する。
+`user_state_ack` は少なくとも実行遮断が有効になり、後処理要求を発行したことを示す。
+OS プロセスの終了確認までを確認応答の条件にはせず、未確認の後処理は監査と使用者画面へ別状態として残す。
+再開状態を反映した後も、以前の `stop_generation` を持つ要求は実行しない。
+
+接続中に停止または再開が発生した場合、統括ノードは新しい使用者状態を全接続実行ノードへ送る。
+対象ノードから新世代の確認応答を受け取るまで、その主体の新しい遠隔要求を当該ノードへ送らない。
+停止中に切断していた実行ノードも、再接続時の初期同期で最新状態を反映するまで操作可能にしない。
+
+遠隔の `request` 本文には少なくとも次を含める。
+
+- `principal_id`
+- `stop_generation`
+- `session_id`
+- RemoteDesktopMCP 内部の許可済み操作名
+- その操作の引数
+
+実行ノードは `principal_id` の状態が同期済みで、`stop_generation` が現在値と一致し、
+`stopped=false` の場合だけ操作処理へ進む。
+未同期または世代不一致は `USER_STATE_NOT_SYNCED`、停止中は `USER_STOP_REQUESTED` として拒否する。
+非同期待機から戻った後と Desktop Commander を呼び出す直前にも同じ確認を行い、
+停止前または再開前の古い要求を実行しない。
+
+遠隔要求には Desktop Commander の任意ツール名を含めない。
+統括ノードが送れる内部操作名を RemoteDesktopMCP の公開操作に対応する固定一覧へ限定し、
+実行ノード側でも同じ一覧と入力形式を再検証してから Desktop Commander の固定対応へ変換する。
+
+実行ノードが保持する転送やプロセスなどの資源には、所有する `principal_id`、`session_id`、
+受付時の `stop_generation` を関連付ける。
+使用者停止の後処理ではこの所有情報に一致する資源だけを対象とし、
+所有確認できない PID や別主体の資源を停止対象にしない。
 
 ### 鍵の保管・更新と登録解除
 
@@ -505,6 +568,8 @@ MCP 接続上で完結させる。
 - `transfer_id`
 - 転送方向
 - `session_id`
+- `principal_id`
+- `stop_generation`
 - `node_id`
 - 対象パス
 - ファイル名
@@ -631,8 +696,9 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 
 ファイル操作とプロセス操作には対象ノードを指定できるようにする。
 
-既存のファイル操作、プロセス操作、ファイル転送には `node_id` を追加する。
+`session_open` と既存のファイル操作、プロセス操作、ファイル転送開始には `node_id` を追加する。`node_list` は対象ノードを選ぶ前の発見用途なので `node_id` を受け取らない。
 
+- `session_open`
 - `file_search`
 - `content_search`
 - `file_read`
@@ -660,6 +726,7 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 | コード | 条件 |
 | --- | --- |
 | `NODE_ID_REQUIRED` | 登録済み実行ノードが2台以上あり、対象指定が必要なのに `node_id` がない |
+| `SESSION_NODE_MISMATCH` | 有効な `session_id` に固定された `node_id` と、操作で指定または公開IDから解決した対象ノードが一致しない |
 | `NODE_NOT_REGISTERED` | 指定 `node_id` が登録されていない |
 | `NODE_DISCONNECTED` | 登録済みだが現在の認証済み接続がない |
 | `NODE_OPERATION_UNAVAILABLE` | 現在の `ready` / `capabilities` で対象操作を利用できない |
@@ -703,13 +770,14 @@ sequenceDiagram
 - `node_list`
 
 `node_list` は、利用者が操作可能な登録済み実行ノードを、切断中のノードも含めて返す。
+対象 `node_id` を知らない状態でも `session_open` より前に呼び出せるよう、認証済みユーザーであることは必須とするが `session_id` は必須にしない。単一PC版との互換のため任意の `session_id` を受け付ける場合は、そのIDの有効性と所有者だけを確認し、一覧をそのセッションの `node_id` へ絞り込まない。
 登録済みノードが切断したことで一覧から消えたり、`node_id` 省略可否の判定が変わったりしない。
 
 既存の単一PC版との互換性を保ち、各要素は少なくとも次を返す。
 
 - `node_id`
 - `label`: 統括ノードの登録設定に保存した表示名
-- `connected`: 現在の認証済み `connection_id` が利用可能なら `true`
+- `connected`: 相互認証、`ready`、使用者状態の同期まで完了した現在の `connection_id` が操作可能なら `true`。操作可能な旧接続がない状態で接続候補だけが `synchronizing` 中なら `false`。旧接続を維持したまま新しい候補を同期している間は旧接続に基づき `true`
 - `coordinator`: 統括ノード自身が実行ノードを兼任する要素だけ `true`
 - `operations`: 現在利用可能な操作種別。切断中は空配列
 - `root_ids` と `roots`: 現在利用可能なファイルルート。切断中は空配列
@@ -731,12 +799,26 @@ sequenceDiagram
 ### セッションと起動元の記録
 
 RemoteDesktopMCP のセッションは、MCP の通信セッションや個々の HTTP 接続とは別に統括ノードで管理する。
-`session_open` で生成した `session_id` は、認証済みユーザーが一致し、有効期限内であれば別の HTTP 接続からも継続利用できる。
-ファイル操作とプロセス操作では明示された `session_id` を使い、接続状態からセッションを自動生成したり自動選択したりしない。
+`session_open` では対象実行ノードと作業ディレクトリを同時に確定し、1つの `session_id` を1台の `node_id` へ固定する。
+`node_id` の必須判定には、実行ノードを兼任する統括ノード自身と登録済み遠隔実行ノードを合計した台数を使う。合計2台以上なら `session_open` の `node_id` を必須とし、1台だけなら省略時にその1台を選ぶ。
+対象ノードが切断中、未登録、または作業ディレクトリの存在を対象ノード上で確認できない場合はセッションを作成しない。
+
+作業ディレクトリは対象ノード側のOSで絶対パスとして検証し、存在するディレクトリだけを受け付ける。
+遠隔実行ノードでは、固定した内部操作 `session_validate_working_directory` に入力された絶対パスを実体パスへ解決し、存在するディレクトリなら正規化後の絶対パスを返す。統括ノードはその返却値をセッションの作業ディレクトリとして保存する。この内部操作は外部 MCP ツールとして公開しない。
+`process_start` を送る直前にも対象ノード側で同じ作業ディレクトリが存在することを再確認し、
+削除済み、別種別へ置換済み、または解決不能な場合は Desktop Commander を呼び出さず拒否する。
+
+`session_id` は、認証済みユーザーが一致し、有効期限内であれば別の HTTP 接続からも継続利用できる。
+セッション作成後に対象 `node_id` や作業ディレクトリを別ノード向けへ変更しない。
+別ノードまたは別の作業ディレクトリを使う場合は新しいセッションを作成する。
+ファイル操作、転送開始、プロセス操作では明示された `session_id` を使い、
+対象 `node_id` がセッションの固定先と一致することを確認する。一致しない場合は `SESSION_NODE_MISMATCH` とし、対象ノードへの要求送信や Desktop Commander 呼び出しを行わない。
+接続状態からセッションを自動生成したり、別ノード用セッションを自動選択したりしない。
 
 統括ノードは各操作のログに `session_id` と対象の `node_id` を記録する。
-遠隔実行ノードへはログを追跡するための `session_id` と `request_id` を渡すが、セッションの作成、期限管理、一覧表示は統括ノードだけが行う。
-プロセスは必ず起動時の `session_id` と起動元ノードに関連付ける。
+遠隔実行ノードへは `session_id`、`request_id`、検証済み主体と停止世代を渡すが、
+セッションの作成、期限管理、一覧表示は統括ノードだけが行う。
+プロセスは必ず起動時の `session_id`、検証済み主体、停止世代、起動元ノードに関連付ける。
 異なるPCでは同じ PID が使われることがあるため、外部へ返すプロセスIDは複数PCをまたいで一意になるよう RemoteDesktopMCP が生成する。
 
 ### プロセスの識別に使うID
@@ -748,12 +830,15 @@ PIDだけでは対象を安全に特定できない。
 | 名前 | 何を表すか |
 | --- | --- |
 | 論理プロセスID | 利用者が状態確認・出力取得・停止の際に指定する、RemoteDesktopMCP が発行するID |
+| `session_id` | どの RemoteDesktopMCP セッションから起動したか |
+| `principal_id` | どの検証済み主体が所有するか |
+| `stop_generation` | 起動を受け付けた時点の使用者停止世代 |
 | `node_id` | どのPCで起動したか |
 | `desktop_commander_generation` | どの Desktop Commander 接続で起動したかを表す世代ID |
 | `pid` | そのPC上のプロセス番号 |
 
 統括ノードは、外部へ返す論理プロセスIDと、実際の実行先を対応付けて管理する。
-対応表には少なくとも `{ node_id, desktop_commander_generation, pid }` を保持する。
+対応表には少なくとも `{ session_id, principal_id, stop_generation, node_id, desktop_commander_generation, pid }` を保持する。
 論理プロセスIDには PID をそのまま使わず、RemoteDesktopMCP が生成した一意のIDを使う。
 
 各実行ノードは、現在接続している Desktop Commander の世代を表す `desktop_commander_generation` を持つ。
@@ -813,7 +898,8 @@ Desktop Commander との接続が切れた場合は、その世代に属する�
 ### セッションが終了した場合
 
 RemoteDesktopMCP のセッションが終了または期限切れになっても、それだけを理由に実行中プロセスは停止しない。
-同じユーザーの別の有効なセッションから論理プロセスIDを指定した場合は、上記の世代IDと現在有効なIDの確認を通過した場合だけ、状態確認、出力取得、停止を行えるようにする。
+`process_status`、`process_output`、`process_kill` は起動時と同じ有効な `session_id` と同じ検証済み主体を必須とする。
+同じユーザーであっても別のセッションから論理プロセスIDを指定した操作は拒否し、PID を Desktop Commander へ渡さない。
 
 ## ファイル操作の制約
 
@@ -920,12 +1006,12 @@ PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 4. 統括ノード自身を実行ノードとして操作でき、遠隔ノードの通信断だけでは統括ノード自身を利用不可にしない。
 5. 遠隔実行ノードは Tailscale Funnel や受信用ポートを公開せず、実行ノードから統括ノードへ接続して操作できる。
 6. 統括ノードのノード間待ち受けが Tailscale IPv4 だけに束縛され、`0.0.0.0`、LAN IP、グローバル IP では待ち受けない。Tailscale IPv4 を確認できない場合は遠隔ノード用待ち受けを開始しない。
-7. 32バイトPSKを使う正常な `hello` / `challenge` / `proof` / `ready` が成功し、`ready` 完了前には操作を送らない。
+7. 32バイトPSKを使う正常な `hello` / `challenge` / `proof` / `ready` が成功し、`ready` と使用者状態の初期同期が完了する前には操作を送らない。
 8. 未登録 `node_id`、不正PSK、未対応プロトコル版、形式不正なPSKをそれぞれ拒否し、認証前の操作要求を実行しない。
 9. 過去の `client_nonce`、`server_nonce`、認証メッセージを再送しても新しい接続として認証されない。
 10. 認証済みフレームの `payload`、`mac`、`direction`、`connection_id` のいずれかを改ざんした場合に接続を閉じ、要求を実行しない。
 11. 同じ `sequence` の再送、逆順の `sequence`、以前の接続のフレームを拒否し、古いフレームを現在接続の結果へ混同しない。
-12. 同じ `node_id` から2本目の接続が相互認証まで成功した場合、新しい接続だけを現在接続にし、旧接続を閉じ、旧接続から遅れて届く応答を無視する。
+12. 同じ `node_id` から2本目の接続が相互認証まで成功しても、`ready` と使用者状態の初期同期が完了するまでは旧接続を現在接続として維持する。同期完了後に新しい接続だけを現在接続へ原子的に切り替え、旧接続を閉じ、旧接続から遅れて届く応答を無視する。
 13. 生存確認の受信期限を超えた実行ノードを切断状態にし、`node_list` では登録を残したまま `connected=false`、`operations=[]`、`roots=[]` とする。
 14. 通信断後に同じ `node_id` で再接続でき、`connection_id` は新しくなる。統括ノードとの通信だけの再接続なら `desktop_commander_generation` は維持する。
 15. 実行ノードまたは Desktop Commander の再起動で `desktop_commander_generation` が変わった場合、以前の世代の論理プロセス対応を `stale` にする。
@@ -946,8 +1032,17 @@ PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 30. 遠隔実行ノードを対象に複数チャンクのダウンロードとアップロードを行い、`transfer_id` に固定した `node_id` 以外へ後続チャンクを振り替えない。
 31. `cluster.json` がない既存環境では、現在の `LOCAL_NODE_ID` と `LOCAL_NODE_LABEL` を使う単一PC互換モードで従来どおり操作でき、遠隔ノード用 TCP 待ち受けを開始しない。
 32. 互換モードから `node-config init --role both --label <表示名> --port <port>` を実行すると、新しく安全な乱数から生成した `node_id` を持つ設定モードへ移行し、以後は `cluster.json` の識別情報だけを使用する。
-33. 認証前接続を32本まで保持した状態で追加接続を拒否し、TCP 接続後10秒以内に `ready` まで完了しない接続を閉じる。
+33. 認証前接続を32本まで保持した状態で追加接続を拒否し、TCP 接続後10秒以内に `ready` まで完了しない接続を閉じる。`ready` 後10秒以内に使用者状態の初期同期が完了しない接続も接続済みにしない。
 34. 既存の `process_output` で2,097,152文字に近い応答を遠隔ノードから返せることを確認し、外側フレームが32 MiBを超える人工的な応答では本文を送らず `NODE_RESPONSE_TOO_LARGE` を返す。
+35. 登録済み実行ノードが2台以上ある構成では `session_open` の `node_id` 省略を拒否し、対象ノード上の絶対作業ディレクトリを確認してセッションをそのノードへ固定する。切断中ノードでは作成せず、作成後に同じ `session_id` を別ノードの操作へ使う要求も拒否する。
+36. `process_start` で作成した論理プロセスIDに対して、同じユーザーでも別の `session_id` から `process_status`、`process_output`、`process_kill` を実行できず、PIDを Desktop Commander へ渡さない。
+37. 接続済みになる前に保存済みの全使用者状態を `user_state` / `user_state_ack` で同期し、未同期または停止中の主体からの遠隔要求を実行しない。同じ世代で内容が異なる状態や現在値より古い世代はプロトコル不整合として扱う。
+38. 接続中に使用者停止が発生した場合、実行ノードは新規実行を先に遮断し、その主体に属する待機要求、転送、管理下プロセスだけを停止対象にする。`user_state_ack` 後も終了未確認の後処理は別状態として残す。
+39. 停止中に切断していた実行ノードは再接続時の状態同期前に操作可能にならず、再開後も古い `stop_generation` を持つ要求を拒否する。再開前の古いセッションや要求を復活させない。
+40. 遠隔 `request` に未定義の内部操作名または Desktop Commander の任意ツール名を指定しても実行せず、固定した RemoteDesktopMCP 操作からの変換だけを許可する。
+41. 登録済み実行ノードが2台以上ある状態でも、認証済みユーザーが `session_open` 前に `node_list` を呼び出して全登録ノードの `node_id` を確認できる。任意の有効な `session_id` を渡した場合も一覧をそのセッションのノードへ絞り込まない。
+42. セッションへ固定した `node_id` と異なるノードをファイル操作、転送開始、プロセス操作で指定した場合は `SESSION_NODE_MISMATCH` で拒否し、対象ノードへの要求や Desktop Commander 呼び出しを行わない。
+43. 遠隔ノードへの `session_open` では `session_validate_working_directory` が正規化した絶対パスだけを保存し、存在しないパス、相対パス、ディレクトリ以外を拒否する。`process_start` の直前にも対象ノード上で存在するディレクトリであることを再確認する。
 
 ### プロセス実行の権限モデル確認
 
