@@ -1,15 +1,15 @@
-# Issue #25 作業フロー
+# 複数 PC 実行ノード追加・登録 作業フロー
 
 ## 目的
 
-Issue #25「複数PCを実行ノードとして追加・登録できるようにする」を、設計、実装、検証、レビューの順に分離して進める。
+複数 PC を実行ノードとして追加・登録する機能を、設計、実装、検証、レビューの順に分離して進める。
 
 この文書は製品仕様ではなく作業手順を定義する。
 製品仕様は `functional-requirements.md` と `multi-pc-architecture.md` を正とする。
 
 ## 作業境界
 
-Issue #25 の対象は次のとおり。
+この作業フローの対象は次のとおり。
 
 - 統括ノードと複数の実行ノードのローカル設定。
 - 実行ノードから統括ノードへの tailnet 内接続。
@@ -31,13 +31,13 @@ Issue #25 の対象は次のとおり。
 
 ## セッション分離
 
-Issue #25 の作業は、他IssueのRDMCPセッションを再利用しない。
+複数 PC 実行ノード追加・登録の作業では、他タスクの RDMCP セッションを再利用しない。
 
 各工程は工程専用のRDMCPセッションを開き、対象worktreeの絶対パスを固定する。
 工程終了時はそのセッションを閉じる。
 レビュー工程は実装工程のセッションを再利用せず、別セッションで開始する。
 
-同じIssue内でも、並行作業が必要な場合は同じworktreeを共有しない。
+同じ機能の作業内でも、並行作業が必要な場合は同じ worktree を共有しない。
 別worktreeと別branchを使用し、合流点を明示する。
 
 ## 共通ゲート
@@ -56,11 +56,11 @@ Issue #25 の作業は、他IssueのRDMCPセッションを再利用しない。
 CI確認では、対象PRのcurrent HEAD SHAとworkflow runの `head_sha` が完全一致するrunだけを使用する。
 HEAD更新後は新しいHEADのrunを確認し、該当runがなければCI未実施として扱う。
 
-## WF25-01 設計固定
+## 設計契約の固定
 
 ### 入力
 
-- Issue #25。
+- 複数 PC 実行ノード追加・登録の要件。
 - `doc/design/functional-requirements.md`。
 - `doc/design/multi-pc-architecture.md`。
 - 現行の単一ノード実装と公開接続設計。
@@ -81,7 +81,7 @@ HEAD更新後は新しいHEADのrunを確認し、該当runがなければCI未�
 - 機能要件と詳細設計に矛盾がない。
 - Markdownと用語lintが成功する。
 
-## WF25-02 設定と暗号プロトコル
+## ノード設定と暗号プロトコル
 
 ### 設定・暗号のRED
 
@@ -97,7 +97,7 @@ HEAD更新後は新しいHEADのrunを確認し、該当runがなければCI未�
 ローカル専用のnode設定ストア、管理CLI、暗号処理を実装する。
 秘密値を監査ログ、エラー、Desktop Commander子プロセス環境へ渡さない。
 
-## WF25-03 ノード接続とregistry
+## ノード接続と登録状態管理
 
 ### 接続・registryのRED
 
@@ -114,7 +114,7 @@ HEAD更新後は新しいHEADのrunを確認し、該当runがなければCI未�
 NodeRegistry、CoordinatorNodeServer、ExecutorNodeClientを分離して実装する。
 新しい認証済み接続が成立した場合だけ同じ `node_id` の古い接続を置き換える。
 
-## WF25-04 公開MCPの振り分けとsession
+## 公開 MCP の振り分けとセッション
 
 ### 振り分け・sessionのRED
 
@@ -130,7 +130,7 @@ NodeRegistry、CoordinatorNodeServer、ExecutorNodeClientを分離して実装�
 公開MCPからローカル実行と遠隔実行を同じdispatch契約へ集約する。
 executorへ任意のDesktop Commander tool名を渡さず、RemoteDesktopMCPの内部operationだけを送る。
 
-## WF25-05 ファイル転送とプロセス
+## ファイル転送とプロセス
 
 ### 転送・プロセスのRED
 
@@ -145,7 +145,7 @@ executorへ任意のDesktop Commander tool名を渡さず、RemoteDesktopMCPの�
 
 coordinator側では公開IDとremote IDの対応だけを保持し、実際のファイル制限、転送一時ファイル、PID所有確認は対象executor側でも再検証する。
 
-## WF25-06 使用者の実行停止
+## 使用者の実行停止
 
 ### 実行停止のRED
 
@@ -160,7 +160,7 @@ coordinator側では公開IDとremote IDの対応だけを保持し、実際の�
 coordinatorを停止状態の正とし、各遠隔要求へprincipalとstop generationを含める。
 executorは同期済みgenerationより古い要求を拒否する。
 
-## WF25-07 setupと実機確認
+## セットアップと実機確認
 
 利用者向け手順に次を追加する。
 
@@ -177,12 +177,12 @@ executorは同期済みgenerationより古い要求を拒否する。
 実機ゲートは統括ノード1台、実行ノード2台以上で実施する。
 1台を切断した状態、再接続後、executor再起動後も確認する。
 
-## WF25-08 通常レビュー
+## 通常レビュー
 
-実装担当とは別セッションで、Issue #25、設計、全差分、直接依存、テスト、current HEADのCI証跡を確認する。
+実装担当とは別セッションで、複数 PC 実行ノード追加・登録の要件、設計、全差分、直接依存、テスト、current HEAD の CI 証跡を確認する。
 指摘修正は実装工程へ戻し、同じ指摘IDで解消確認する。
 
-## WF25-09 独立最終レビュー
+## 独立最終レビュー
 
 通常レビューと実装を担当していない別セッションで、最終implementation HEADを固定して確認する。
 最終報告専用commitを使う場合は、製品・設計・workflow・設定を同じcommitへ混ぜない。
@@ -190,7 +190,7 @@ mergeは利用者が行う。
 
 ## 最終完了条件
 
-- Issue #25の完了条件をすべて満たす。
+- 複数 PC 実行ノード追加・登録の完了条件をすべて満たす。
 - 利用者向けPC追加、PSK更新、登録解除手順がある。
 - ローカルlint、check、build、対象テストが成功する。
 - PR current HEADと完全一致する必須CI runを確認する。
