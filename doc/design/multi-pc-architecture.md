@@ -390,17 +390,17 @@ MCP 接続上で完結させる。
 
 | ツール | 主な入力 | 主な結果 |
 | --- | --- | --- |
-| `file_transfer_download_begin` | `session_id`, `node_id`, パス | `transfer_id`, ファイル名, サイズ, SHA-256, チャンクサイズ |
+| `file_transfer_download_begin` | `session_id`, `node_id`, パス, 単発返却可否 | `transfer_id`, ファイル名, サイズ, SHA-256, チャンクサイズ, 収まる場合はbase64データと完了有無 |
 | `file_transfer_download_chunk` | `session_id`, `transfer_id`, 位置 | base64データ, 次の位置, 完了有無 |
-| `file_transfer_upload_begin` | `session_id`, `node_id`, 転送先, サイズ, SHA-256, 上書き可否 | `transfer_id`, チャンクサイズ |
+| `file_transfer_upload_begin` | `session_id`, `node_id`, 転送先, サイズ, SHA-256, 上書き可否, 任意のbase64全体データ | `transfer_id`, チャンクサイズ, 単発時は確定サイズとSHA-256 |
 | `file_transfer_upload_chunk` | `session_id`, `transfer_id`, 位置, base64データ | 次の位置 |
 | `file_transfer_upload_commit` | `session_id`, `transfer_id` | 確定サイズ, SHA-256 |
 | `file_transfer_status` | `session_id`, `transfer_id` | 状態, 次の位置, 転送済みサイズ |
 | `file_transfer_cancel` | `session_id`, `transfer_id` | 中断結果 |
 
-ファイル本体はチャンクに分割し、MCP ツールの引数または結果では base64 で表現する。
-チャンクサイズはサーバーが返し、初期値は256 KiBを目安とする。
-実装時にMCPクライアント側のメッセージ上限を確認し、設定で小さくできるようにする。
+ファイル本体は MCP ツールの引数または結果では base64 で表現する。
+既定チャンクサイズは512 KiBとし、設定で小さくできるようにする。512 KiBはbase64化しても既存のJSON受信上限（1,048,576バイト）内に収まる。
+全体が1チャンクに収まる場合、ダウンロードは `inline=true` を指定した開始ツール、アップロードは `data` を指定した開始ツールだけで完了できる。大きいファイルは従来どおり複数チャンクへ分割する。
 
 ### ダウンロード
 
