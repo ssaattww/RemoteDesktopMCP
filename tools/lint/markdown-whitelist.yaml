@@ -280,3 +280,19 @@ entries:
     description: OAuth の権限範囲。
   - term: リリース
     description: 公開版の提供単位。
+  - term: HKDF
+    description: ノード間通信のセッション鍵生成に使用する鍵導出方式の名称。
+  - term: MagicDNS
+    description: Tailscale が提供する tailnet 内の名前解決機能名。
+  - term: MiB
+    description: 1024 KiB を単位とするデータ量表記。
+  - term: Node.js
+    description: ノード間 TCP 通信を実装する JavaScript 実行環境名。
+  - term: TCP
+    description: ノード間の持続接続に使用する通信規約の略称。
+  - term: ビッグエンディアン
+    description: 長さ付きフレームの整数値を上位バイトから並べる表現方式。
+  - term: ファイルルート
+    description: ファイル操作で相対パスの基準となる設定済み領域。
+  - term: フレーム
+    description: ノード間通信で長さと本文をまとめて扱うメッセージ単位。
