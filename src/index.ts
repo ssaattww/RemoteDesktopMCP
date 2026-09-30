@@ -826,10 +826,25 @@ export class RemoteDesktopService {
   }
 
   private previewBytes(bytes: Buffer, truncated = false): OperationDetailEntry {
-    const text = bytes.toString("utf8");
+    let textBytes = bytes;
+    if (truncated && bytes.length > 0) {
+      let sequenceStart = bytes.length - 1;
+      while (sequenceStart >= 0 && (bytes[sequenceStart]! & 0xc0) === 0x80) sequenceStart -= 1;
+      if (sequenceStart >= 0) {
+        const lead = bytes[sequenceStart]!;
+        const expectedLength = lead <= 0x7f ? 1
+          : lead >= 0xc2 && lead <= 0xdf ? 2
+          : lead >= 0xe0 && lead <= 0xef ? 3
+          : lead >= 0xf0 && lead <= 0xf4 ? 4
+          : 0;
+        const availableLength = bytes.length - sequenceStart;
+        if (expectedLength > availableLength && expectedLength > 1) textBytes = bytes.subarray(0, sequenceStart);
+      }
+    }
+    const text = textBytes.toString("utf8");
     const hasControlCharacters = [...text].some((character) => { const code = character.charCodeAt(0); return code === 127 || code < 32 && ![9, 10, 13].includes(code); });
-    const validText = Buffer.from(text, "utf8").equals(bytes) && !hasControlCharacters;
-    if (validText) return this.operationDetailEntry("内容見本", text, "text", truncated);
+    const validText = Buffer.from(text, "utf8").equals(textBytes) && !hasControlCharacters;
+    if (validText) return this.operationDetailEntry("内容見本", text, "text", truncated || textBytes.length < bytes.length);
     const sample = bytes.subarray(0, 64).toString("hex").replace(/(..)(?=.)/g, "$1 ");
     return this.operationDetailEntry("内容見本", `hex: ${sample}`, "text", truncated || bytes.length > 64);
   }
