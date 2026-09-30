@@ -827,7 +827,8 @@ export class RemoteDesktopService {
 
   private previewBytes(bytes: Buffer, truncated = false): OperationDetailEntry {
     const text = bytes.toString("utf8");
-    const validText = Buffer.from(text, "utf8").equals(bytes) && !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(text);
+    const hasControlCharacters = [...text].some((character) => { const code = character.charCodeAt(0); return code === 127 || code < 32 && ![9, 10, 13].includes(code); });
+    const validText = Buffer.from(text, "utf8").equals(bytes) && !hasControlCharacters;
     if (validText) return this.operationDetailEntry("内容見本", text, "text", truncated);
     const sample = bytes.subarray(0, 64).toString("hex").replace(/(..)(?=.)/g, "$1 ");
     return this.operationDetailEntry("内容見本", `hex: ${sample}`, "text", truncated || bytes.length > 64);
