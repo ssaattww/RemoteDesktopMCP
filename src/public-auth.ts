@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createLocalJWKSet, jwtVerify, type JWTVerifyOptions } from "jose";
-import { assertPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory } from "./private-storage.js";
+import { assertPrivateFile, createPrivateTemporaryFile, ensureSafeDataDirectory } from "./private-storage.js";
 
 export const CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json";
 export const CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect";
@@ -49,12 +49,12 @@ export function createFileOAuthStateStore(dataDir: string): OAuthStateStore {
   const file = path.join(dataDir, "oauth-state.json");
   return {
     async load() {
-      await ensurePrivateDirectory(dataDir);
+      await ensureSafeDataDirectory(dataDir);
       try { await assertPrivateFile(file); const raw = await readFile(file, "utf8"); const state: unknown = JSON.parse(raw); if (!isState(state)) throw new Error("OAuth state is invalid."); return state; }
       catch (error) { if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT") return freshState(); throw error; }
     },
     async save(state) {
-      await ensurePrivateDirectory(dataDir); await assertPrivateFile(file).catch((error: unknown) => { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; });
+      await ensureSafeDataDirectory(dataDir); await assertPrivateFile(file).catch((error: unknown) => { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; });
       const temporary = await createPrivateTemporaryFile(dataDir, "oauth-state");
       try { await writeFile(temporary, JSON.stringify(state), { encoding: "utf8" }); await assertPrivateFile(temporary); await rename(temporary, file); await assertPrivateFile(file); }
       catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
