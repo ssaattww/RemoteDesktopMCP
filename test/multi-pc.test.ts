@@ -1,0 +1,137 @@
+﻿import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  addExecutor,
+  clearCoordinator,
+  createAuthenticatedFrame,
+  createInitialClusterConfig,
+  deriveConnectionId,
+  deriveSessionKey,
+  generatePsk,
+  parseClusterConfig,
+  removeExecutor,
+  rotateExecutorKey,
+  setCoordinator,
+  verifyAuthenticatedFrame,
+  verifyAuthProof,
+  createAuthProof,
+} from "../src/node-cluster.js";
+
+test("cluster config creates stable-format node IDs and validates role requirements", () => {
+  const executor = createInitialClusterConfig("executor", "Executor A");
+  assert.deepEqual(executor.roles, ["executor"]);
+  assert.match(executor.local.node_id, /^node_[A-Za-z0-9_-]{22}$/);
+  assert.equal(executor.local.label, "Executor A");
+  assert.equal(executor.coordinator, undefined);
+  assert.equal(executor.transport, undefined);
+  assert.deepEqual(executor.executors, []);
+
+  const coordinator = createInitialClusterConfig("coordinator", "Coordinator", 41000);
+  assert.deepEqual(coordinator.roles, ["coordinator"]);
+  assert.equal(coordinator.transport?.port, 41000);
+  assert.throws(() => createInitialClusterConfig("coordinator", "Coordinator"), /port/i);
+  assert.throws(() => createInitialClusterConfig("both", "Coordinator"), /port/i);
+  assert.throws(() => createInitialClusterConfig("executor", "   "), /label/i);
+  assert.throws(() => createInitialClusterConfig("executor", "x".repeat(65)), /label/i);
+});
+
+test("cluster config registration uses per-node PSKs and rejects invalid topology", () => {
+  const coordinator = createInitialClusterConfig("both", "Coordinator", 41000);
+  const remoteId = "node_AAAAAAAAAAAAAAAAAAAAAA";
+  const added = addExecutor(coordinator, remoteId, "Remote A");
+  assert.equal(added.config.executors.length, 1);
+  assert.equal(added.config.executors[0]?.node_id, remoteId);
+  assert.match(added.psk, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(Buffer.from(added.psk, "base64url").length, 32);
+  assert.throws(() => addExecutor(added.config, remoteId, "Remote A"), /registered/i);
+  assert.throws(() => addExecutor(added.config, coordinator.local.node_id, "Self"), /local/i);
+
+  const rotated = rotateExecutorKey(added.config, remoteId);
+  assert.notEqual(rotated.psk, added.psk);
+  assert.equal(rotated.config.executors[0]?.psk, rotated.psk);
+
+  const removed = removeExecutor(rotated.config, remoteId);
+  assert.deepEqual(removed.executors, []);
+});
+
+test("executor coordinator settings are atomic and executor-only", () => {
+  const executor = createInitialClusterConfig("executor", "Executor A");
+  const psk = generatePsk();
+  const configured = setCoordinator(executor, "100.64.0.1", 41000, psk);
+  assert.deepEqual(configured.coordinator, { host: "100.64.0.1", port: 41000, psk });
+  const cleared = clearCoordinator(configured);
+  assert.equal(cleared.coordinator, undefined);
+  assert.equal(cleared.local.node_id, executor.local.node_id);
+
+  const both = createInitialClusterConfig("both", "Coordinator", 41000);
+  assert.throws(() => setCoordinator(both, "100.64.0.1", 41000, psk), /executor-only/i);
+  assert.throws(() => clearCoordinator(both), /executor-only/i);
+});
+
+test("cluster config parser rejects partial coordinator config and malformed secrets", () => {
+  const base = createInitialClusterConfig("executor", "Executor A");
+  assert.throws(() => parseClusterConfig({
+    ...base,
+    coordinator: { host: "100.64.0.1", port: 41000 },
+  }), /coordinator/i);
+
+  const coordinator = createInitialClusterConfig("coordinator", "Coordinator", 41000);
+  assert.throws(() => parseClusterConfig({
+    ...coordinator,
+    executors: [{ node_id: "node_AAAAAAAAAAAAAAAAAAAAAA", label: "Remote", psk: "bad" }],
+  }), /PSK/i);
+  assert.throws(() => parseClusterConfig({ ...coordinator, roles: ["coordinator", "coordinator"] }), /roles/i);
+});
+
+test("node authentication proves both roles and derives connection state", () => {
+  const psk = generatePsk();
+  const nodeId = "node_AAAAAAAAAAAAAAAAAAAAAA";
+  const clientNonce = Buffer.alloc(32, 1).toString("base64url");
+  const serverNonce = Buffer.alloc(32, 2).toString("base64url");
+
+  const coordinatorProof = createAuthProof("coordinator", psk, nodeId, clientNonce, serverNonce);
+  const executorProof = createAuthProof("executor", psk, nodeId, clientNonce, serverNonce);
+  assert.notEqual(coordinatorProof, executorProof);
+  assert.equal(verifyAuthProof("coordinator", psk, nodeId, clientNonce, serverNonce, coordinatorProof), true);
+  assert.equal(verifyAuthProof("executor", psk, nodeId, clientNonce, serverNonce, executorProof), true);
+  assert.equal(verifyAuthProof("executor", psk, nodeId, clientNonce, serverNonce, coordinatorProof), false);
+
+  const sessionKey = deriveSessionKey(psk, clientNonce, serverNonce);
+  assert.equal(sessionKey.length, 32);
+  const connectionId = deriveConnectionId(clientNonce, serverNonce);
+  assert.match(connectionId, /^[A-Za-z0-9_-]{43}$/);
+});
+
+test("authenticated frames reject tampering, invalid request IDs, and replayed sequences", () => {
+  const psk = generatePsk();
+  const clientNonce = Buffer.alloc(32, 3).toString("base64url");
+  const serverNonce = Buffer.alloc(32, 4).toString("base64url");
+  const sessionKey = deriveSessionKey(psk, clientNonce, serverNonce);
+  const connectionId = deriveConnectionId(clientNonce, serverNonce);
+  const requestId = Buffer.alloc(16, 5).toString("base64url");
+  const frame = createAuthenticatedFrame(
+    sessionKey,
+    connectionId,
+    "coordinator_to_executor",
+    1,
+    "request",
+    requestId,
+    { operation: "file_read", args: { root_id: "files", relative_path: "x.txt" } },
+  );
+
+  const verified = verifyAuthenticatedFrame(
+    sessionKey,
+    frame,
+    "coordinator_to_executor",
+    connectionId,
+    0,
+  );
+  assert.equal(verified.sequence, 1);
+  assert.deepEqual(verified.payload, { operation: "file_read", args: { root_id: "files", relative_path: "x.txt" } });
+
+  assert.throws(() => verifyAuthenticatedFrame(sessionKey, { ...frame, type: "user_state" }, "coordinator_to_executor", connectionId, 0), /request_id|MAC|type/i);
+  assert.throws(() => verifyAuthenticatedFrame(sessionKey, { ...frame, request_id: "" }, "coordinator_to_executor", connectionId, 0), /request_id|MAC/i);
+  assert.throws(() => verifyAuthenticatedFrame(sessionKey, { ...frame, payload: Buffer.from("{}").toString("base64url") }, "coordinator_to_executor", connectionId, 0), /MAC/i);
+  assert.throws(() => verifyAuthenticatedFrame(sessionKey, frame, "coordinator_to_executor", connectionId, 1), /sequence/i);
+});
+
