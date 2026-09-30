@@ -183,7 +183,7 @@ CLI は作成した新しい `node_id` を明示し、利用者が登録先を�
 - `local.node_id`: このPCの固定識別子。
 - `local.label`: このPCの表示名。
 - `transport.port`: `coordinator` 役割を持つPCで必須とする、Tailscale IPv4 のノード間通信用待ち受けポート。1024以上65535以下とする。
-- `coordinator.host`、`coordinator.port`、`coordinator.psk`: `executor` を持ち `coordinator` を持たない遠隔実行ノードで必須とする統括ノード情報。`coordinator.port` も1024以上65535以下とする。`both` では自分自身への上流接続情報を設定しない。
+- `coordinator.host`、`coordinator.port`、`coordinator.psk`: `executor` を持ち `coordinator` を持たない遠隔実行ノードが接続を開始するための統括ノード情報。`coordinator.port` は1024以上65535以下とする。3項目はすべて存在するか、すべて存在しないかのどちらかだけを許可し、部分設定を拒否する。`init --role executor` 直後だけは3項目がすべてない状態を有効な「接続先未設定」状態として許可し、実行ノードは接続を開始しない。`both` では自分自身への上流接続情報を設定しない。
 - `executors[]`: `coordinator` 役割を持つPCが許可する遠隔実行ノードの `node_id`、表示名、PSK。`executor` 専用PCでは空にし、`both` では遠隔実行ノードだけを登録する。
 
 統括ノード自身が `executor` を兼任する場合、自身を `executors[]` へ重複登録しない。
@@ -194,7 +194,7 @@ CLI は作成した新しい `node_id` を明示し、利用者が登録先を�
 RemoteDesktopMCP は設定ファイルの変更を監視し、完全な新設定だけを適用する。
 更新後の設定が構文不正、重複 `node_id`、不正なPSKなどで無効な場合は、
 遠隔実行ノードとの接続をすべて閉じて新しい遠隔接続を拒否し、有効な設定へ直るまで失敗を監査ログへ記録する。
-削除されたノードまたはPSKが変わったノードの既存接続は、新設定を適用した時点で閉じる。
+削除されたノードまたはPSKが変わったノードの `active` 接続と `synchronizing` 候補は、新設定を適用した時点で両方とも閉じる。
 実行ノード側で接続先またはPSKが変わった場合も現在の接続を閉じ、新設定だけで再接続する。
 
 ### ローカル管理コマンド
@@ -202,12 +202,12 @@ RemoteDesktopMCP は設定ファイルの変更を監視し、完全な新設定
 ノード登録・削除・認証設定の専用経路はローカル CLI だけにする。
 実装時は `npm run node-config -- ...` から次の操作を提供する。
 
-- `init --role <coordinator|executor|both> --label <表示名> [--port <port>]`: 初回の `node_id` とローカル設定を作成する。`coordinator` または `both` では `--port` を必須とし、`executor` では指定しない。`cluster.json` が既に存在する場合は拒否し、既存の `node_id` を暗黙に作り直さない。
-- `show`: 役割、`node_id`、表示名、登録先を表示する。PSKは表示しない。
-- `add-executor --node-id <id> --label <表示名>`: 統括ノードへ実行ノードを登録し、その組だけで使う32バイトPSKを生成する。
-- `set-coordinator --host <host> --port <port> --psk-stdin`: 実行ノードへ接続先とPSKを保存する。PSKを起動引数へ残さない。
-- `rotate-executor-key --node-id <id>`: 対象ノード専用PSKを新規生成して置き換える。
-- `remove-executor --node-id <id>`: 登録とPSKを削除する。
+- `init --role <coordinator|executor|both> --label <表示名> [--port <port>]`: 初回の `node_id` とローカル設定を作成する。`coordinator` または `both` では `--port` を必須とし、`executor` では指定しない。`executor` では接続先未設定の有効な初期状態を作り、まだ統括ノードへ接続しない。`cluster.json` が既に存在する場合は拒否し、既存の `node_id` を暗黙に作り直さない。
+- `show`: 役割、`node_id`、表示名、登録先、接続先未設定かどうかを表示する。PSKは表示しない。
+- `add-executor --node-id <id> --label <表示名>`: `coordinator` 役割を持つノードだけで実行できる。統括ノードへ実行ノードを登録し、その組だけで使う32バイトPSKを生成する。
+- `set-coordinator --host <host> --port <port> --psk-stdin`: `executor` だけを役割に持つノードで実行し、接続先とPSKを1回の原子的設定更新で保存する。3項目の保存完了後から接続を開始する。`coordinator` または `both` では拒否し、PSKを起動引数へ残さない。
+- `rotate-executor-key --node-id <id>`: `coordinator` 役割を持つノードだけで実行し、対象ノード専用PSKを新規生成して置き換える。
+- `remove-executor --node-id <id>`: `coordinator` 役割を持つノードだけで実行し、登録とPSKを削除する。
 
 `add-executor` と `rotate-executor-key` は生成したPSKを設定へ保存した後、ローカル端末へ1回だけ表示する。
 監査ログ、通常ログ、`show` の出力にはPSKを含めない。
@@ -436,7 +436,7 @@ OS プロセスの終了確認までを確認応答の条件にはせず、未�
 - `file_transfer_status`、`file_transfer_cancel`
 - `process_start`、`process_status`、`process_output`、`process_kill`
 
-`session_validate_working_directory` はセッション作成時の遠隔パス検証だけに使い、Desktop Commander の任意ツールへ変換しない。転送開始後の操作は統括ノードの公開 `transfer_id` ではなく実行ノードが発行した `remote_transfer_id` を、プロセス開始後の操作は公開論理プロセスIDではなく実行ノードが発行した `remote_process_id` を内部引数として使う。外部 MCP のIDをそのまま実行ノード内の資源IDとして扱わない。
+`session_validate_working_directory` はプロトコル版1を実装するすべての実行ノードが必須で提供する内部操作とし、セッション作成時の遠隔パス検証だけに使う。これは `node_list.operations` へ公開せず、Desktop Commander の任意ツールへ変換しない。実行ノードがこの内部操作を実装できない場合は、プロトコル版1の互換ノードとして `ready` にならない。転送開始後の操作は統括ノードの公開 `transfer_id` ではなく実行ノードが発行した `remote_transfer_id` を、プロセス開始後の操作は公開論理プロセスIDではなく実行ノードが発行した `remote_process_id` を内部引数として使う。外部 MCP のIDをそのまま実行ノード内の資源IDとして扱わない。
 
 実行ノードが保持する転送やプロセスなどの資源には、所有する `principal_id`、`session_id`、
 受付時の `stop_generation` を関連付ける。
@@ -879,7 +879,7 @@ PIDだけでは対象を安全に特定できない。
 
 統括ノード自身が対象の場合は同じ所有検証を同一プロセス内で行ってよいが、外部へ PID を論理プロセスIDとして公開しない。
 
-各実行ノードは、現在接続している Desktop Commander の世代を表す `desktop_commander_generation` を持つ。この世代IDは、Desktop Commander との新しい接続を確立するたびに、暗号学的に安全な乱数16バイトから生成する。Desktop Commander の子プロセスまたは `stdio` 接続を作り直した場合は新しい世代IDを生成し、以前の値は再利用しない。統括ノードとの通信だけが再接続し、Desktop Commander との接続が継続している場合は世代IDを変えない。実行ノード自身が再起動した場合は `executor_generation` と `desktop_commander_generation` の両方を新しくする。
+各実行ノードは、現在接続している Desktop Commander の世代を表す `desktop_commander_generation` を持つ。この世代IDは、Desktop Commander との新しい接続を確立するたびに、暗号学的に安全な乱数16バイトから生成し、末尾の `=` を付けない base64url 22文字で表現する。`ready` と `capabilities` の受信側は22文字の base64url を16バイトへ復号できることまで検証する。Desktop Commander の子プロセスまたは `stdio` 接続を作り直した場合は新しい世代IDを生成し、以前の値は再利用しない。統括ノードとの通信だけが再接続し、Desktop Commander との接続が継続している場合は世代IDを変えない。実行ノード自身が再起動した場合は `executor_generation` と `desktop_commander_generation` の両方を新しくする。
 
 同じ `executor_generation` で統括ノードとの TCP 接続だけが再接続した場合、実行ノード内の `remote_process_id` と所有記録は維持する。使用者状態同期まで完了して新しい接続が `active` へ昇格した時点で `executor_generation` が旧 `active` 接続と異なる場合、統括ノードは以前の実行ノード世代を指す論理プロセスIDを `stale` とし、新しいプロセスや PID へ対応付け直さない。`desktop_commander_generation` だけが変わった場合も、その旧 Desktop Commander 世代に属する `remote_process_id` を実行ノード側で `stale` にする。
 
@@ -986,8 +986,8 @@ RemoteDesktopMCP は Desktop Commander の再起動を試みてよい。
 処理中に Desktop Commander 接続が失われ、完了を確認できない場合も `NODE_OUTCOME_UNKNOWN` とする。
 
 統括ノードの登録設定から実行ノードを削除した場合、または対象ノードのPSKを更新した場合は、
-そのノードの現在接続を閉じる。
-削除済みノードからの再接続は拒否し、PSK更新後は新しいPSKでの相互認証に成功した接続だけを採用する。
+そのノードの `active` 接続と `synchronizing` 候補を両方とも閉じる。
+削除済みノードからの再接続は拒否し、PSK更新後は新しいPSKでの相互認証に成功した接続だけを採用する。旧候補を後から `active` へ昇格させない。
 
 統括ノード自身が兼任する実行ノードはノード間 TCP 接続を経由しないため、
 遠隔ノードの通信断だけを理由に利用不可へしない。
@@ -1003,9 +1003,9 @@ RemoteDesktopMCP は Desktop Commander の再起動を試みてよい。
 1. 統括PCがまだ互換モードなら、`node-config init --role both --label <表示名> --port <port>` を実行して設定モードへ移行し、新しく生成された統括PCの `node_id` を確認する。
 2. 追加PCへ同じ版の RemoteDesktopMCP と固定版 Desktop Commander を導入する。
 3. 追加PCを既存の tailnet に参加させ、統括PCと Tailscale 経由で疎通できることを確認する。
-4. 追加PCで `node-config init --role executor --label <表示名>` を実行し、`show` で生成された `node_id` を確認する。
+4. 追加PCで `node-config init --role executor --label <表示名>` を実行し、接続先未設定のまま `show` で生成された `node_id` を確認する。この時点では統括PCへの接続を開始しない。
 5. 統括PCで `node-config add-executor --node-id <id> --label <表示名>` を実行し、対象ノード専用PSKを生成する。
-6. 追加PCで `node-config set-coordinator --host <統括PC> --port <port> --psk-stdin` を実行し、標準入力から同じPSKを保存する。
+6. 追加PCで `node-config set-coordinator --host <統括PC> --port <port> --psk-stdin` を実行し、接続先、ポート、同じPSKを1回の原子的設定更新で保存する。3項目の保存が完了してから接続を開始する。
 7. 統括ノードを `coordinator`、追加PCを `executor` として起動し、追加PCから統括PCへの相互認証済み接続を確立する。
 8. ChatGPT から `node_list` を実行し、統括PCと追加PCの `node_id`、表示名、`connected=true`、現在利用可能な操作を確認する。
 9. ファイル操作、転送開始、プロセス操作で対象 `node_id` を明示し、指定したPCだけが操作されることを確認する。
@@ -1080,9 +1080,12 @@ PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 51. 固定した内部操作一覧以外を遠隔 `request` で指定できず、`session_validate_working_directory` は外部 MCP ツールや任意の Desktop Commander ツール呼び出しへ変換されない。
 52. 実行ノード再起動前の OS プロセスが残存しても、新しい `executor_generation` から PID だけで所有関係を復元しない。旧世代の公開論理プロセスIDは `stale` とし、状態・終了は未確認として表示・監査する。
 53. 実行ノード再起動時に前プロセスが残した読み取り用複製と所有記録で確認できるアップロード一時ファイルを回収し、未所有の類似ファイルは削除しない。所有記録が破損して安全に判定できない場合は推測で削除せず起動を失敗させる。
-54. `executor_generation`、`remote_transfer_id`、`remote_process_id` はそれぞれ16バイト乱数を末尾の `=` を付けない base64url 22文字で表した値だけを受け付け、不正長・不正文字・復号長不一致を拒否する。
+54. `executor_generation`、`desktop_commander_generation`、`remote_transfer_id`、`remote_process_id` はそれぞれ16バイト乱数を末尾の `=` を付けない base64url 22文字で表した値だけを受け付け、不正長・不正文字・復号長不一致を拒否する。
 55. `synchronizing` 中に使用者の停止または再開が発生した場合は候補にも最新 `user_state` を送り、その世代の `user_state_ack` 前に `active` へ昇格しない。旧 `active` 接続では同じ更新の確認応答まで当該主体の新規要求を止める。
 56. 統括ノード自身が実行ノードを兼任する場合、ノード間 `connection_id` がなくても `node_list` はローカル実行経路の初期化状態に基づいて `connected=true` を返し、遠隔ノードの切断や接続候補の状態によってこの値を変えない。
+57. 新しい実行ノード専用PCでは `init --role executor` で固定 `node_id` を先に生成し、接続先未設定のまま外部接続を開始しない。その `node_id` を統括ノードの `add-executor` に渡してPSKを発行し、実行ノード側の `set-coordinator --psk-stdin` が接続先、ポート、PSKを原子的に保存した後だけ接続を開始する。3項目の部分設定と、`both` での `set-coordinator` を拒否する。
+58. `session_validate_working_directory` はプロトコル版1の必須内部操作として遠隔 `session_open` に使用できるが、`node_list.operations` や外部 MCP ツール一覧には現れず、任意の Desktop Commander ツール呼び出しへ変換されない。
+59. 登録解除またはPSK更新時は対象ノードの `active` 接続と `synchronizing` 候補を両方閉じ、旧候補が後から昇格したり旧PSKで操作可能になったりしない。
 
 ### プロセス実行の権限モデル確認
 
