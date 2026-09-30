@@ -176,6 +176,85 @@ test("Issue 20: root-scoped file operations expose their canonical path when the
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("built-in file tools persist structured operation details for user monitoring", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const file = path.join(f.root, "detail-target.txt");
+    await writeFile(file, "before detail content\n");
+    const opened = await api.call("session_open", { working_directory: f.root, purpose: "Verify built-in tool details" });
+    const session = String(opened.session_id);
+
+    await api.call("file_search", { session_id: session, root_id: "files", query: "detail-target" });
+    await api.call("content_search", { session_id: session, root_id: "files", query: "before detail" });
+    await api.call("file_read", { session_id: session, root_id: "files", relative_path: "detail-target.txt", offset: 0, length: 20 });
+    await api.call("file_patch", { session_id: session, root_id: "files", relative_path: "detail-target.txt", old_string: "before detail", new_string: "after detail" });
+
+    const download = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "detail-target.txt" });
+    await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: download.transfer_id, offset: 0 });
+
+    const uploadBytes = Buffer.from("uploaded detail content\n");
+    const upload = await api.call("file_transfer_upload_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "uploaded-detail.txt",
+      size: uploadBytes.length,
+      sha256: sha256(uploadBytes),
+      overwrite: false,
+    });
+    await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: uploadBytes.toString("base64") });
+    await api.call("file_transfer_upload_commit", { session_id: session, transfer_id: upload.transfer_id });
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "missing", relative_path: "failed-detail.txt", offset: 2, length: 3 }));
+
+    const terminal = f.service.auditEntriesForConsole()
+      .filter((event) => ["operation.succeeded", "operation.failed", "operation.rejected"].includes(event.event) && event.sessionId === session);
+    const findDetail = (tool: string, status = "succeeded") => {
+      const event = terminal.find((candidate) => candidate.tool === tool && candidate.status === status);
+      assert.ok(event, `missing terminal audit for ${tool}/${status}`);
+      const detail = event.detail as { version?: unknown; summary?: unknown; entries?: Array<{ label?: unknown; value?: unknown; format?: unknown; truncated?: unknown }> } | undefined;
+      assert.equal(detail?.version, 1, `missing structured detail for ${tool}`);
+      assert.ok(Array.isArray(detail?.entries));
+      return detail.entries!;
+    };
+    const value = (entries: Array<{ label?: unknown; value?: unknown }>, label: string) => String(entries.find((entry) => entry.label === label)?.value ?? "");
+
+    const searchEntries = findDetail("file_search");
+    assert.match(value(searchEntries, "検索条件"), /detail-target/);
+    assert.match(value(searchEntries, "検索結果"), /detail-target\.txt/);
+
+    const contentEntries = findDetail("content_search");
+    assert.match(value(contentEntries, "検索条件"), /before detail/);
+    assert.match(value(contentEntries, "検索結果"), /detail-target\.txt/);
+
+    const readEntries = findDetail("file_read");
+    assert.match(value(readEntries, "対象"), /files.*detail-target\.txt/);
+    assert.match(value(readEntries, "読取範囲"), /offset=0.*length=20/);
+    assert.match(value(readEntries, "本文"), /before detail content/);
+
+    const patchEntries = findDetail("file_patch");
+    const diff = patchEntries.find((entry) => entry.label === "差分");
+    assert.equal(diff?.format, "diff");
+    assert.match(String(diff?.value), /-before detail/);
+    assert.match(String(diff?.value), /\+after detail/);
+
+    const downloadBeginEntries = findDetail("file_transfer_download_begin");
+    assert.match(value(downloadBeginEntries, "方向"), /download/);
+    assert.match(value(downloadBeginEntries, "内容見本"), /after detail content/);
+    const downloadChunkEntries = findDetail("file_transfer_download_chunk");
+    assert.match(value(downloadChunkEntries, "内容見本"), /after detail content/);
+
+    const uploadChunkEntries = findDetail("file_transfer_upload_chunk");
+    assert.match(value(uploadChunkEntries, "内容見本"), /uploaded detail content/);
+    const uploadCommitEntries = findDetail("file_transfer_upload_commit");
+    assert.match(value(uploadCommitEntries, "内容見本"), /uploaded detail content/);
+
+    const failureEntries = findDetail("file_read", "failed");
+    assert.match(value(failureEntries, "対象"), /missing.*failed-detail\.txt/);
+    assert.match(value(failureEntries, "読取範囲"), /offset=2.*length=3/);
+    assert.ok(value(failureEntries, "エラー").length > 0);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+
 test("Issue 9: sessions require a working directory and purpose, and commands start there", async () => {
   const f = await fixture();
   const api = await mcp(f.service);
