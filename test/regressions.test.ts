@@ -276,6 +276,29 @@ test("built-in file tools persist structured operation details for user monitori
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("long UTF-8 transfer previews remain text when the byte limit splits a code point", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const text = "あ".repeat(2000);
+    await writeFile(path.join(f.root, "utf8-preview.txt"), text);
+    const opened = await api.call("session_open", { working_directory: f.root, purpose: "Verify UTF-8 transfer preview" });
+    const session = String(opened.session_id);
+
+    await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "utf8-preview.txt" });
+
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_transfer_download_begin"
+      && candidate.status === "succeeded"
+      && String(candidate.target).includes("utf8-preview.txt"));
+    assert.ok(event, "missing terminal audit for the UTF-8 download");
+    const detail = event.detail as { entries?: Array<{ label?: unknown; value?: unknown }> } | undefined;
+    const preview = detail?.entries?.find((entry) => entry.label === "内容見本");
+    assert.ok(preview, "missing UTF-8 content preview");
+    assert.doesNotMatch(String(preview.value), /^hex:/i, "valid UTF-8 text must not be misclassified as binary");
+    assert.match(String(preview.value), /あ/, "the text preview remains readable");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 
 test("Issue 9: sessions require a working directory and purpose, and commands start there", async () => {
   const f = await fixture();
