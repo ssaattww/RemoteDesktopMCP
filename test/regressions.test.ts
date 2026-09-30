@@ -203,6 +203,15 @@ test("built-in file tools persist structured operation details for user monitori
     });
     await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: uploadBytes.toString("base64") });
     await api.call("file_transfer_upload_commit", { session_id: session, transfer_id: upload.transfer_id });
+
+    const binaryBytes = Buffer.from([0x00, 0x01, 0x02, 0xff, 0x41]);
+    await writeFile(path.join(f.root, "binary-detail.bin"), binaryBytes);
+    const binaryDownload = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "binary-detail.bin" });
+    await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: binaryDownload.transfer_id, offset: 0 });
+
+    const knownSecret = f.service.cfg.tokenSecret;
+    await writeFile(path.join(f.root, "secret-detail.txt"), "x".repeat(4200) + knownSecret);
+    await api.call("file_read", { session_id: session, root_id: "files", relative_path: "secret-detail.txt", offset: 0, length: 1 });
     await assert.rejects(api.call("file_read", { session_id: session, root_id: "missing", relative_path: "failed-detail.txt", offset: 2, length: 3 }));
 
     const terminal = f.service.auditEntriesForConsole()
@@ -246,6 +255,19 @@ test("built-in file tools persist structured operation details for user monitori
     assert.match(value(uploadChunkEntries, "内容見本"), /uploaded detail content/);
     const uploadCommitEntries = findDetail("file_transfer_upload_commit");
     assert.match(value(uploadCommitEntries, "内容見本"), /uploaded detail content/);
+
+    const downloadChunkEvents = terminal.filter((candidate) => candidate.tool === "file_transfer_download_chunk" && candidate.status === "succeeded");
+    const binaryDetail = downloadChunkEvents.at(-1)?.detail as { entries?: Array<{ label?: unknown; value?: unknown }> } | undefined;
+    assert.match(value(binaryDetail?.entries ?? [], "内容見本"), /00 01 02 ff 41/i, "binary content is represented as a bounded hex preview");
+
+    const secretEvent = terminal.find((candidate) => candidate.tool === "file_read" && candidate.status === "succeeded" && String(candidate.target).includes("secret-detail.txt"));
+    const secretDetail = secretEvent?.detail as { entries?: Array<{ label?: unknown; value?: unknown; truncated?: unknown }> } | undefined;
+    const secretBody = secretDetail?.entries?.find((entry) => entry.label === "本文");
+    assert.ok(secretBody, "the long file read has a body detail");
+    assert.equal(String(secretBody.value).includes(knownSecret), false, "known service secrets are never persisted in operation detail");
+    assert.match(String(secretBody.value), /\[redacted\]/);
+    assert.equal(secretBody.truncated, true);
+    assert.ok(String(secretBody.value).length <= 4000, "each variable detail value stays within the audit limit");
 
     const failureEntries = findDetail("file_read", "failed");
     assert.match(value(failureEntries, "対象"), /missing.*failed-detail\.txt/);
