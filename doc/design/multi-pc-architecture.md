@@ -183,7 +183,7 @@ CLI は作成した新しい `node_id` を明示し、利用者が登録先を�
 - `local.node_id`: このPCの固定識別子。
 - `local.label`: このPCの表示名。
 - `transport.port`: `coordinator` 役割を持つPCで必須とする、Tailscale IPv4 のノード間通信用待ち受けポート。1024以上65535以下とする。
-- `coordinator.host`、`coordinator.port`、`coordinator.psk`: `executor` を持ち `coordinator` を持たない遠隔実行ノードが接続を開始するための統括ノード情報。`coordinator.port` は1024以上65535以下とする。3項目はすべて存在するか、すべて存在しないかのどちらかだけを許可し、部分設定を拒否する。`init --role executor` 直後だけは3項目がすべてない状態を有効な「接続先未設定」状態として許可し、実行ノードは接続を開始しない。`both` では自分自身への上流接続情報を設定しない。
+- `coordinator.host`、`coordinator.port`、`coordinator.psk`: `executor` を持ち `coordinator` を持たない遠隔実行ノードが接続を開始するための統括ノード情報。`coordinator.port` は1024以上65535以下とする。3項目はすべて存在するか、すべて存在しないかのどちらかだけを許可し、部分設定を拒否する。`init --role executor` の直後または接続先を明示的に解除した後は、3項目がすべてない状態を有効な「接続先未設定」状態として許可し、実行ノードは接続を開始しない。`both` では自分自身への上流接続情報を設定しない。
 - `executors[]`: `coordinator` 役割を持つPCが許可する遠隔実行ノードの `node_id`、表示名、PSK。`executor` 専用PCでは空にし、`both` では遠隔実行ノードだけを登録する。
 
 統括ノード自身が `executor` を兼任する場合、自身を `executors[]` へ重複登録しない。
@@ -195,7 +195,7 @@ RemoteDesktopMCP は設定ファイルの変更を監視し、完全な新設定
 更新後の設定が構文不正、重複 `node_id`、不正なPSKなどで無効な場合は、
 遠隔実行ノードとの接続をすべて閉じて新しい遠隔接続を拒否し、有効な設定へ直るまで失敗を監査ログへ記録する。
 削除されたノードまたはPSKが変わったノードの `active` 接続と `synchronizing` 候補は、新設定を適用した時点で両方とも閉じる。
-実行ノード側で接続先またはPSKが変わった場合も現在の接続を閉じ、新設定だけで再接続する。
+実行ノード側で接続先またはPSKが変わった場合も現在の接続を閉じ、新設定だけで再接続する。接続先を解除した場合は現在の接続を閉じた後、接続先未設定状態のまま再接続を開始しない。
 
 ### ローカル管理コマンド
 
@@ -206,6 +206,7 @@ RemoteDesktopMCP は設定ファイルの変更を監視し、完全な新設定
 - `show`: 役割、`node_id`、表示名、登録先、接続先未設定かどうかを表示する。PSKは表示しない。
 - `add-executor --node-id <id> --label <表示名>`: `coordinator` 役割を持つノードだけで実行できる。統括ノードへ実行ノードを登録し、その組だけで使う32バイトPSKを生成する。
 - `set-coordinator --host <host> --port <port> --psk-stdin`: `executor` だけを役割に持つノードで実行し、接続先とPSKを1回の原子的設定更新で保存する。3項目の保存完了後から接続を開始する。`coordinator` または `both` では拒否し、PSKを起動引数へ残さない。
+- `clear-coordinator`: `executor` だけを役割に持つノードで実行し、`coordinator.host`、`coordinator.port`、`coordinator.psk` を同じ原子的設定更新で削除する。現在の統括ノード接続を閉じ、接続先未設定状態へ移行して自動再接続を止める。固定 `node_id` と表示名は変更しない。`coordinator` または `both` では拒否する。
 - `rotate-executor-key --node-id <id>`: `coordinator` 役割を持つノードだけで実行し、対象ノード専用PSKを新規生成して置き換える。
 - `remove-executor --node-id <id>`: `coordinator` 役割を持つノードだけで実行し、登録とPSKを削除する。
 
@@ -452,9 +453,10 @@ PSKは認証設定に保存し、サーバープロセスを実行するOSユー
 | --- | --- |
 | 新しい実行ノードの登録 | 統括ノード上でPSKを生成し、安全な方法で対象PCのローカル設定にも同じ値を設定する |
 | PSKの更新 | 対象ノードとの接続を停止し、両方のPCへ新しいPSKを設定してから再接続する。新旧のPSKは同時に有効にせず、設定が揃うまでは接続できなくてよい |
-| ノード登録の解除 | 統括ノードから対象の `node_id` とPSKを削除し、既存接続も直ちに切断する。実行ノード側で接続先の認証情報を削除した場合も、再接続しない |
+| ノード登録の解除 | 統括ノードで `remove-executor` を実行して対象の `node_id` とPSKを削除し、既存接続も直ちに切断する。実行ノードでは `clear-coordinator` を実行して接続先とPSKを削除し、接続先未設定状態へ戻して再接続を止める |
 
 これらの変更はローカル操作で行う。
+登録解除はアクセス権の取り消しとして扱い、統括ノード側で対象ノードに固定された既存セッションを終了し、公開 `transfer_id` と公開論理プロセスIDを失効させる。失効したIDを同じ `node_id` の後の再登録や別ノードへ対応付け直さない。登録解除だけを理由に遠隔OSプロセスの終了を確認済みとは扱わず、必要なプロセス停止や転送中断は登録解除前に明示的に実施する。
 ノード登録用のMCPツール、公開HTTP管理API、自動参加機能は作らない。
 
 ### 認証結果の記録
@@ -741,9 +743,9 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 
 `file_transfer_download_chunk`、`file_transfer_upload_chunk`、`file_transfer_upload_commit`、`file_transfer_status`、`file_transfer_cancel` は、`transfer_id` に記録された `node_id` を使用し、呼び出し時に実行先を変更できないようにする。
 
-構成に登録された実行ノードが1台だけの場合に限り `node_id` を省略できる。
-この台数判定には統括ノード自身が兼任する実行ノードも含め、現在の接続状態は使わない。
-登録済み実行ノードが2台以上ある場合、接続中のノードが1台だけでもファイル操作とプロセス操作の `node_id` を必須とする。
+操作対象となる実行ノードが1台だけの場合に限り `node_id` を省略できる。
+この台数判定には統括ノード自身が兼任する実行ノードと登録済み遠隔実行ノードを含め、現在の接続状態は使わない。
+操作対象となる実行ノードが2台以上ある場合、接続中のノードが1台だけでもファイル操作とプロセス操作の `node_id` を必須とする。
 `node_id` が必要なのに指定されていない場合はエラーを返し、接続中のノードを推測して実行しない。
 
 指定された `node_id` が登録済みでも切断中の場合は、対象ノードに接続できないエラーを返し、別のノードへ振り替えない。
@@ -754,7 +756,7 @@ Desktop Commander の MCP ツール呼び出しへ置き換える段階で、重
 
 | コード | 条件 |
 | --- | --- |
-| `NODE_ID_REQUIRED` | 登録済み実行ノードが2台以上あり、対象指定が必要なのに `node_id` がない |
+| `NODE_ID_REQUIRED` | 操作対象となる実行ノードが2台以上あり、対象指定が必要なのに `node_id` がない |
 | `SESSION_NODE_MISMATCH` | 有効な `session_id` に固定された `node_id` と、操作で指定または公開IDから解決した対象ノードが一致しない |
 | `NODE_NOT_REGISTERED` | 指定 `node_id` が登録されていない |
 | `NODE_DISCONNECTED` | 登録済みだが現在の認証済み接続がない |
@@ -1013,8 +1015,8 @@ RemoteDesktopMCP は Desktop Commander の再起動を試みてよい。
 PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 追加PCの `set-coordinator --psk-stdin` で同じ新PSKへ更新する。
 新旧PSKを同時に有効にせず、両PCの設定が揃うまで接続できなくてよい。
-登録を解除するときは統括PCで `remove-executor` を実行し、その時点の接続を切断する。
-解除後の `node_id` と旧PSKでは再接続できないことを確認する。
+登録を解除するときは、必要な転送中断やプロセス停止を先に明示的に行う。その後、統括PCで `remove-executor` を実行して登録とPSKを削除し、追加PCで `clear-coordinator` を実行して接続先とPSKを削除する。`clear-coordinator` 後も追加PCの固定 `node_id` と表示名は維持する。
+解除後は旧PSKで再接続できず、対象ノードへ固定されていた既存セッション、公開転送ID、公開論理プロセスIDが利用できないことを確認する。同じ `node_id` を後で再登録しても、それらのIDを復活させない。
 
 ## 初期版の対象外
 
@@ -1029,7 +1031,7 @@ PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 
 1. 統括ノード自身と遠隔実行ノード2台以上を登録し、ChatGPT から1つの MCP 接続だけで `node_list` に全ノードを表示できる。
 2. PC 1 と PC 2 に同じパスが存在しても、指定した `node_id` のPCだけをファイル操作、転送、プロセス操作の対象にする。
-3. 登録済み実行ノードが2台以上なら、そのうち1台だけが接続中でも、`node_id` を省略したファイル操作、転送開始、プロセス操作を `NODE_ID_REQUIRED` で拒否する。
+3. 実行ノードを兼任する統括ノード自身と登録済み遠隔実行ノードを合計して操作対象が2台以上なら、そのうち1台だけが接続中でも、`node_id` を省略したファイル操作、転送開始、プロセス操作を `NODE_ID_REQUIRED` で拒否する。
 4. 統括ノード自身を実行ノードとして操作でき、遠隔ノードの通信断だけでは統括ノード自身を利用不可にしない。
 5. 遠隔実行ノードは Tailscale Funnel や受信用ポートを公開せず、実行ノードから統括ノードへ接続して操作できる。
 6. 統括ノードのノード間待ち受けが Tailscale IPv4 だけに束縛され、`0.0.0.0`、LAN IP、グローバル IP では待ち受けない。Tailscale IPv4 を確認できない場合は遠隔ノード用待ち受けを開始しない。
@@ -1047,7 +1049,7 @@ PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 18. 1実行ノードで32件の応答待ちを作った状態では次の新規要求を `NODE_BUSY` で拒否し、無制限の待ち行列を作らない。
 19. 32 MiB を超える宣言長、壊れた長さ付きフレーム、不正な JSON、フレーム種別ごとの入力形式に合わない JSON を拒否し、その内容を処理しない。
 20. Desktop Commander の世代、利用可能な操作、ファイルルートのいずれかが変わったとき、`capabilities` で `desktop_commander_generation`、操作一覧、`root_ids`、`roots`、`path_base` を通知する。`node_list` と振り分けは現在の `active` 接続で検証済みの通知だけを使い、利用不可の操作は `NODE_OPERATION_UNAVAILABLE` で拒否する。
-21. `add-executor` でノードごとに異なるPSKを生成でき、`show`、監査ログ、通常ログへPSKを出力しない。`set-coordinator` はPSKを標準入力から受け取り、起動引数へ残さない。
+21. `add-executor` でノードごとに異なるPSKを生成でき、`show`、監査ログ、通常ログへPSKを出力しない。`set-coordinator` はPSKを標準入力から受け取り、起動引数へ残さない。`clear-coordinator` は接続先とPSKだけを削除し、固定 `node_id` と表示名を維持する。
 22. PSK更新後は旧接続を切断し、旧PSKを拒否して新PSKだけで再接続できる。登録解除後は対象接続を切断し、旧 `node_id` と旧PSKの再接続を拒否する。
 23. 設定更新が不正な JSON、重複 `node_id`、不正PSKなら遠隔接続を安全側に停止し、不完全な設定を部分適用しない。
 24. 同じ操作を統括ノードと実行ノードの監査ログで共通の `request_id`、対象 `node_id`、送信時の `connection_id` により追跡でき、PSK、nonce、HMAC値、セッション鍵を記録しない。
@@ -1061,16 +1063,16 @@ PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 32. 互換モードから `node-config init --role both --label <表示名> --port <port>` を実行すると、新しく安全な乱数から生成した `node_id` を持つ設定モードへ移行し、以後は `cluster.json` の識別情報だけを使用する。
 33. 認証前接続を32本まで保持した状態で追加接続を拒否し、TCP 接続後10秒以内に `ready` まで完了しない接続を閉じる。`ready` 後10秒以内に使用者状態の初期同期が完了しない接続も接続済みにしない。
 34. 既存の `process_output` で2,097,152文字に近い応答を遠隔ノードから返せることを確認し、外側フレームが32 MiBを超える人工的な応答では本文を送らず `NODE_RESPONSE_TOO_LARGE` を返す。
-35. 登録済み実行ノードが2台以上ある構成では `session_open` の `node_id` 省略を拒否し、対象ノード上の絶対作業ディレクトリを確認してセッションをそのノードへ固定する。切断中ノードでは作成せず、作成後に同じ `session_id` を別ノードの操作へ使う要求も拒否する。
+35. 実行ノードを兼任する統括ノード自身と登録済み遠隔実行ノードを合計して操作対象が2台以上ある構成では `session_open` の `node_id` 省略を拒否し、対象ノード上の絶対作業ディレクトリを確認してセッションをそのノードへ固定する。切断中ノードでは作成せず、作成後に同じ `session_id` を別ノードの操作へ使う要求も拒否する。
 36. `process_start` で作成した論理プロセスIDに対して、同じユーザーでも別の `session_id` から `process_status`、`process_output`、`process_kill` を実行できず、PIDを Desktop Commander へ渡さない。
 37. 接続済みになる前に保存済みの全使用者状態を `user_state` / `user_state_ack` で同期し、未同期または停止中の主体からの遠隔要求を実行しない。同じ世代で内容が異なる状態や現在値より古い世代はプロトコル不整合として扱う。
 38. 接続中に使用者停止が発生した場合、実行ノードは新規実行を先に遮断し、その主体に属する待機要求、転送、管理下プロセスだけを停止対象にする。`user_state_ack` 後も終了未確認の後処理は別状態として残す。
 39. 停止中に切断していた実行ノードは再接続時の状態同期前に操作可能にならず、再開後も古い `stop_generation` を持つ要求を拒否する。再開前の古いセッションや要求を復活させない。
 40. 遠隔 `request` に未定義の内部操作名または Desktop Commander の任意ツール名を指定しても実行せず、固定した RemoteDesktopMCP 操作からの変換だけを許可する。
-41. 登録済み実行ノードが2台以上ある状態でも、認証済みユーザーが `session_open` 前に `node_list` を呼び出して全登録ノードの `node_id` を確認できる。任意の有効な `session_id` を渡した場合も一覧をそのセッションのノードへ絞り込まない。
+41. 実行ノードを兼任する統括ノード自身と登録済み遠隔実行ノードを合計して操作対象が2台以上ある状態でも、認証済みユーザーが `session_open` 前に `node_list` を呼び出して全操作対象の `node_id` を確認できる。任意の有効な `session_id` を渡した場合も一覧をそのセッションのノードへ絞り込まない。
 42. セッションへ固定した `node_id` と異なるノードをファイル操作、転送開始、プロセス操作で指定した場合は `SESSION_NODE_MISMATCH` で拒否し、対象ノードへの要求や Desktop Commander 呼び出しを行わない。
 43. 遠隔ノードへの `session_open` では `session_validate_working_directory` が正規化した絶対パスだけを保存し、存在しないパス、相対パス、ディレクトリ以外を拒否する。`process_start` の直前にも対象ノード上で存在するディレクトリであることを再確認する。
-44. `role=both` は自身への `coordinator.host` / `coordinator.psk` を要求せず、`executor` 専用ノードだけが統括ノード接続情報を必須とする。`executors[]` は統括役割を持つノードだけが遠隔実行ノード登録に使用する。
+44. `role=both` は自身への `coordinator.host` / `coordinator.psk` を要求しない。実行ノードだけの役割を持つノードは接続先未設定として3項目すべてがない状態か、`coordinator.host`、`coordinator.port`、`coordinator.psk` がすべて設定された状態だけを許可し、部分設定を拒否する。`executors[]` は統括役割を持つノードだけが遠隔実行ノード登録に使用する。
 45. `synchronizing` 候補から届いた `ready` / `capabilities` の操作、ファイルルート、最終確認時刻は昇格前の `node_list` に反映せず、候補が異なる `executor_generation` を通知しても昇格前には旧資源を失効させない。候補の同期失敗時も既存 `active` 接続の `node_list` 表示、振り分け、公開資源対応を維持する。
 46. `ready` が `executor_generation` と `desktop_commander_generation` を通知する。同じ実行ノードの RemoteDesktopMCP プロセスの TCP 再接続では両方を維持し、実行ノード再起動では両方を新しくする。Desktop Commander だけの再起動では `executor_generation` を維持し `desktop_commander_generation` だけを新しくする。
 47. 遠隔転送では公開 `transfer_id` と `remote_transfer_id` を分離し、後続チャンクが公開IDに固定された `node_id`、`executor_generation`、`session_id`、主体、位置以外へ差し替わらない。実行ノード再起動後は旧転送を新世代へ付け替えず、Desktop Commander だけの再起動では転送を失効させない。
@@ -1086,6 +1088,8 @@ PSKを更新するときは統括PCで `rotate-executor-key` を実行し、
 57. 新しい実行ノード専用PCでは `init --role executor` で固定 `node_id` を先に生成し、接続先未設定のまま外部接続を開始しない。その `node_id` を統括ノードの `add-executor` に渡してPSKを発行し、実行ノード側の `set-coordinator --psk-stdin` が接続先、ポート、PSKを原子的に保存した後だけ接続を開始する。3項目の部分設定と、`both` での `set-coordinator` を拒否する。
 58. `session_validate_working_directory` はプロトコル版1の必須内部操作として遠隔 `session_open` に使用できるが、`node_list.operations` や外部 MCP ツール一覧には現れず、任意の Desktop Commander ツール呼び出しへ変換されない。
 59. 登録解除またはPSK更新時は対象ノードの `active` 接続と `synchronizing` 候補を両方閉じ、旧候補が後から昇格したり旧PSKで操作可能になったりしない。
+60. 実行ノードで `clear-coordinator` を実行すると接続先3項目を同じ設定更新で削除し、現在接続を閉じて再接続を開始しない。固定 `node_id` と表示名は維持し、3項目の一部だけが残る状態を作らない。
+61. 統括ノードで登録解除すると、対象ノードへ固定された既存セッションを終了し、そのノードを指す公開転送IDと公開論理プロセスIDを失効させる。同じ `node_id` を後で再登録しても旧IDを復活させず、遠隔OSプロセスの終了を確認できていない場合は終了済みと表示しない。
 
 ### プロセス実行の権限モデル確認
 
