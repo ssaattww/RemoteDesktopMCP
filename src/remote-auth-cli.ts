@@ -8,7 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { configFromEnv } from "./index.js";
 import { GoogleOidcClient, PublicAuthService } from "./public-auth.js";
-import { assertPrivateFile, assertSafePrivateParent, createPrivateFile, ensurePrivateDirectory } from "./private-storage.js";
+import { assertPrivateFile, assertSafePrivateParent, createPrivateFile, ensureSafeDataDirectory } from "./private-storage.js";
 
 const LOCAL_CALLBACK = "http://localhost:8765/callback";
 const current = process.cwd();
@@ -26,7 +26,7 @@ async function configure(source: string) {
   const parsed = new URL(baseUrl); if (parsed.protocol !== "https:") throw new Error("The public BASE_URL must use HTTPS.");
   const requestedRoot = path.resolve(argument("--root") ?? path.join(os.homedir(), "RemoteDesktopWorkspace"));
   const requestedDataDir = path.resolve(argument("--data-dir") ?? path.join(os.homedir(), "RemoteDesktopMCP-data"));
-  await mkdir(requestedRoot, { recursive: true, mode: 0o700 }); await ensurePrivateDirectory(requestedDataDir);
+  await mkdir(requestedRoot, { recursive: true, mode: 0o700 }); await ensureSafeDataDirectory(requestedDataDir);
   const root = await realpath(requestedRoot); const dataDir = await realpath(requestedDataDir);
   const envPath = path.join(current, ".env"); const sourcePath = await realpath(path.resolve(source));
   if (overlaps(root, dataDir) || inside(root, envPath) || inside(root, sourcePath)) throw new Error("The permitted workspace must not contain DATA_DIR, .env, or the Google client JSON.");
