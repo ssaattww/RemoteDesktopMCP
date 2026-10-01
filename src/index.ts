@@ -767,7 +767,8 @@ export class RemoteDesktopService {
     if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); }
     await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined;
     const bytes = await readFile(item.temp);
-    if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); }`r`n    item.committedPreview = this.previewBytes(bytes.subarray(0, Math.min(bytes.length, 4096)), bytes.length > 4096);
+    if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); }
+    item.committedPreview = this.previewBytes(bytes.subarray(0, Math.min(bytes.length, 4096)), bytes.length > 4096);
     await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true);
     this.requireCurrentOperation();
     try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } }
