@@ -76,6 +76,16 @@ entries:
     description: 機器間自動設定方式の名称。
   - term: CLI
     description: コマンド操作画面の略称。
+  - term: CUI
+    description: 文字ベースの操作画面の略称。
+  - term: Web
+    description: Web技術やWeb画面を表す一般的な技術用語。
+  - term: コンソール
+    description: 入出力を行う操作画面を表す一般的な技術用語。
+  - term: ユーザーコンソール
+    description: 利用者向けの操作画面を表す用語。
+  - term: セキュリティ
+    description: 安全性に関する技術領域を表す用語。
   - term: API
     description: プログラム間インターフェースの略称。
   - term: アドレス
