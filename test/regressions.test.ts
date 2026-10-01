@@ -241,6 +241,49 @@ test("DR001: downloads use one immutable multi-chunk snapshot and clean failed s
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("RDMCP-25-DR-001: lost download chunk responses can be replayed after reconnect", async () => {
+  const f = await fixture();
+  let api = await mcp(f.service);
+  try {
+    const source = path.join(f.root, "replayable-download.bin");
+    const original = Buffer.concat([Buffer.alloc(1024, 0x51), Buffer.alloc(777, 0x52)]);
+    await writeFile(source, original);
+    const session = await openSession(api);
+    const begun = await api.call("file_transfer_download_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "replayable-download.bin",
+    });
+    const id = begun.transfer_id as string;
+
+    await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 0 });
+    await api.close();
+    api = await mcp(f.service);
+
+    const middleStatus = await api.call("file_transfer_status", { session_id: session, transfer_id: id });
+    assert.equal(middleStatus.next_offset, 1024, "executor state may advance even when the response is lost");
+    const replayedFirst = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 0 });
+    assert.deepEqual(Buffer.from(replayedFirst.data as string, "base64"), original.subarray(0, 1024));
+    assert.equal(replayedFirst.next_offset, 1024);
+    assert.equal(replayedFirst.complete, false);
+
+    await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 1024 });
+    await api.close();
+    api = await mcp(f.service);
+
+    const finalStatus = await api.call("file_transfer_status", { session_id: session, transfer_id: id });
+    assert.equal(finalStatus.state, "complete");
+    assert.equal(finalStatus.next_offset, original.length);
+    const replayedFinal = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 1024 });
+    assert.deepEqual(Buffer.from(replayedFinal.data as string, "base64"), original.subarray(1024));
+    assert.equal(replayedFinal.next_offset, original.length);
+    assert.equal(replayedFinal.complete, true);
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
+
 test("DR002: no-replace commit preserves a winner and removes the losing temp", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   try {
