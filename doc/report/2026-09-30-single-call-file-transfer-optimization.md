@@ -107,6 +107,31 @@ Redでは `downloaded.complete` が未定義のため失敗した。
 その結果は検証根拠に採用していない。
 その後、1本だけをRDMCPで追跡して全テストを再実行し、終了コード0を確認した。
 
+## 1 MiB / 5 MiB / 25 MiB 性能実測
+
+2026-10-01に `npm run benchmark:transfer` を実行し、512 KiBチャンクでupload/downloadを測定した。
+測定区間は localhost の MCP Streamable HTTP で、最初の転送ツール呼び出し開始から最後の転送ツール応答受信までとした。
+fixture準備、元ファイル作成、転送完了後のSHA-256検証はend-to-end時間から除外した。
+server処理時間は、測定区間中の転送ツールに対応する `operation.succeeded.durationMs` の合計である。
+tool call数は `file_transfer_*` の実呼び出し回数で、同じ区間の成功監査件数と一致することを測定スクリプトで確認した。
+
+| 方向 | サイズ | tool call数 | server処理時間 | end-to-end時間 |
+| --- | ---: | ---: | ---: | ---: |
+| download | 1 MiB | 3 | 3,918 ms | 5,125 ms |
+| upload | 1 MiB | 4 | 3,448 ms | 4,804 ms |
+| download | 5 MiB | 11 | 9,224 ms | 13,268 ms |
+| upload | 5 MiB | 12 | 8,893 ms | 13,035 ms |
+| download | 25 MiB | 51 | 37,801 ms | 56,390 ms |
+| upload | 25 MiB | 52 | 37,629 ms | 56,745 ms |
+
+旧既定128 KiBで同じサイズを順次チャンク転送した場合の呼び出し回数は、仕様から計算するとdownloadが9 / 41 / 201回、uploadが10 / 42 / 202回となる。
+今回の512 KiBではdownloadが3 / 11 / 51回、uploadが4 / 12 / 52回となり、呼び出し回数はdownloadで66.7% / 73.2% / 74.6%、uploadで60.0% / 71.4% / 74.3%減少する。
+旧128 KiBの時間値は今回再計測していないため、時間短縮率としては扱わない。
+
+今回の実測はlocalhost MCP HTTP区間であり、ChatGPT connector/Tailscaleを含む実運用経路のend-to-end時間ではない。
+現在稼働中のサービスには本PRの512 KiB既定値と単発転送実装が未反映であるため、実運用経路の性能確認はサービス更新後の再計測事項として残す。
+その再計測までは、実運用経路での待ち時間改善を完了扱いにしない。
+
 ## 変更した主なファイル
 
 - `src/index.ts`
@@ -116,6 +141,8 @@ Redでは `downloaded.complete` が未定義のため失敗した。
 - `test/regressions.test.ts`
 - `doc/design/functional-requirements.md`
 - `doc/design/multi-pc-architecture.md`
+- `scripts/benchmark-file-transfer.ts`
+- `package.json`
 
 ## 実機反映について
 
