@@ -1121,3 +1121,20 @@ test("REV001: operation correlation ownership only accepts active owned sessions
     await api.close();
   } finally { await f.cleanup(); }
 });
+
+test("REV001: accepted and rejected operations preserve safe correlation contracts", async () => {
+  const f = await fixture();
+  try {
+    const api = await mcp(f.service);
+    const session = await api.call("session_open", { working_directory: process.cwd(), purpose: "REV001 audit correlation contract" });
+    await api.call("node_list", { session_id: session.session_id });
+    await api.call("node_list", { session_id: "historical-only-session" }).catch(() => undefined);
+    const events = f.service.auditEntriesForConsole().filter((event) => event.event === "operation.received" || event.event === "operation.rejected");
+    const received = events.find((event) => event.operationId && event.sessionId === session.session_id);
+    assert.ok(received, "active owned sessions use their own correlation");
+    const rejected = events.find((event) => event.reason === "input_validation");
+    if (rejected) assert.equal(String(rejected.sessionId).startsWith("request:"), true);
+    assert.equal(f.service.userOwnsAuditSession("owner@example.test", "historical-only-session"), false);
+    await api.close();
+  } finally { await f.cleanup(); }
+});
