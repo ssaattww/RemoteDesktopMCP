@@ -122,7 +122,7 @@ test("user console lists each active connection's working directory and purpose 
     const second = await owner.call("session_open", { working_directory: f.base, purpose: "Second task" });
     const foreign = await other.call("session_open", { working_directory: f.data, purpose: "Other user's private work" });
     await owner.call("session_close", { session_id: second.session_id });
-    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: own.session_id, operationId: "operation-first", tool: "file_read", target: "first-only.txt", status: "succeeded" });
+    await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: own.session_id, operationId: "operation-first", tool: "file_read", target: "first-only.txt", status: "succeeded", detail: { version: 1, summary: "ファイル読取", entries: [{ label: "本文", value: "<unsafe detail>", format: "text" }] } });
     await f.service.audit("operation.succeeded", { user: "owner@example.test", sessionId: second.session_id, operationId: "operation-second", tool: "file_read", target: "second-only.txt", status: "succeeded" });
     await f.service.audit("process.start", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", comment: "Generate the first test output", command: "echo first-command", output: "first-output" });
     await f.service.audit("process.output", { user: "owner@example.test", sessionId: own.session_id, processId: "process-first", output: "second-output" });
@@ -156,6 +156,9 @@ test("user console lists each active connection's working directory and purpose 
     assert.doesNotMatch(detail, /http-equiv="refresh"/);
     assert.match(detail, /作成日時: .*最終アクセス日時:/);
     assert.match(detail, /first-only\.txt/);
+    assert.match(detail, /<th>詳細<\/th>/);
+    assert.match(detail, /<details><summary>詳細<\/summary>/, "operation detail starts collapsed");
+    assert.match(detail, /&lt;unsafe detail&gt;/, "operation detail text is HTML escaped");
     assert.match(detail, /first-command/);
     assert.match(detail, /実行目的/);
     assert.match(detail, /Generate the first test output/);

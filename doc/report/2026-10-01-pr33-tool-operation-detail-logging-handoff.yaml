@@ -1,0 +1,136 @@
+﻿schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: implementation
+  generated_at: 2026-10-01T09:55:00+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #26 / PR #33"
+task_id: tool-operation-detail-logging
+branch: feat/tool-operation-detail-logs
+base_ref: main
+
+target:
+  work_start_head: 960af92ce65553c190a465646edb445d86b2e78c
+  technical_head: b93dbe4576986e12a87bb7594e4b4f4f9eb432ca
+  commit_range: 960af92ce65553c190a465646edb445d86b2e78c..b93dbe4576986e12a87bb7594e4b4f4f9eb432ca
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  os: Windows
+  working_directory: C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue26
+  session_id: TV3OaUXAM3huYpAtD99oyM2sNJ7J3E-Is54qJYcD9D8
+  source_state_before_report: clean
+
+scope:
+  - Verify the existing built-in tool operation detail implementation in PR #33.
+  - Add a regression test for failed upload commit detail leakage.
+  - Prevent failed upload commit from previewing a pre-existing destination.
+  - Preserve the existing successful upload commit preview.
+  - Persist report and handoff.
+  - Update PR #33 without merging it.
+
+non_goals:
+  - Fix unrelated test infrastructure behavior outside Issue #26.
+  - Change the process_start execution model.
+  - Modify unrelated active worktrees or sessions.
+  - Merge PR #33.
+
+session_cleanup:
+  unrelated_sessions_preserved:
+    - "PR #28 / Issue #25 work"
+    - "PR #30 review"
+  issue26_sessions:
+    action: duplicate sessions were reduced before implementation
+    final_session: TV3OaUXAM3huYpAtD99oyM2sNJ7J3E-Is54qJYcD9D8
+
+diagnostic_workflow:
+  path: .github/workflows/lint.yml
+  change_required: false
+  evidence:
+    - CI captures validation results.
+    - CI captures stdout and stderr.
+    - CI captures environment information.
+    - Diagnostic artifacts are uploaded on success and failure.
+
+tdd:
+  red:
+    commit: 03783e138f36077a333bcc26ee20a533d451fff4
+    test: failed upload commit does not expose existing destination content in operation detail
+    local_result: failed as expected
+    ci_run: 36795549008
+    ci_result: failure
+    evidence: Ubuntu and Windows shard 1/3 failed on the new assertion.
+  green:
+    commit: b93dbe4576986e12a87bb7594e4b4f4f9eb432ca
+    implementation: Generate upload commit content preview only when the successful result has resolved_path.
+    focused_result: pass
+    related_result: 3/3 pass
+
+files:
+  changed_in_followup:
+    - path: test/regressions.test.ts
+      purpose: Add failed upload commit regression coverage.
+    - path: src/index.ts
+      purpose: Restrict committed-file preview to successful upload commit results.
+    - path: doc/report/2026-10-01-pr33-tool-operation-detail-logging.md
+      purpose: Persist detailed implementation evidence.
+    - path: doc/report/2026-10-01-pr33-tool-operation-detail-logging-handoff.yaml
+      purpose: Persist continuation state.
+
+local_validation:
+  technical_head: b93dbe4576986e12a87bb7594e4b4f4f9eb432ca
+  passing:
+    - npm run lint
+    - npm run check
+    - npm run build
+    - git diff --check
+    - focused new regression test
+    - three operation-detail regression cases
+    - isolated Issue 13 regression test
+  full_test:
+    attempts: 2
+    result_each: "98 pass / 1 fail / 1 skip"
+    failure: "Issue 13 generated asynchronous lstat activity after fixture cleanup and raised ENOENT."
+    disposition: "Not changed in this scope; isolated Issue 13 passes and repository CI on the technical HEAD passes."
+
+ci:
+  technical_head_run:
+    run_id: 36797650008
+    head_sha: b93dbe4576986e12a87bb7594e4b4f4f9eb432ca
+    event: pull_request
+    conclusion: success
+    jobs:
+      ubuntu: success
+      windows_1_of_3: success
+      windows_2_of_3: success
+      windows_3_of_3: success
+  exact_head_policy: Only a run whose headSha exactly matches the PR current HEAD is accepted.
+  publication_head: pending
+  publication_ci: pending
+
+diagnostics:
+  - "%TEMP%\RemoteDesktopMCP-pr33-red-failed-commit-preview"
+  - "%TEMP%\RemoteDesktopMCP-pr33-green-failed-commit-preview"
+  - "%TEMP%\RemoteDesktopMCP-pr33-focused-operation-detail"
+  - "%TEMP%\RemoteDesktopMCP-pr33-b93dbe45-final-local"
+  - "%TEMP%\RemoteDesktopMCP-pr33-b93dbe4-issue13-repro"
+  - "%TEMP%\RemoteDesktopMCP-pr33-b93dbe45-test-retry"
+
+task_ledger:
+  path: tasks/tasks-status.md
+  matching_entry: false
+  action: no unrelated task entry changed
+
+publication:
+  report: doc/report/2026-10-01-pr33-tool-operation-detail-logging.md
+  handoff: doc/report/2026-10-01-pr33-tool-operation-detail-logging-handoff.yaml
+  next_steps:
+    - Validate the report and handoff.
+    - Commit and push the publication files.
+    - Verify PR #33 current HEAD.
+    - Verify only the CI run whose headSha matches that final HEAD.
+    - Post a concise PR comment with implementation and validation results.
+    - Do not merge.
+

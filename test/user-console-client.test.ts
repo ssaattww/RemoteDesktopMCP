@@ -19,6 +19,7 @@ class FakeElement {
   dataset: Record<string, string> = {};
   hidden = false;
   disabled = false;
+  open = false;
   textContent = "";
   className = "";
   tagName: string;
@@ -49,7 +50,7 @@ class FakeElement {
     if (override) return override as T;
     if (selector === "h2") return (this.children.find((child) => child.tagName === "h2") ?? null) as T | null;
     if (selector === ".process-block") return (this.children.find((child) => child.className === "process-block") ?? null) as T | null;
-    if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? null) as T | null;
+    if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     return null;
   }
   closest<T extends FakeElement>(selector: string) { return (this.closestNodes.get(selector) ?? null) as T | null; }
@@ -131,6 +132,44 @@ test("browser bootstrap treats SSE as a notice, pages logs, and restarts from th
     restartedSource.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c4", overflow: false }));
   }
   assert.equal(ui.newest.textContent, "↻ 更新（新着 1件）", "each reconnect's first count replaces the previous connection's count");
+});
+
+test("operation detail keeps its open state when unrelated new logs redraw the table", async () => {
+  const sessionId = "session-operation-detail";
+  const at = "2026-10-01T00:00:00.000Z";
+  const detailEvent: ConsoleLogItem = {
+    id: "detail-terminal",
+    cursor: "c1",
+    event: { event: "operation.succeeded", at, receivedAt: at, sessionId, connectionId: sessionId, operationId: "operation-detail", tool: "file_read", target: "detail.txt", status: "succeeded", detail: { version: 1, summary: "ファイル読取", entries: [{ label: "本文", value: "visible detail", format: "text" }] } },
+  };
+  const operationRows = new FakeElement("tbody");
+  const seedRow = new FakeElement("tr");
+  seedRow.dataset.operationId = "operation-detail";
+  seedRow.dataset.eventJson = JSON.stringify(detailEvent.event);
+  const seedCell = new FakeElement("td");
+  const seedDetails = new FakeElement("details"); seedDetails.open = true;
+  seedCell.append(seedDetails); seedRow.append(seedCell); operationRows.append(seedRow);
+  const unrelated: ConsoleLogItem = {
+    id: "other-terminal",
+    cursor: "c2",
+    event: { event: "operation.succeeded", at: "2026-10-01T00:00:01.000Z", receivedAt: "2026-10-01T00:00:01.000Z", sessionId, connectionId: sessionId, operationId: "operation-other", tool: "session_list", status: "succeeded" },
+  };
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: at });
+    if (request.searchParams.get("after") === "c1") return response(200, { items: [unrelated], newestCursor: "c2", oldestCursor: "c2", hasMoreOlder: false, hasMoreNewer: false });
+    throw new Error("unexpected request " + request.href);
+  }, [detailEvent], { "operation-rows": operationRows }, sessionId);
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c2", overflow: false }));
+  ui.newest.click();
+  await settle();
+  await settle();
+  const detailRow = operationRows.children.find((row) => row.dataset.operationId === "operation-detail");
+  assert.ok(detailRow);
+  const details = detailRow.querySelector<FakeElement>("details");
+  assert.ok(details, "structured operation detail remains rendered after redraw");
+  assert.equal(details.open, true, "the user's expanded state survives differential redraw");
 });
 
 test("failed log fetch retains the cursor and pending button for retry", async () => {

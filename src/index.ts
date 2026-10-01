@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+﻿import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -30,10 +30,12 @@ type Session = { id: string; user: string; workingDirectory: string; purpose: st
 type FileIdentity = { dev: string; ino: string };
 type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type ProtectedConfigIdentity = FileIdentity & { pin: string };
-type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
+type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; committedPreview?: OperationDetailEntry };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
 type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; sessionAccessAt?: string };
+type OperationDetailEntry = { label: string; value: string; format: "text" | "diff"; truncated?: boolean };
+type OperationDetail = { version: 1; summary: string; entries: OperationDetailEntry[] };
 export type AuditLogItem = { id: string; cursor: string; event: Record<string, unknown> & { event: string; at: string } };
 type AuditLogEntry = { sequence: number; event: Record<string, unknown> & { event: string; at: string } };
 
@@ -341,8 +343,12 @@ export class RemoteDesktopService {
   userCanViewAuditEvent(user: string, sessionId: string | undefined, event: Record<string, unknown>): boolean {
     return typeof event.event === "string" && typeof event.at === "string" && this.ownsAuditEvent(event as AuditLogEntry["event"], user, sessionId);
   }
+  userOwnsActiveSession(user: string, sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
+  }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
-    if (this.sessions.get(sessionId)?.user === user) return true;
+    if (this.userOwnsActiveSession(user, sessionId)) return true;
     if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
     const operationId = sessionId.startsWith("request:") ? sessionId.slice("request:".length) : "";
     return Boolean(operationId && this.auditEntries.some((entry) => entry.event.user === user && entry.event.sessionId === undefined && entry.event.operationId === operationId));
@@ -766,6 +772,7 @@ export class RemoteDesktopService {
     await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined;
     const bytes = await readFile(item.temp);
     if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); }
+    item.committedPreview = this.previewBytes(bytes.subarray(0, Math.min(bytes.length, 4096)), bytes.length > 4096);
     await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true);
     this.requireCurrentOperation();
     try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } }
@@ -833,6 +840,190 @@ export class RemoteDesktopService {
       return pages.join("\n");
     } finally { await this.dc.call("stop_search", { sessionId: session }, undefined, { allowStoppedOperation: true }).catch(() => undefined); }
   }
+  private redactAuditText(value: string): { value: string; truncated: boolean } {
+    const secrets = [this.cfg.tokenSecret, this.cfg.publicAuth?.googleClientSecret ?? "", ...this.cfg.users.map((configured) => configured.passwordHash)].filter(Boolean);
+    const redacted = secrets.reduce((current, secret) => current.split(secret).join("[redacted]"), value)
+      .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+      .replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]");
+    return { value: redacted.slice(0, 4000), truncated: value.length > 4000 || redacted.length > 4000 };
+  }
+
+  private operationDetailEntry(label: string, value: unknown, format: "text" | "diff" = "text", truncated = false): OperationDetailEntry {
+    const protectedValue = this.redactAuditText(String(value ?? ""));
+    return { label, value: protectedValue.value, format, ...(truncated || protectedValue.truncated ? { truncated: true } : {}) };
+  }
+
+  private previewBytes(bytes: Buffer, truncated = false): OperationDetailEntry {
+    let textBytes = bytes;
+    if (truncated && bytes.length > 0) {
+      let sequenceStart = bytes.length - 1;
+      while (sequenceStart >= 0 && (bytes[sequenceStart]! & 0xc0) === 0x80) sequenceStart -= 1;
+      if (sequenceStart >= 0) {
+        const lead = bytes[sequenceStart]!;
+        const expectedLength = lead <= 0x7f ? 1
+          : lead >= 0xc2 && lead <= 0xdf ? 2
+          : lead >= 0xe0 && lead <= 0xef ? 3
+          : lead >= 0xf0 && lead <= 0xf4 ? 4
+          : 0;
+        const availableLength = bytes.length - sequenceStart;
+        if (expectedLength > availableLength && expectedLength > 1) textBytes = bytes.subarray(0, sequenceStart);
+      }
+    }
+    const text = textBytes.toString("utf8");
+    const hasControlCharacters = [...text].some((character) => { const code = character.charCodeAt(0); return code === 127 || code < 32 && ![9, 10, 13].includes(code); });
+    const validText = Buffer.from(text, "utf8").equals(textBytes) && !hasControlCharacters;
+    if (validText) return this.operationDetailEntry("内容見本", text, "text", truncated || textBytes.length < bytes.length);
+    const sample = bytes.subarray(0, 64).toString("hex").replace(/(..)(?=.)/g, "$1 ");
+    return this.operationDetailEntry("内容見本", `hex: ${sample}`, "text", truncated || bytes.length > 64);
+  }
+
+  private async previewFile(filePath: string, size?: number): Promise<OperationDetailEntry | undefined> {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(filePath, "r");
+      const limit = Math.min(size ?? 4096, 4096);
+      const bytes = Buffer.alloc(limit);
+      const read = limit ? await handle.read(bytes, 0, limit, 0) : { bytesRead: 0 };
+      return this.previewBytes(bytes.subarray(0, read.bytesRead), typeof size === "number" && size > read.bytesRead);
+    } catch {
+      return undefined;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  private transferTarget(item: Transfer | undefined): string | undefined {
+    if (!item) return undefined;
+    const root = this.cfg.roots.find((candidate) => candidate.id === item.rootId);
+    if (!root) return undefined;
+    const relative = path.relative(root.path, item.target).replaceAll(path.sep, "/");
+    return `${item.rootId}/${relative}`;
+  }
+
+  private rejectedArgumentProjection(tool: string, raw: Record<string, unknown>): Record<string, unknown> {
+    const projected: Record<string, unknown> = {};
+    const text = (name: string, limit: number) => {
+      const value = raw[name];
+      if (typeof value === "string") projected[name] = value.slice(0, limit);
+    };
+    const number = (name: string) => { if (typeof raw[name] === "number") projected[name] = raw[name]; };
+    const boolean = (name: string) => { if (typeof raw[name] === "boolean") projected[name] = raw[name]; };
+    const session = () => { text("session_id", 128); text("node_id", 128); };
+    const file = () => { session(); text("root_id", 500); text("relative_path", 500); };
+    const transfer = () => { session(); text("transfer_id", 128); };
+
+    text("comment", 500);
+    switch (tool) {
+      case "session_open": text("working_directory", 4096); text("purpose", 200); break;
+      case "session_close": case "node_list": session(); break;
+      case "file_search": case "content_search": session(); text("root_id", 500); text("query", 120); break;
+      case "file_read": file(); number("offset"); number("length"); break;
+      case "file_patch": file(); text("old_string", 4000); text("new_string", 4000); number("expected_replacements"); break;
+      case "file_transfer_download_begin": file(); break;
+      case "file_transfer_download_chunk": transfer(); number("offset"); break;
+      case "file_transfer_upload_begin": file(); number("size"); text("sha256", 64); boolean("overwrite"); break;
+      case "file_transfer_upload_chunk": transfer(); number("offset"); text("data", 4096); break;
+      case "file_transfer_upload_commit": case "file_transfer_status": case "file_transfer_cancel": transfer(); break;
+      case "process_start": session(); text("command", 4000); number("timeout_ms"); break;
+      case "process_output": case "process_status": case "process_kill": session(); text("process_id", 128); break;
+    }
+    return projected;
+  }
+
+  private async operationDetail(tool: string, args: Record<string, unknown>, body?: unknown, error?: string): Promise<OperationDetail | undefined> {
+    const output = isRecord(body) ? body : {};
+    const entry = (label: string, value: unknown, format: "text" | "diff" = "text") => this.operationDetailEntry(label, value, format);
+    const rootId = typeof args.root_id === "string" ? args.root_id : undefined;
+    const relativePath = typeof args.relative_path === "string" ? args.relative_path : undefined;
+    const directTarget = rootId && relativePath ? `${rootId}/${relativePath.replaceAll("\\", "/")}` : undefined;
+    const transferId = typeof args.transfer_id === "string" ? args.transfer_id : typeof output.transfer_id === "string" ? output.transfer_id : undefined;
+    const transfer = transferId ? this.transfers.get(transferId) : undefined;
+    const target = directTarget ?? this.transferTarget(transfer);
+    const finish = (summary: string, entries: OperationDetailEntry[]) => {
+      if (error) entries.push(entry("エラー", error));
+      return { version: 1 as const, summary, entries };
+    };
+    const transferEntries = (): OperationDetailEntry[] => {
+      const entries: OperationDetailEntry[] = [];
+      if (target) entries.push(entry("対象", target));
+      if (transfer?.direction) entries.push(entry("方向", transfer.direction));
+      if (transferId) entries.push(entry("転送 ID", transferId));
+      if (transfer) {
+        entries.push(entry("サイズ", transfer.size));
+        entries.push(entry("ハッシュ", transfer.sha256));
+      }
+      return entries;
+    };
+
+    if (tool === "file_search" || tool === "content_search") {
+      const entries = [entry("検索条件", `root_id=${rootId ?? "—"}\nquery=${String(args.query ?? "—")}`)];
+      if (typeof output.output === "string") entries.push(entry("検索結果", output.output));
+      return finish(tool === "file_search" ? "ファイル検索" : "内容検索", entries);
+    }
+    if (tool === "file_read") {
+      const entries = [
+        entry("対象", directTarget ?? "—"),
+        entry("読取範囲", `offset=${args.offset ?? "省略"} length=${args.length ?? "省略"}`),
+      ];
+      if (typeof output.output === "string") entries.push(entry("本文", output.output));
+      return finish("ファイル読取", entries);
+    }
+    if (tool === "file_patch") {
+      const oldText = String(args.old_string ?? "");
+      const newText = String(args.new_string ?? "");
+      const removed = oldText.split("\n").map((line) => `-${line}`).join("\n");
+      const added = newText.split("\n").map((line) => `+${line}`).join("\n");
+      const entries = [
+        entry("対象", directTarget ?? "—"),
+        entry("期待置換数", args.expected_replacements ?? 1),
+        entry("差分", `--- before\n+++ after\n${removed}\n${added}`, "diff"),
+      ];
+      if (typeof output.output === "string") entries.push(entry("結果", output.output));
+      return finish("ファイル部分変更", entries);
+    }
+    if (tool === "file_transfer_download_begin" || tool === "file_transfer_upload_begin") {
+      const entries = transferEntries();
+      if (!entries.some((candidate) => candidate.label === "対象") && directTarget) entries.unshift(entry("対象", directTarget));
+      const direction = tool.includes("_download_") ? "download" : "upload";
+      if (!entries.some((candidate) => candidate.label === "方向")) entries.push(entry("方向", direction));
+      if (!entries.some((candidate) => candidate.label === "サイズ") && args.size !== undefined) entries.push(entry("サイズ", args.size));
+      if (!entries.some((candidate) => candidate.label === "ハッシュ") && args.sha256 !== undefined) entries.push(entry("ハッシュ", args.sha256));
+      if (tool === "file_transfer_download_begin" && transfer?.snapshot) {
+        const preview = await this.previewFile(transfer.snapshot, transfer.size);
+        if (preview) entries.push(preview);
+      }
+      return finish(direction === "download" ? "ダウンロード開始" : "アップロード開始", entries);
+    }
+    if (tool === "file_transfer_download_chunk" || tool === "file_transfer_upload_chunk") {
+      const entries = transferEntries();
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const nextOffset = typeof output.next_offset === "number" ? output.next_offset : transfer?.offset;
+      if (offset !== undefined || nextOffset !== undefined) entries.push(entry("位置", `offset=${offset ?? "—"} next_offset=${nextOffset ?? "—"}`));
+      if (offset !== undefined && typeof nextOffset === "number") entries.push(entry("処理バイト数", Math.max(0, nextOffset - offset)));
+      if (output.complete !== undefined) entries.push(entry("完了", output.complete));
+      const encoded = tool === "file_transfer_download_chunk" ? output.data : args.data;
+      if (typeof encoded === "string" && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && encoded.length % 4 === 0) {
+        const bytes = Buffer.from(encoded, "base64");
+        if (bytes.length) entries.push(this.previewBytes(bytes));
+      }
+      return finish(tool === "file_transfer_download_chunk" ? "ダウンロードデータ" : "アップロードデータ", entries);
+    }
+    if (tool === "file_transfer_upload_commit") {
+      const entries = transferEntries();
+      if (transfer?.committedPreview && typeof output.resolved_path === "string") entries.push(transfer.committedPreview);
+      return finish("アップロード確定", entries);
+    }
+    if (tool === "file_transfer_status" || tool === "file_transfer_cancel") {
+      const entries = transferEntries();
+      if (output.state !== undefined) entries.push(entry("状態", output.state));
+      else if (transfer?.state) entries.push(entry("状態", transfer.state));
+      if (output.next_offset !== undefined) entries.push(entry("位置", output.next_offset));
+      else if (transfer?.offset !== undefined) entries.push(entry("位置", transfer.offset));
+      return finish(tool === "file_transfer_status" ? "転送状態" : "転送取消し", entries);
+    }
+    return undefined;
+  }
+
   private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>, operationId: string) => Promise<unknown>) {
     let toolName = "unknown";
     const handler = async (args: z.infer<z.ZodObject<T>>) => {
@@ -840,7 +1031,7 @@ export class RemoteDesktopService {
     const receivedAt = new Date().toISOString();
     const record = args as Record<string, unknown>;
     const comment = typeof record.comment === "string" ? record.comment.trim() : "";
-    const connectionId = typeof record.session_id === "string" ? record.session_id : `request:${operationId}`;
+    const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
     const entryState = this.userExecutionState(user);
     const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
       : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
@@ -858,23 +1049,26 @@ export class RemoteDesktopService {
       const startAt = new Date().toISOString();
       await this.audit("operation.started", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, startAt });
       const body = await this.operationContext.run(executionOperation, () => { this.requireCurrentOperation(); return fn(args, operationId); });
+      const detail = await this.operationDetail(toolName, record, body).catch(() => undefined);
       // A stop can arrive while an unavoidable in-flight I/O operation is
       // completing. Do not present that operation as permission to continue.
       this.requireCurrentOperation();
       const openedConnection = isRecord(body) && typeof body.connection_id === "string" ? body.connection_id : isRecord(body) && typeof body.session_id === "string" ? body.session_id : undefined;
       const terminalConnection = openedConnection ?? connectionId;
-      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...sessionAccess() });
+      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...(detail ? { detail } : {}), ...sessionAccess() });
       return result(body);
     } catch (error) {
       if (error instanceof UserStopRequested) {
         const status = started ? "cancelled" : "rejected";
-        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...sessionAccess() }).catch(() => undefined);
+        const detail = await this.operationDetail(toolName, record, undefined, "USER_STOP_REQUESTED").catch(() => undefined);
+        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
         return stoppedFailure(error.state);
       }
       const message = error instanceof Error ? error.message : "Operation failed.";
       const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
-      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...sessionAccess() });
       const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory)/.test(message) ? message : "Operation failed.";
+      const detail = await this.operationDetail(toolName, record, undefined, publicMessage).catch(() => undefined);
+      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...(detail ? { detail } : {}), ...sessionAccess() });
       return failure(publicMessage);
     }
     };
@@ -892,7 +1086,32 @@ export class RemoteDesktopService {
       const listed = await handler(...args) as { tools?: Array<Record<string, unknown>> };
       if (!Array.isArray(listed.tools)) return listed;
       return { ...listed, tools: listed.tools.map((tool) => ({ ...tool, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })) };
-    } : handler);
+    } : async (...args: unknown[]) => {
+      const receivedAt = new Date().toISOString();
+      const response = await handler(...args);
+      const request = isRecord(args[0]) ? args[0] : {};
+      const params = isRecord(request.params) ? request.params : {};
+      const rawRecord = isRecord(params.arguments) ? params.arguments : {};
+      const errorText = isRecord(response) && response.isError === true && Array.isArray(response.content)
+        ? response.content.map((item) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? item.text : undefined)
+          .find((value) => value?.includes("Input validation error:"))
+        : undefined;
+      if (!errorText) return response;
+      const operationId = makeId();
+      const toolName = typeof params.name === "string" ? params.name : "unknown";
+      const record = this.rejectedArgumentProjection(toolName, rawRecord);
+      const comment = typeof record.comment === "string" ? record.comment.trim() : "";
+      const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
+      const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
+        : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
+        : typeof record.transfer_id === "string" ? `transfer:${record.transfer_id.slice(0, 128)}`
+        : typeof record.command === "string" ? "command execution"
+        : "—";
+      const detail = await this.operationDetail(toolName, record, undefined, errorText).catch(() => undefined);
+      await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt }).catch(() => undefined);
+      await this.audit("operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "rejected", reason: "input_validation", ...(detail ? { detail } : {}) }).catch(() => undefined);
+      return response;
+    });
     const intercept = server as unknown as { registerTool: (name: string, config: { description?: string; inputSchema?: Record<string, z.ZodTypeAny>; _meta?: Record<string, unknown> }, handler: unknown) => unknown };
     const originalRegisterTool = intercept.registerTool.bind(server);
     intercept.registerTool = (name, config, handler) => {

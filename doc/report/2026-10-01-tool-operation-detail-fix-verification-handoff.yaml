@@ -1,0 +1,182 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+  generated_at: 2026-10-01T13:26:06+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #26 / PR #33"
+task_id: tool-operation-detail-fix-verification
+branch: feat/tool-operation-detail-logs
+base_ref: main
+
+target:
+  previous_reviewed_head: 8c925d6e7011721489f64b5f7d671a6fcc9ce39e
+  previous_review_report_head: 8cb855406ff32741be0f4e7aa8bfde007cb331ad
+  reviewed_head: bc6305d8ace9dc0ab30c2b9240a2f9e9209659d0
+  reviewed_head_source_state: clean
+  reviewer_continuity: same normal-review chat
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  os: Windows
+  working_directory: C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue26
+  session_id: TV3OaUXAM3huYpAtD99oyM2sNJ7J3E-Is54qJYcD9D8
+  verification_capability: local_execution_available
+  diagnostics_path: C:\Users\donabe\RemoteDesktopWorkspace\review-artifacts-pr33-rereview-bc6305d
+
+review:
+  mode: fix_verification
+  verdict: fail
+  reviewer:
+    role: normal_reviewer
+    continuity:
+      changed: false
+      reason: same chat as the initial normal review
+  required_coverage:
+    - criterion: requirement_and_design_conformance
+      disposition: checked_finding
+      evidence: REV-001 remains open; REV-002/003/004 resolved.
+    - criterion: correctness_and_edge_cases
+      disposition: checked_finding
+      evidence: Oversized pre-validation values remain unbounded in the rejection-audit path.
+    - criterion: scope_discipline
+      disposition: checked_no_finding
+      evidence: Fix diff is limited to src/index.ts, test/regressions.test.ts, design, and whitelist.
+    - criterion: direct_dependency_impact
+      disposition: checked_no_finding
+      evidence: MCP SDK validateToolInput / error response ordering was inspected.
+    - criterion: api_data_compatibility
+      disposition: checked_no_finding
+      evidence: Tool response contracts are unchanged; audit detail generation is extended.
+    - criterion: error_handling
+      disposition: checked_finding
+      evidence: Validation failures are now captured, but raw rejected arguments are not safely bounded before audit processing.
+    - criterion: security_and_secret_handling
+      disposition: checked_finding
+      evidence: A 5001-character rejected comment is persisted at length 5001 despite the normal 500-character schema limit.
+    - criterion: tests_and_validation
+      disposition: checked_no_finding
+      evidence: Focused tests pass; regressions.test.ts is 25/25 pass; exact-head CI is all success.
+    - criterion: current_head_ci
+      disposition: checked_no_finding
+      evidence: run 36810837765 headSha exactly equals bc6305d8ace9dc0ab30c2b9240a2f9e9209659d0.
+    - criterion: documentation_and_lint
+      disposition: checked_no_finding
+      evidence: Design inline-code lint avoidance is removed; design term lint passes.
+    - criterion: maintainability
+      disposition: checked_finding
+      evidence: Rejection handling processes raw arguments in a separate request-handler path without a bounded projection helper.
+
+findings:
+  - id: RDMCP-PR33-REV-001
+    severity: medium
+    source_severity: medium
+    reclassification: none
+    origin: introduced_by_change
+    status: open
+    location: src/index.ts:914-916, src/index.ts:1040-1053, src/index.ts:1061
+    description: Input-schema rejection audit captures the event, but processes and persists raw unvalidated variable-length arguments before applying the normal schema bounds.
+    impact: Rejected inputs can bypass the normal comment length limit and can cause unbounded pre-truncation processing in operation detail generation.
+    evidence:
+      - Runtime probe with a 5001-character comment produced commentLength=5001 and reason=input_validation.
+      - Normal registered-tool schema caps comment at 500 characters.
+      - file_patch detail generation splits and joins raw old_string/new_string before final 4000-character detail truncation.
+    required_action:
+      - Project rejected arguments into a tool-specific bounded safe representation before audit/detail generation.
+      - Cap rejected comments to at most the normal 500-character limit.
+      - Avoid full split/decode of oversized rejected file_patch or transfer data.
+      - Add red tests for oversized comment and variable-length payload rejection.
+  - id: RDMCP-PR33-REV-002
+    severity: medium
+    source_severity: medium
+    reclassification: none
+    status: resolved
+    evidence: committedPreview is created from verified upload bytes and the mutation-after-transfer.complete fixture passes.
+  - id: RDMCP-PR33-REV-003
+    severity: medium
+    source_severity: medium
+    reclassification: none
+    status: resolved
+    evidence: Ordinary technical terms are no longer hidden in inline code; whitelist entries were added and design term lint passes.
+  - id: RDMCP-PR33-REV-004
+    severity: low
+    source_severity: low
+    reclassification: none
+    status: resolved
+    evidence: file_transfer_cancel detail falls back to transfer.offset and the partial-upload cancel regression test passes.
+
+verification:
+  tdd:
+    red_commit: 91d3aa199cb35087fb6e65ee001df22c08242ed6
+    red_ci_run: 36809410482
+    red_ci_conclusion: failure
+    implementation_commit: 3708cd73a1c9daa83e9399fcab1fdb199d123ea0
+    implementation_commit_ci: cancelled_by_later_push
+    final_implementation_head: bc6305d8ace9dc0ab30c2b9240a2f9e9209659d0
+  local:
+    lint: pass
+    check: pass
+    build: pass
+    diff_check: pass
+    focused_review_tests: pass
+    regressions:
+      command: node --import tsx --test test/regressions.test.ts
+      pass: 25
+      fail: 0
+      skipped: 0
+    oversized_comment_probe:
+      comment_length: 5001
+      persisted_comment_length: 5001
+      reason: input_validation
+  ci:
+    exact_head_policy: true
+    run_id: 36810837765
+    head_sha: bc6305d8ace9dc0ab30c2b9240a2f9e9209659d0
+    event: pull_request
+    conclusion: success
+    jobs:
+      ubuntu: success
+      windows_1_of_3: success
+      windows_2_of_3: success
+      windows_3_of_3: success
+    diagnostic_artifacts: 4
+    artifacts_expired: false
+
+diagnostic_workflow:
+  path: .github/workflows/lint.yml
+  change_required: false
+  captures:
+    - command result
+    - stdout
+    - stderr
+    - environment information
+
+report:
+  report_type: verification_report
+  persistence_mode: repository_file
+  path: doc/report/2026-10-01-tool-operation-detail-fix-verification.md
+  reviewed_head: bc6305d8ace9dc0ab30c2b9240a2f9e9209659d0
+
+held: []
+unexplored: []
+remaining_risks:
+  - REV-001 remains open until rejected variable-length arguments are bounded before audit/detail processing.
+
+next_action:
+  type: implementation
+  target_skill: chat-implementation-worker
+  mode: review_fix
+  summary: Fix only RDMCP-PR33-REV-001 and its direct sibling cases with TDD, preserving the finding ID and Medium severity.
+  instructions:
+    - Add failing tests for oversized rejected comment and oversized rejected variable-length payloads.
+    - Add a bounded safe projection before rejection audit/detail generation.
+    - Push a new technical HEAD.
+    - Validate only CI runs whose headSha exactly matches the new PR current HEAD.
+    - Return to the same normal reviewer for bounded fix verification.
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-10-01-tool-operation-detail-fix-verification-handoff.yaml
+  transport_note: Do not merge. This handoff records a failing fix-verification round with one carried Medium finding.

@@ -1,0 +1,235 @@
+﻿schema_version: 3
+producer:
+  skill: chat-implementation-worker
+  mode: review_follow_up
+  generated_at: 2026-10-01T14:26:00+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #26 / PR #33"
+task_id: tool-operation-detail-rejected-arguments-fix
+mode: implementation
+branch: feat/tool-operation-detail-logs
+base_ref: main
+current_head: b7bcb1b29db9188f39b660755f835425d454d794
+reviewed_head: 2db3eb40cd1c5a6f95c95ad116cb593afa095347
+verification_capability: local_execution_available
+verification_capability_evidence:
+  - RemoteDesktopMCP process_start executes repository validation on the connected Windows computer.
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  machine_id: local
+  connection: available
+  os: Windows
+  shell: cmd.exe / PowerShell
+  working_directory: C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue26
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tool-operation-detail-logs
+  head_sha: b7bcb1b29db9188f39b660755f835425d454d794
+  source_state: clean
+  source_fingerprint: null
+  ownership: current_task
+  writable_paths:
+    - C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue26
+  dependencies:
+    - name: git
+      status: available
+      evidence: commits and pushes succeeded through the connected computer
+    - name: node
+      status: available
+      evidence: focused and full local tests executed
+    - name: npm
+      status: available
+      evidence: lint/check/build/test executed
+    - name: rg
+      status: available
+      evidence: repository discovery executed with rg
+  evidence:
+    - Worktree was clean at review-follow-up start.
+    - Unrelated PR #28 / PR #30 sessions were not modified.
+
+execution_state:
+  technical_head: b7bcb1b29db9188f39b660755f835425d454d794
+  administrative_parent: null
+  commit: committed
+  push: pushed
+  ci_wait: ci_wait_pending
+  full_local_equivalence_gate:
+    state: unknown
+    candidate_head: b7bcb1b29db9188f39b660755f835425d454d794
+    invalidated_runs: []
+
+scope:
+  - Fix only RDMCP-PR33-REV-001.
+  - Bound raw arguments before rejection audit and operation-detail processing.
+  - Cover oversized comment and variable-length body sibling cases.
+  - Preserve existing PR #33 behavior outside the rejected-input boundary.
+
+non_goals:
+  - Fix the pre-existing Issue 13 asynchronous fixture-cleanup race.
+  - Rework successful operation-detail generation.
+  - Modify unrelated sessions, worktrees, or workflows.
+  - Merge PR #33.
+
+authoritative_requirements:
+  - source: PR #33 normal re-review
+    reference: RDMCP-PR33-REV-001
+    summary: Project rejected arguments into a tool-specific bounded safe representation before audit/detail generation.
+  - source: project instructions
+    reference: TDD / diagnostics / exact-head CI
+    summary: Add failing test first, retain diagnostics, use only a workflow run whose head SHA equals the PR current HEAD.
+
+write_boundary:
+  allowed:
+    - src/index.ts
+    - test/regressions.test.ts
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix.md
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-handoff.yaml
+  forbidden:
+    - unrelated worktrees
+    - unrelated task files
+    - merge
+
+development_policy:
+  method: TDD review follow-up
+  testing_order: Red test -> implementation -> focused Green -> local gates -> final exact-head CI
+
+validation:
+  commands:
+    - node --import tsx --test --test-name-pattern="schema validation rejection bounds oversized comments" test/regressions.test.ts
+    - node --import tsx --test --test-name-pattern="schema validation rejection" test/regressions.test.ts
+    - npm run lint
+    - npm run check
+    - npm run build
+    - npm test
+    - git diff --check
+    - node --import tsx --test --test-name-pattern="Issue 13:" test/regressions.test.ts
+  required_failure_diagnostics:
+    - test result
+    - stdout
+    - stderr
+    - environment / cause investigation logs
+
+findings:
+  - id: RDMCP-PR33-REV-001
+    severity: medium
+    origin: introduced_by_change
+    location: src/index.ts input-validation rejection request-handler path
+    description: Raw rejected arguments were processed before normal schema bounds.
+    impact: Oversized rejected values could bypass normal audit limits and trigger unbounded pre-truncation detail work.
+    evidence: 5001-character comment persisted at length 5001 before the fix.
+    required_action: Project rejected arguments into a tool-specific bounded safe representation before audit/detail generation.
+
+implementation:
+  mode: review_follow_up
+  accepted_scope:
+    - RDMCP-PR33-REV-001 and direct sibling variable-length rejected arguments
+  red:
+    commit: 2bd5e71eac74b9a8a5cf455a17c764e0bd7ad830
+    result: failed_as_expected
+    evidence: "5001 !== 500"
+    diagnostics: '%TEMP%\RemoteDesktopMCP-pr33-rev001-red'
+    ci_run: 36818236014
+    ci_result: cancelled_by_following_push
+  green:
+    commit: b7bcb1b29db9188f39b660755f835425d454d794
+    focused_result: "3 pass / 0 fail"
+    diagnostics: '%TEMP%\RemoteDesktopMCP-pr33-rev001-green'
+  changed_files:
+    - path: src/index.ts
+      purpose: Add tool-specific bounded rejected-argument projection and use it before audit/detail generation.
+    - path: test/regressions.test.ts
+      purpose: Add oversized-comment and variable-length-body regression coverage.
+  intentionally_untouched:
+    - Issue 13 asynchronous cleanup race
+    - successful tool-handler path
+    - workflow
+    - other active sessions/worktrees
+
+verification:
+  focused:
+    result: pass
+    evidence: 3 schema-validation-rejection tests passed.
+  precommit:
+    result: pass
+    diagnostics: '%TEMP%\RemoteDesktopMCP-pr33-rev001-precommit'
+    commands:
+      - npm run lint
+      - npm run check
+      - npm run build
+      - git diff --check
+  full_local:
+    diagnostics: '%TEMP%\RemoteDesktopMCP-pr33-rev001-full-local'
+    lint: pass
+    check: pass
+    build: pass
+    diff_check: pass
+    npm_test:
+      result: fail
+      tests: 105
+      pass: 103
+      fail: 1
+      skip: 1
+      cause: Existing Issue 13 generated asynchronous lstat after fixture cleanup and ENOENT unhandledRejection.
+  issue13_isolated:
+    result: pass
+    tests: 1
+    pass: 1
+    fail: 0
+    diagnostics: '%TEMP%\RemoteDesktopMCP-pr33-rev001-issue13-isolated'
+
+ci:
+  matching_run: null
+  conclusion: unknown
+  note: Final publication HEAD has not been created yet. Only exact-head pull_request CI may be accepted.
+
+report:
+  report_type: implementation_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix.md
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-handoff.yaml
+  reviewed_head: 2db3eb40cd1c5a6f95c95ad116cb593afa095347
+  attestation_head: null
+  pr_comments: []
+  summary:
+    - REV-001 raw rejected arguments are now bounded before audit/detail processing.
+    - Final publication exact-head CI and PR comment remain pending.
+
+held:
+  - item: repository-wide npm test
+    reason: Existing Issue 13 asynchronous fixture cleanup race causes one full-suite failure.
+    owner: existing repository work
+    remaining_risk: Full local suite is not completely green on Windows.
+    verdict_impact: Does not establish pass; exact-head repository CI remains required.
+
+unknown: []
+not_applicable:
+  - field_or_area: merge
+    reason: merge is explicitly reserved for the user
+remaining_risks:
+  - Existing Issue 13 asynchronous cleanup race remains outside this fix.
+  - Same normal reviewer must verify RDMCP-PR33-REV-001 closure.
+
+next_action:
+  type: review
+  target_skill: review-worker
+  mode: fix_verification
+  summary: Verify RDMCP-PR33-REV-001 on the final publication HEAD after exact-head CI succeeds.
+  instructions:
+    - Preserve finding ID RDMCP-PR33-REV-001 and Medium severity.
+    - Check the rejected-argument projection and the two new regression tests.
+    - Treat the pre-existing Issue 13 full-local failure separately.
+  required_attachments_or_references:
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix.md
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-handoff.yaml
+  requested_authorized_actions:
+    - read_repository
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-handoff.yaml
+  packet_url: null
+  transport_note: Final publication HEAD and exact-head CI must be appended externally through the PR comment after commit/push.
