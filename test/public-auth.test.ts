@@ -205,9 +205,10 @@ test("RA-04 and RA-05: Google callback requires cookie and state, then binds the
   assert.deepEqual(denied, { error: "The authorization request was invalid." });
 });
 
-test("RA-05 through RA-08: PKCE/client/resource bindings, refresh replay revocation, and restart persistence", async () => {
+test("RA-05 through RA-08: PKCE/client/resource bindings, refresh retries, replay revocation, and restart persistence", async () => {
+  let now = 1_700_000_000_000;
   const store = memoryStore();
-  const first = publicAuth({ store });
+  const first = publicAuth({ store, now: () => now });
   await first.initialize();
   await first.addAllowedSubject(subject);
   const code = await authorizedCode(first);
@@ -218,10 +219,15 @@ test("RA-05 through RA-08: PKCE/client/resource bindings, refresh replay revocat
   assert.ok("access_token" in issued && "refresh_token" in issued);
   if (!("access_token" in issued && "refresh_token" in issued)) throw new Error("token was not issued");
   assert.equal(await first.authenticate(`Bearer ${issued.access_token}`), `google:${subject.iss}:${subject.sub}`);
-  const second = publicAuth({ store });
+  const second = publicAuth({ store, now: () => now });
   await second.initialize();
-  const rotated = await second.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource });
-  assert.ok("access_token" in rotated && "refresh_token" in rotated);
+  const rotated = requireTokens(await second.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource }));
+  now += 25_000;
+  const latest = requireTokens(await second.token({ grantType: "refresh_token", refreshToken: rotated.refresh_token, clientId, resource }));
+  const retry = requireTokens(await second.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource }));
+  assert.equal(retry.refresh_token, latest.refresh_token, "a delayed retry receives the latest replacement");
+  assert.equal(await second.authenticate(`Bearer ${rotated.access_token}`), `google:${subject.iss}:${subject.sub}`);
+  now += 60_001;
   const replay = await second.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource });
   assert.deepEqual(replay, { error: "invalid_grant" });
   assert.equal(await second.authenticate(`Bearer ${issued.access_token}`), undefined, "family replay revokes the original access token");
@@ -237,13 +243,30 @@ test("RA-03 and RA-09: an unapproved subject cannot bootstrap access", async () 
   assert.equal(auth.hasAllowedSubject(), false);
 });
 
+test("legacy refresh records gain retry support on their first rotation", async () => {
+  let now = 1_700_000_000_000;
+  const store = memoryStore();
+  const first = publicAuth({ store, now: () => now });
+  await first.initialize();
+  await first.addAllowedSubject(subject);
+  const initial = requireTokens(await first.token({ grantType: "authorization_code", code: await authorizedCode(first), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  const legacy = await store.load();
+  for (const record of legacy.refreshes) { delete record.id; delete record.issuedAt; delete record.recent; }
+  await store.save(legacy);
+  const restarted = publicAuth({ store, now: () => now });
+  await restarted.initialize();
+  const rotated = requireTokens(await restarted.token({ grantType: "refresh_token", refreshToken: initial.refresh_token, clientId, resource }));
+  now += 25_000;
+  const retry = requireTokens(await restarted.token({ grantType: "refresh_token", refreshToken: initial.refresh_token, clientId, resource }));
+  assert.equal(retry.refresh_token, rotated.refresh_token);
+});
+
 test("REMOTE-NR-001: a seven-day refresh family rotates beyond 256 uses, detects replay, and cleans expired families", async () => {
   let now = 1_700_000_000_000;
   const auth = publicAuth({ now: () => now });
   await auth.initialize();
   await auth.addAllowedSubject(subject);
   const initial = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
-  const firstRefresh = initial.refresh_token;
   let current = initial;
   for (let rotation = 0; rotation < 1_008; rotation += 1) {
     now += 10 * 60_000;
@@ -254,9 +277,11 @@ test("REMOTE-NR-001: a seven-day refresh family rotates beyond 256 uses, detects
     auth.token({ grantType: "refresh_token", refreshToken: current.refresh_token, clientId, resource }),
   ]);
   const successful = concurrent.filter((value) => "access_token" in value);
-  assert.equal(successful.length, 1, "only one concurrent rotation may win");
+  assert.equal(successful.length, 2, "concurrent retries do not destroy the grant");
   const winner = requireTokens(successful[0]!);
-  assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: firstRefresh, clientId, resource }), { error: "invalid_grant" }, "a historical refresh token revokes its family on replay");
+  assert.equal(requireTokens(successful[1]!).refresh_token, winner.refresh_token, "both callers receive one replacement");
+  now += 60_001;
+  assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: current.refresh_token, clientId, resource }), { error: "invalid_grant" }, "a stale refresh token revokes its family after the retry window");
   assert.equal(await auth.authenticate(`Bearer ${winner.access_token}`), undefined, "replay revocation invalidates the winning access token too");
   now += 8 * 24 * 60 * 60_000;
   const replacement = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
