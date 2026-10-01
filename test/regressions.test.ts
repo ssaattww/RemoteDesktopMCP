@@ -1148,7 +1148,7 @@ test("REV001: accepted and rejected operations preserve safe correlation contrac
     const rejected = events.find((event) => event.event === "operation.rejected" && event.reason === "input_validation");
     assert.ok(rejected, "input validation rejection must record rejected event");
     assert.equal(String(rejected.sessionId).startsWith("request:"), true, "rejected input must not trust submitted session correlation");
-    assert.equal(f.service.userOwnsActiveSession(owner, session), false, "other owner cannot use the active session");
+    assert.equal(f.service.userOwnsActiveSession("other-owner@example.test", session), false, "other owner cannot use the active session");
     assert.equal(f.service.userOwnsActiveSession(owner, historical), false, "history alone is not active ownership");
     assert.equal(f.service.userOwnsActiveSession(owner, "expired-session"), false, "expired sessions are not active ownership");
     assert.equal(f.service.userOwnsActiveSession(owner, "missing-session"), false, "missing sessions are not active ownership");
