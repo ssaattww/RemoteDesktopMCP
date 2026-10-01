@@ -97,6 +97,17 @@ test("executor authenticates, becomes active, and serves authenticated requests"
         args: { root_id: "remote", relative_path: "note.txt" },
       },
     });
+
+    await assert.rejects(
+      server.request(remoteId, {
+        principal_id: "owner@example.test",
+        stop_generation: 0,
+        session_id: "session-test-123456",
+        operation: "arbitrary_desktop_commander_tool",
+        args: {},
+      } as never),
+      /NODE_REQUEST_FAILED/,
+    );
   } finally {
     await client.close();
     await server.close();

@@ -21,6 +21,12 @@ import {
   verifyAuthProof,
   createAuthProof,
 } from "../src/node-cluster.js";
+import {
+  createNodeOperationRequest,
+  nodeOperationContract,
+  parseNodeOperationRequest,
+  parseNodeOperationResponse,
+} from "../src/node-operation.js";
 
 test("cluster config creates stable-format node IDs and validates role requirements", () => {
   const executor = createInitialClusterConfig("executor", "Executor A");
@@ -283,4 +289,32 @@ test("node-config executor commands accept coordinator PSK only through stdin an
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("node operation registry fixes capability and schema at the transport boundary", () => {
+  const request = createNodeOperationRequest(
+    "owner@example.test",
+    0,
+    "session-test-123456",
+    "file_read",
+    { root_id: "files", relative_path: "note.txt" },
+  );
+  assert.equal(nodeOperationContract("file_read").capability, "file");
+  assert.deepEqual(request.args, { root_id: "files", relative_path: "note.txt" });
+
+  assert.throws(() => parseNodeOperationRequest({
+    principal_id: "owner@example.test",
+    stop_generation: 0,
+    session_id: "session-test-123456",
+    operation: "force_terminate",
+    args: {},
+  }), /not supported/i);
+  assert.throws(() => parseNodeOperationRequest({
+    principal_id: "owner@example.test",
+    stop_generation: 0,
+    session_id: "session-test-123456",
+    operation: "file_read",
+    args: { root_id: "files" },
+  }));
+  assert.throws(() => parseNodeOperationResponse("file_read", { output: 42 }));
 });
