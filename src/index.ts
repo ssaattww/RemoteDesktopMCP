@@ -343,8 +343,12 @@ export class RemoteDesktopService {
   userCanViewAuditEvent(user: string, sessionId: string | undefined, event: Record<string, unknown>): boolean {
     return typeof event.event === "string" && typeof event.at === "string" && this.ownsAuditEvent(event as AuditLogEntry["event"], user, sessionId);
   }
+  userOwnsActiveSession(user: string, sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
+  }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
-    if (this.sessions.get(sessionId)?.user === user) return true;
+    if (this.userOwnsActiveSession(user, sessionId)) return true;
     if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
     const operationId = sessionId.startsWith("request:") ? sessionId.slice("request:".length) : "";
     return Boolean(operationId && this.auditEntries.some((entry) => entry.event.user === user && entry.event.sessionId === undefined && entry.event.operationId === operationId));
@@ -1027,7 +1031,7 @@ export class RemoteDesktopService {
     const receivedAt = new Date().toISOString();
     const record = args as Record<string, unknown>;
     const comment = typeof record.comment === "string" ? record.comment.trim() : "";
-    const connectionId = typeof record.session_id === "string" ? record.session_id : `request:${operationId}`;
+    const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
     const entryState = this.userExecutionState(user);
     const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
       : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
