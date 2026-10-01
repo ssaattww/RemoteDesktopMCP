@@ -300,7 +300,25 @@ test("node operation registry fixes capability and schema at the transport bound
     { root_id: "files", relative_path: "note.txt" },
   );
   assert.equal(nodeOperationContract("file_read").capability, "file");
+  assert.equal(nodeOperationContract("file_transfer_upload_begin").capability, "transfer");
+  assert.equal(nodeOperationContract("file_transfer_upload_chunk").capability, "transfer");
+  assert.equal(nodeOperationContract("file_transfer_upload_commit").capability, "transfer");
+  assert.equal(nodeOperationContract("process_start").capability, "process");
+  assert.equal(nodeOperationContract("process_status").capability, "process");
+  assert.equal(nodeOperationContract("process_output").capability, "process");
+  assert.equal(nodeOperationContract("process_kill").capability, "process");
   assert.deepEqual(request.args, { root_id: "files", relative_path: "note.txt" });
+
+  assert.deepEqual(
+    createNodeOperationRequest(
+      "owner@example.test",
+      0,
+      "session-test-123456",
+      "process_start",
+      { command: "echo test", timeout_ms: 1000, working_directory: "C:\\work" },
+    ).args,
+    { command: "echo test", timeout_ms: 1000, working_directory: "C:\\work" },
+  );
 
   assert.throws(() => parseNodeOperationRequest({
     principal_id: "owner@example.test",

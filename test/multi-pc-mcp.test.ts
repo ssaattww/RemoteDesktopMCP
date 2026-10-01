@@ -592,3 +592,72 @@ test("RDMCP-25-DR-003: executor common handler owns the upload state machine", a
     await f.cleanup();
   }
 });
+
+test("RDMCP-25-DR-003: executor common handler owns the process state machine", async () => {
+  let nextPid = 810;
+  const terminated: number[] = [];
+  const f = await fixture({
+    nodeId: remoteId,
+    nodeLabel: "Remote A",
+    processAdapter: {
+      start: async (command, timeoutMs, workingDirectory) => {
+        assert.equal(command, "shared-process");
+        assert.equal(timeoutMs, 1000);
+        assert.equal(workingDirectory, f.root);
+        nextPid += 1;
+        return nextPid === 811
+          ? "PID 811"
+          : "PID 812";
+      },
+      read: async (pid) => pid === 811
+        ? "Reading 1 new lines (total: 1 lines, 0 remaining)\ncomplete\nProcess completed with exit code 0"
+        : "Reading 0 new lines (total: 0 lines, 0 remaining)",
+      terminate: async (pid) => {
+        terminated.push(pid);
+        return "Successfully initiated termination of session";
+      },
+      sessions: async () => "PID: 812",
+    },
+  });
+  const sessionId = "remote-process-session";
+  const envelope = (operation: NodeOperationName, args: Record<string, unknown>) => ({
+    principal_id: "owner@example.test",
+    stop_generation: 0,
+    session_id: sessionId,
+    operation,
+    args,
+  });
+  try {
+    const completed = await f.service.executeNodeRequest(envelope("process_start", {
+      command: "shared-process",
+      timeout_ms: 1000,
+      working_directory: f.root,
+    })) as { process_id: string };
+    assert.ok(completed.process_id);
+
+    const completedStatus = await f.service.executeNodeRequest(envelope("process_status", {
+      process_id: completed.process_id,
+    })) as { state: string; exit_code?: number; output: string };
+    assert.equal(completedStatus.state, "finished");
+    assert.equal(completedStatus.exit_code, 0);
+    assert.match(completedStatus.output, /complete/);
+
+    const running = await f.service.executeNodeRequest(envelope("process_start", {
+      command: "shared-process",
+      timeout_ms: 1000,
+      working_directory: f.root,
+    })) as { process_id: string };
+    const output = await f.service.executeNodeRequest(envelope("process_output", {
+      process_id: running.process_id,
+    })) as { state: string; output: string };
+    assert.equal(output.state, "running");
+
+    const killed = await f.service.executeNodeRequest(envelope("process_kill", {
+      process_id: running.process_id,
+    })) as { state: string };
+    assert.equal(killed.state, "terminating");
+    assert.deepEqual(terminated, [812]);
+  } finally {
+    await f.cleanup();
+  }
+});

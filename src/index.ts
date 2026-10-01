@@ -43,7 +43,7 @@ type DownloadChunkReplay = { offset: number; data: string; nextOffset: number; c
 type Transfer = { id: string; direction: "download" | "upload"; principalId: string; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; downloadReplay?: DownloadChunkReplay };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
-type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; sessionAccessAt?: string };
+type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; comment?: string; sessionAccessAt?: string };
 export type AuditLogItem = { id: string; cursor: string; event: Record<string, unknown> & { event: string; at: string } };
 type AuditLogEntry = { sequence: number; event: Record<string, unknown> & { event: string; at: string } };
 
@@ -652,6 +652,210 @@ export class RemoteDesktopService {
     const request = createNodeOperationRequest(user, state.stopGeneration, sessionId, operation, args);
     return parseNodeOperationResponse(operation, await this.executeNodeOperation(request));
   }
+  private processKey(item: Pick<Process, "generation" | "pid">): string {
+    return `${this.cfg.nodeId}:${item.generation}:${item.pid}`;
+  }
+  private stopWatchingProcess(processId: string): void {
+    const watcher = this.processWatchers.get(processId);
+    if (watcher) clearInterval(watcher);
+    this.processWatchers.delete(processId);
+  }
+  private markProcessStale(item: Process): void {
+    if (this.currentProcessOwners.get(this.processKey(item)) === item.id) {
+      this.currentProcessOwners.delete(this.processKey(item));
+    }
+    item.state = "stale";
+    this.stopWatchingProcess(item.id);
+  }
+  private requireCurrentProcess(item: Process): Process {
+    let generation: string;
+    try {
+      generation = this.dc.currentGeneration();
+    } catch {
+      this.markProcessStale(item);
+      throw new Error("Process id is stale or finished.");
+    }
+    if (item.generation !== generation || this.currentProcessOwners.get(this.processKey(item)) !== item.id) {
+      this.markProcessStale(item);
+      throw new Error("Process id is stale or finished.");
+    }
+    return item;
+  }
+  private redactCommand(command: string): string {
+    return [
+      this.cfg.tokenSecret,
+      this.cfg.publicAuth?.googleClientSecret ?? "",
+      ...this.cfg.users.map((configured) => configured.passwordHash),
+    ]
+      .filter(Boolean)
+      .reduce((value, secret) => value.split(secret).join("[redacted]"), command)
+      .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+      .replace(
+        /((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi,
+        "$1[redacted]",
+      )
+      .slice(0, 4000);
+  }
+  private startProcessBackend(
+    command: string,
+    timeout: number,
+    owner: string,
+    operationId: string,
+    workingDirectory: string,
+  ): Promise<string> {
+    return this.cfg.processAdapter?.start(command, timeout, workingDirectory)
+      ?? this.dc.call("start_process", {
+        command,
+        timeout_ms: timeout,
+        __rdmcp_owner: owner,
+        __rdmcp_operation: operationId,
+        __rdmcp_cwd: workingDirectory,
+      });
+  }
+  private readProcessBackend(item: Process): Promise<string> {
+    return this.cfg.processAdapter?.read(item.pid, item.cursor, 1_000)
+      ?? this.dc.call("read_process_output", {
+        pid: item.pid,
+        offset: item.cursor,
+        length: 1000,
+        timeout_ms: 100,
+      }, 1_000);
+  }
+  private terminateProcessBackend(item: Process): Promise<string> {
+    return this.cfg.processAdapter?.terminate(item.pid, 2_000)
+      ?? this.dc.call("force_terminate", { pid: item.pid }, 2_000);
+  }
+  private listProcessSessions(): Promise<string> {
+    return this.cfg.processAdapter?.sessions() ?? this.dc.call("list_sessions", {}, 1_000);
+  }
+  private async auditProcessExit(item: Process): Promise<void> {
+    if (item.exitAudited) return;
+    await this.audit("process.exit", {
+      sessionId: item.sessionId,
+      processId: item.id,
+      output: this.redactCommand(item.output),
+      outputTruncated: item.output.length > 4000,
+      result: item.terminationRequested ? "exit_after_termination_request" : "natural",
+      exitCode: item.exitCode ?? null,
+    });
+    item.exitAudited = true;
+  }
+  private async finishProcessWhenRootIsGone(item: Process): Promise<void> {
+    if (item.state === "finished") return;
+    this.requireCurrentProcess(item);
+    await this.auditProcessExit(item);
+    item.state = "finished";
+    item.terminationUnconfirmed = false;
+    if (this.currentProcessOwners.get(this.processKey(item)) === item.id) {
+      this.currentProcessOwners.delete(this.processKey(item));
+    }
+  }
+  private async processActiveInDesktopCommander(item: Process): Promise<boolean> {
+    this.requireCurrentProcess(item);
+    const output = await this.listProcessSessions();
+    return new RegExp(`PID:\\s*${item.pid}(?:\\D|$)`, "i").test(output);
+  }
+  private async observeProcess(item: Process): Promise<string> {
+    const pages: string[] = [];
+    let drained = false;
+    item.outputDrained = false;
+    for (let page = 0; page < 100; page += 1) {
+      this.requireCurrentProcess(item);
+      const output = await this.readProcessBackend(item);
+      pages.push(output);
+      const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output);
+      const remaining = /, (\d+) remaining\)/i.exec(output);
+      if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]);
+      const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output);
+      if (completion) {
+        item.completionPending = true;
+        item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]);
+      }
+      if (!remaining || Number(remaining[1]) === 0) {
+        drained = true;
+        break;
+      }
+    }
+    item.outputDrained = drained;
+    item.observationFailures = 0;
+    item.nextObservationAt = undefined;
+    item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS);
+    const observed = pages.join("\n");
+    if (
+      observed
+      && pages.some((page) => !/^Reading 0 (?:new )?lines(?: from line \d+)? \(total: \d+ lines(?:, 0 remaining)?\)\s*$/i.test(page.trim()))
+    ) {
+      await this.audit("process.output", {
+        sessionId: item.sessionId,
+        processId: item.id,
+        output: this.redactCommand(observed),
+        outputTruncated: observed.length > 4000,
+      });
+    }
+    if (drained && item.completionPending) {
+      await this.auditProcessExit(item);
+      item.state = "finished";
+      item.completionPending = false;
+      item.terminationUnconfirmed = false;
+      if (this.currentProcessOwners.get(this.processKey(item)) === item.id) {
+        this.currentProcessOwners.delete(this.processKey(item));
+      }
+    }
+    return observed;
+  }
+  private watchProcess(processId: string): void {
+    if (this.processWatchers.has(processId)) return;
+    let checking = false;
+    const watcher = setInterval(() => {
+      if (checking) return;
+      checking = true;
+      void this.processLock.run(async () => {
+        const item = this.processes.get(processId);
+        if (!item || item.state === "finished" || item.state === "stale") {
+          this.stopWatchingProcess(processId);
+          return;
+        }
+        if (item.nextObservationAt && item.nextObservationAt > Date.now()) return;
+        try {
+          const active = await this.processActiveInDesktopCommander(item);
+          if (item.state === "terminating" && active) return;
+          await this.observeProcess(item);
+          if (!active && item.outputDrained) await this.finishProcessWhenRootIsGone(item);
+        } catch {
+          if (this.processes.get(processId)?.state === "stale") {
+            this.stopWatchingProcess(processId);
+            return;
+          }
+          item.observationFailures = (item.observationFailures ?? 0) + 1;
+          item.nextObservationAt = Date.now() + Math.min(5_000, 250 * 2 ** Math.min(item.observationFailures, 4));
+          if (item.observationFailures === 1) {
+            await this.audit("process.observe_failed", { processId });
+          }
+          return;
+        }
+        if (this.processes.get(processId)?.state === "finished") {
+          this.stopWatchingProcess(processId);
+        }
+      }).finally(() => {
+        checking = false;
+      });
+    }, 250);
+    watcher.unref();
+    this.processWatchers.set(processId, watcher);
+  }
+  private processForOperation(user: string, sessionId: string, processId: string): Process {
+    const item = this.processes.get(processId);
+    if (!item || item.user !== user || item.sessionId !== sessionId || item.state === "stale") {
+      throw new Error("Process id is stale or finished.");
+    }
+    if (item.state !== "finished") this.requireCurrentProcess(item);
+    return item;
+  }
+  private currentProcessForOperation(user: string, sessionId: string, processId: string): Process {
+    const item = this.processForOperation(user, sessionId, processId);
+    if (item.state !== "running") throw new Error("Process id is stale or finished.");
+    return item;
+  }
   async executeNodeRequest(payload: unknown): Promise<unknown> {
     const request = parseNodeOperationRequest(payload);
     const state = this.userExecutionState(request.principal_id);
@@ -940,6 +1144,163 @@ export class RemoteDesktopService {
           this.rememberTerminal(item);
           await this.audit(nodeOperationContract(request.operation).auditEvent, { transferId: item.id, sessionId });
           return { cancelled: true };
+        });
+      case "process_start":
+        return this.processLock.run(async () => {
+          if (!sessionId) throw new Error("Node operation session is required.");
+          const { command, timeout_ms, working_directory } = request.args as {
+            command: string;
+            timeout_ms: number;
+            working_directory: string;
+          };
+          let workingDirectory: string;
+          try {
+            if (!path.isAbsolute(working_directory)) throw new Error();
+            workingDirectory = await realpath(working_directory);
+            if (!(await lstat(workingDirectory)).isDirectory()) throw new Error();
+          } catch {
+            throw new Error("Working directory must be an existing absolute directory.");
+          }
+
+          const execution = this.operationContext.getStore();
+          const operationId = execution?.operationId ?? makeId();
+          const comment = execution?.comment ?? "";
+          let output: string;
+          try {
+            output = await this.startProcessBackend(command, timeout_ms, user, operationId, workingDirectory);
+          } catch {
+            await this.audit("process.start_failed", {
+              user,
+              sessionId,
+              command: this.redactCommand(command),
+              comment,
+              result: "実行を開始できませんでした。",
+            });
+            throw new Error("Process start failed.");
+          }
+
+          const match = output.match(/PID\s+(-?\d+)/i);
+          if (!match) {
+            await this.audit("process.start_failed", {
+              user,
+              sessionId,
+              command: this.redactCommand(command),
+              comment,
+              output: this.redactCommand(output),
+              outputTruncated: output.length > 4000,
+              result: "Process ID unavailable.",
+            });
+            throw new Error("Desktop Commander did not return a process id.");
+          }
+
+          const pid = Number(match[1]);
+          try {
+            this.requireCurrentOperation();
+          } catch (error) {
+            if (this.cfg.processAdapter) {
+              await this.cfg.processAdapter.terminate(pid, 2_000).catch(() => undefined);
+            }
+            await this.audit(
+              this.cfg.processAdapter ? "process.stop_requested_after_start" : "process.stop_unconfirmed_after_start",
+              { user, sessionId, pid },
+            );
+            throw error;
+          }
+
+          const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output);
+          const item: Process = {
+            id: makeId(),
+            sessionId,
+            user,
+            generation: this.dc.currentGeneration(),
+            pid,
+            state: initialCompletion ? "finished" : "running",
+            output,
+            cursor: 0,
+            exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]),
+          };
+          const priorId = this.currentProcessOwners.get(this.processKey(item));
+          if (priorId) {
+            const prior = this.processes.get(priorId);
+            if (prior) this.markProcessStale(prior);
+          }
+          this.processes.set(item.id, item);
+          if (item.state === "running") this.currentProcessOwners.set(this.processKey(item), item.id);
+          try {
+            await this.audit(nodeOperationContract(request.operation).auditEvent, {
+              user,
+              sessionId,
+              nodeId: this.cfg.nodeId,
+              processId: item.id,
+              pid: item.pid,
+              command: this.redactCommand(command),
+              comment,
+              output: this.redactCommand(output),
+              outputTruncated: output.length > 4000,
+            });
+          } finally {
+            if (item.state === "running") this.watchProcess(item.id);
+          }
+          if (item.state === "finished") await this.auditProcessExit(item);
+          return { process_id: item.id, output };
+        });
+      case "process_output":
+      case "process_status":
+        return this.processLock.run(async () => {
+          if (!sessionId) throw new Error("Node operation session is required.");
+          const { process_id } = request.args as { process_id: string };
+          const item = this.processForOperation(user, sessionId, process_id);
+          if (item.state === "finished") {
+            return { state: item.state, exit_code: item.exitCode, output: item.output };
+          }
+          if (item.state === "terminating" && await this.processActiveInDesktopCommander(item)) {
+            return {
+              state: item.state,
+              termination_unconfirmed: item.terminationUnconfirmed || undefined,
+              output: item.output,
+            };
+          }
+          const output = await this.observeProcess(item);
+          return {
+            state: item.state,
+            exit_code: item.exitCode,
+            termination_unconfirmed: item.terminationUnconfirmed || undefined,
+            output,
+          };
+        });
+      case "process_kill":
+        return this.processLock.run(async () => {
+          if (!sessionId) throw new Error("Node operation session is required.");
+          const { process_id } = request.args as { process_id: string };
+          const item = this.currentProcessForOperation(user, sessionId, process_id);
+          let outcome: "acknowledged" | "rejected" | "timed_out";
+          try {
+            const output = await this.terminateProcessBackend(item);
+            outcome = /Successfully initiated termination of session/i.test(output) ? "acknowledged" : "rejected";
+          } catch (error) {
+            outcome = typeof error === "object"
+              && error !== null
+              && "code" in error
+              && (error as { code?: unknown }).code === -32001
+              ? "timed_out"
+              : "rejected";
+          }
+          if (outcome === "rejected") {
+            await this.audit("process.kill_rejected", { processId: item.id });
+            this.watchProcess(item.id);
+            return { state: item.state, rejected: true };
+          }
+          item.state = "terminating";
+          item.terminationRequested = true;
+          if (outcome === "timed_out") {
+            item.terminationUnconfirmed = true;
+            await this.audit("process.termination_unconfirmed", { processId: item.id });
+            this.watchProcess(item.id);
+            return { state: item.state, termination_unconfirmed: true };
+          }
+          await this.audit(nodeOperationContract(request.operation).auditEvent, { processId: item.id });
+          this.watchProcess(item.id);
+          return { state: item.state };
         });
     }
   }
@@ -1240,7 +1601,7 @@ export class RemoteDesktopService {
       : "—";
     let started = false;
     const entryGeneration = entryState.stopGeneration;
-    const executionOperation: ExecutionOperation = { user, operationId, stopGeneration: entryGeneration };
+    const executionOperation: ExecutionOperation = { user, operationId, stopGeneration: entryGeneration, comment };
     const sessionAccess = () => executionOperation.sessionAccessAt ? { sessionAccessAt: executionOperation.sessionAccessAt } : {};
     try {
       await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt });
@@ -1373,29 +1734,31 @@ export class RemoteDesktopService {
       this.session(user, session_id);
       return this.executeLocalNodeOperation(user, session_id, "file_transfer_cancel", { transfer_id });
     }));
-    const processKey = (item: Pick<Process, "generation" | "pid">) => `${this.cfg.nodeId}:${item.generation}:${item.pid}`;
-    const stopWatching = (processId: string) => { const watcher = this.processWatchers.get(processId); if (watcher) clearInterval(watcher); this.processWatchers.delete(processId); };
-    const markStale = (item: Process) => { if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); item.state = "stale"; stopWatching(item.id); };
-    const requireCurrent = (item: Process) => { let generation: string; try { generation = this.dc.currentGeneration(); } catch { markStale(item); throw new Error("Process id is stale or finished."); } if (item.generation !== generation || this.currentProcessOwners.get(processKey(item)) !== item.id) { markStale(item); throw new Error("Process id is stale or finished."); } return item; };
-    const redactCommand = (command: string) => [this.cfg.tokenSecret, this.cfg.publicAuth?.googleClientSecret ?? "", ...this.cfg.users.map((configured) => configured.passwordHash)].filter(Boolean).reduce((value, secret) => value.split(secret).join("[redacted]"), command).replace(/\bBearer\s+\S+/gi, "Bearer [redacted]").replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]").slice(0, 4000);
-    const startProcess = (command: string, timeout: number, owner: string, operationId: string, workingDirectory: string) => this.cfg.processAdapter?.start(command, timeout, workingDirectory) ?? this.dc.call("start_process", { command, timeout_ms: timeout, __rdmcp_owner: owner, __rdmcp_operation: operationId, __rdmcp_cwd: workingDirectory });
-    const readProcess = (item: Process) => this.cfg.processAdapter?.read(item.pid, item.cursor, 1_000) ?? this.dc.call("read_process_output", { pid: item.pid, offset: item.cursor, length: 1000, timeout_ms: 100 }, 1_000);
-    const terminateProcess = (item: Process) => this.cfg.processAdapter?.terminate(item.pid, 2_000) ?? this.dc.call("force_terminate", { pid: item.pid }, 2_000);
-    const listProcessSessions = () => this.cfg.processAdapter?.sessions() ?? this.dc.call("list_sessions", {}, 1_000);
-    // A finished state is observable by callers.  Persist its audit record before
-    // publishing that state so cleanup cannot remove the private audit file while
-    // an in-flight watcher is still appending to it.
-    const auditExit = async (item: Process) => { if (item.exitAudited) return; await this.audit("process.exit", { sessionId: item.sessionId, processId: item.id, output: redactCommand(item.output), outputTruncated: item.output.length > 4000, result: item.terminationRequested ? "exit_after_termination_request" : "natural", exitCode: item.exitCode ?? null }); item.exitAudited = true; };
-    const finishWhenRootIsGone = async (item: Process) => { if (item.state === "finished") return; requireCurrent(item); await auditExit(item); item.state = "finished"; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); };
-    const activeInDesktopCommander = async (item: Process): Promise<boolean> => { requireCurrent(item); const output = await listProcessSessions(); return new RegExp(`PID:\\s*${item.pid}(?:\\D|$)`, "i").test(output); };
-    const observe = async (item: Process) => { const pages: string[] = []; let drained = false; item.outputDrained = false; for (let page = 0; page < 100; page += 1) { requireCurrent(item); const output = await readProcess(item); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); if (completion) { item.completionPending = true; item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]); } if (!remaining || Number(remaining[1]) === 0) { drained = true; break; } } item.outputDrained = drained; item.observationFailures = 0; item.nextObservationAt = undefined; item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); const observed = pages.join("\n"); if (observed && pages.some((page) => !/^Reading 0 (?:new )?lines(?: from line \d+)? \(total: \d+ lines(?:, 0 remaining)?\)\s*$/i.test(page.trim()))) await this.audit("process.output", { sessionId: item.sessionId, processId: item.id, output: redactCommand(observed), outputTruncated: observed.length > 4000 }); if (drained && item.completionPending) { await auditExit(item); item.state = "finished"; item.completionPending = false; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); } return observed; };
-    const watchProcess = (processId: string) => { if (this.processWatchers.has(processId)) return; let checking = false; const watcher = setInterval(() => { if (checking) return; checking = true; void this.processLock.run(async () => { const item = this.processes.get(processId); if (!item || item.state === "finished" || item.state === "stale") { stopWatching(processId); return; } if (item.nextObservationAt && item.nextObservationAt > Date.now()) return; try { const active = await activeInDesktopCommander(item); if (item.state === "terminating" && active) return; await observe(item); if (!active && item.outputDrained) await finishWhenRootIsGone(item); } catch { if (this.processes.get(processId)?.state === "stale") { stopWatching(processId); return; } item.observationFailures = (item.observationFailures ?? 0) + 1; item.nextObservationAt = Date.now() + Math.min(5_000, 250 * 2 ** Math.min(item.observationFailures, 4)); if (item.observationFailures === 1) await this.audit("process.observe_failed", { processId }); return; } if (this.processes.get(processId)?.state === "finished") stopWatching(processId); }).finally(() => { checking = false; }); }, 250); watcher.unref(); this.processWatchers.set(processId, watcher); };
-    server.registerTool("process_start", { description: "Start a command for the current user-authorized task on the local node through Desktop Commander. Requires the caller's active session_id. The command starts in that session's working_directory. Prefer the dedicated root-scoped file tools for file operations. The command runs with the MCP server OS user's existing permissions. timeout_ms is 100–60000 (default 10000); returns a process_id and initial output. Use process_status, process_output, or process_kill with this same session_id.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async (args, operationId) => this.processLock.run(async () => { const { session_id, node_id, command, timeout_ms } = args; const comment = String((args as Record<string, unknown>).comment); await this.sweepExpired(); const session = this.session(user, session_id); const node = this.node(node_id); let output: string; try { output = await startProcess(command, timeout_ms, user, operationId, session.workingDirectory); } catch { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), comment, result: "実行を開始できませんでした。" }); throw new Error("Process start failed."); } const match = output.match(/PID\s+(-?\d+)/i); if (!match) { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), comment, output: redactCommand(output), outputTruncated: output.length > 4000, result: "Process ID unavailable." }); throw new Error("Desktop Commander did not return a process id."); } try { this.requireCurrentOperation(); } catch (error) { if (this.cfg.processAdapter) await this.cfg.processAdapter.terminate(Number(match[1]), 2_000).catch(() => undefined); await this.audit(this.cfg.processAdapter ? "process.stop_requested_after_start" : "process.stop_unconfirmed_after_start", { user, sessionId: session_id, pid: Number(match[1]) }); throw error; } const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); const item: Process = { id: makeId(), sessionId: session_id, user, generation: this.dc.currentGeneration(), pid: Number(match[1]), state: initialCompletion ? "finished" : "running", output, cursor: 0, exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]) }; const priorId = this.currentProcessOwners.get(processKey(item)); if (priorId) { const prior = this.processes.get(priorId); if (prior) markStale(prior); } this.processes.set(item.id, item); if (item.state === "running") this.currentProcessOwners.set(processKey(item), item.id); try { await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id, pid: item.pid, command: redactCommand(command), comment, output: redactCommand(output), outputTruncated: output.length > 4000 }); } finally { if (item.state === "running") watchProcess(item.id); } if (item.state === "finished") await auditExit(item); return { process_id: item.id, output }; })));
-    const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.user !== user || item.sessionId !== sid || item.state === "stale") throw new Error("Process id is stale or finished."); if (item.state !== "finished") requireCurrent(item); return item; };
-    const current = (sid: string, pid: string) => { const item = getProcess(sid, pid); if (item.state !== "running") throw new Error("Process id is stale or finished."); return item; };
-    server.registerTool("process_output", { description: "Read the combined output for process_id started in the supplied active session_id. Requires the same session_id used for process_start; returns current state, available exit code, and combined output (stdout and stderr are not separated). Output for finished processes is returned from saved state.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
-    server.registerTool("process_status", { description: "Refresh and return the state for process_id started in the supplied active session_id, including an available exit code and output. Requires the same session_id used for process_start; process IDs are scoped to their owner and session.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
-    server.registerTool("process_kill", { description: "Request termination of a running process_id started in the supplied active session_id. Requires the same session_id used for process_start. This targets the tracked process; Windows managed descendants may also be stopped. If rejected=true, the termination request was not accepted. Otherwise state=terminating records a request, not a confirmed exit. Check process_status for the resulting state and termination_unconfirmed flag.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = current(session_id, process_id); let outcome: "acknowledged" | "rejected" | "timed_out"; try { const output = await terminateProcess(item); outcome = /Successfully initiated termination of session/i.test(output) ? "acknowledged" : "rejected"; } catch (error) { outcome = typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === -32001 ? "timed_out" : "rejected"; } if (outcome === "rejected") { await this.audit("process.kill_rejected", { processId: item.id }); watchProcess(item.id); return { state: item.state, rejected: true }; } item.state = "terminating"; item.terminationRequested = true; if (outcome === "timed_out") { item.terminationUnconfirmed = true; await this.audit("process.termination_unconfirmed", { processId: item.id }); watchProcess(item.id); return { state: item.state, termination_unconfirmed: true }; } await this.audit("process.kill_requested", { processId: item.id }); watchProcess(item.id); return { state: item.state }; })));
+    server.registerTool("process_start", { description: "Start a command for the current user-authorized task on the local node through Desktop Commander. Requires the caller's active session_id. The command starts in that session's working_directory. Prefer the dedicated root-scoped file tools for file operations. The command runs with the MCP server OS user's existing permissions. timeout_ms is 100–60000 (default 10000); returns a process_id and initial output. Use process_status, process_output, or process_kill with this same session_id.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => {
+      await this.sweepExpired();
+      const { session, target } = this.operationTarget(user, session_id, node_id);
+      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
+      return this.dispatchNodeOperation(user, session, target, "process_start", {
+        command,
+        timeout_ms,
+        working_directory: session.workingDirectory,
+      });
+    }));
+    server.registerTool("process_output", { description: "Read the combined output for process_id started in the supplied active session_id. Requires the same session_id used for process_start; returns current state, available exit code, and combined output (stdout and stderr are not separated). Output for finished processes is returned from saved state.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
+      const { session, target } = this.operationTarget(user, session_id, node_id);
+      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
+      return this.dispatchNodeOperation(user, session, target, "process_output", { process_id });
+    }));
+    server.registerTool("process_status", { description: "Refresh and return the state for process_id started in the supplied active session_id, including an available exit code and output. Requires the same session_id used for process_start; process IDs are scoped to their owner and session.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
+      const { session, target } = this.operationTarget(user, session_id, node_id);
+      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
+      return this.dispatchNodeOperation(user, session, target, "process_status", { process_id });
+    }));
+    server.registerTool("process_kill", { description: "Request termination of a running process_id started in the supplied active session_id. Requires the same session_id used for process_start. This targets the tracked process; Windows managed descendants may also be stopped. If rejected=true, the termination request was not accepted. Otherwise state=terminating records a request, not a confirmed exit. Check process_status for the resulting state and termination_unconfirmed flag.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
+      const { session, target } = this.operationTarget(user, session_id, node_id);
+      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
+      return this.dispatchNodeOperation(user, session, target, "process_kill", { process_id });
+    }));
     return server;
   }
 }

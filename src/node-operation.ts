@@ -12,6 +12,13 @@ type NodeOperationContract = {
 
 const output = z.object({ output: z.string() });
 const transferState = z.enum(["active", "complete", "cancelled", "failed", "expired"]);
+const processState = z.enum(["running", "terminating", "finished"]);
+const processResult = z.object({
+  state: processState,
+  exit_code: z.number().int().optional(),
+  termination_unconfirmed: z.boolean().optional(),
+  output: z.string(),
+});
 
 export const NODE_OPERATION_CONTRACTS = {
   session_validate_working_directory: {
@@ -146,6 +153,45 @@ export const NODE_OPERATION_CONTRACTS = {
     args: z.object({ transfer_id: z.string().min(16) }),
     response: z.object({ cancelled: z.literal(true) }),
     auditEvent: "transfer.cancel",
+    requiresSession: true,
+  },
+  process_start: {
+    capability: "process",
+    args: z.object({
+      command: z.string().min(1).max(4000),
+      timeout_ms: z.number().int().min(100).max(60_000),
+      working_directory: z.string().trim().min(1).max(4096),
+    }),
+    response: z.object({
+      process_id: z.string().min(16),
+      output: z.string(),
+    }),
+    auditEvent: "process.start",
+    requiresSession: true,
+  },
+  process_status: {
+    capability: "process",
+    args: z.object({ process_id: z.string().min(16) }),
+    response: processResult,
+    auditEvent: "process.status",
+    requiresSession: true,
+  },
+  process_output: {
+    capability: "process",
+    args: z.object({ process_id: z.string().min(16) }),
+    response: processResult,
+    auditEvent: "process.output",
+    requiresSession: true,
+  },
+  process_kill: {
+    capability: "process",
+    args: z.object({ process_id: z.string().min(16) }),
+    response: z.object({
+      state: z.enum(["running", "terminating"]),
+      rejected: z.boolean().optional(),
+      termination_unconfirmed: z.boolean().optional(),
+    }),
+    auditEvent: "process.kill_requested",
     requiresSession: true,
   },
 } satisfies Record<string, NodeOperationContract>;
