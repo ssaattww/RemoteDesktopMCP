@@ -1102,3 +1102,13 @@ test("configuration rejects resolved overlap and traversal aliases", async () =>
     await assert.rejects(new RemoteDesktopService(configFromEnv(env)).initialize(), /must not overlap/);
   } finally { await f.cleanup(); }
 });
+
+test("REV001: operation correlation ownership only accepts active owned sessions", async () => {
+  const f = await fixture();
+  try {
+    await f.service.audit("session.open", { user: "owner@example.test", sessionId: "historical-session" });
+    assert.equal(f.service.userOwnsActiveSession("owner@example.test", "historical-session"), false);
+    const opened = await f.service.openSession("owner@example.test", process.cwd(), "REV001 correlation test");
+    assert.equal(f.service.userOwnsActiveSession("owner@example.test", opened.id), true);
+  } finally { await f.cleanup(); }
+});
