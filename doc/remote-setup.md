@@ -180,8 +180,22 @@ npm.cmd run node-config -- add-executor --node-id <executorのnode_id> --label <
 executor PCで、PSKを標準入力から渡す。
 
 ```powershell
-'<生成済みPSK>' | npm.cmd run node-config -- set-coordinator --host <統括ノードの接続先> --port <通信ポート> --psk-stdin
+$secure = Read-Host 'PSK' -AsSecureString
+$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try {
+  $psk = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+  $psk | npm.cmd run node-config -- set-coordinator --host <統括ノードの接続先> --port <通信ポート> --psk-stdin
+}
+finally {
+  if ($ptr -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+  }
+  Remove-Variable psk -ErrorAction SilentlyContinue
+  Remove-Variable secure -ErrorAction SilentlyContinue
+}
 ```
+
+PSKは対話入力から受け取り、標準入力へ渡す間だけメモリ上で扱う。コマンド引数、環境変数、設定ファイル、シェル履歴、画面出力へ実値を残さない。SecureStringから標準入力用文字列へ変換するため、変換後の文字列は処理完了後に変数を削除し、BSTR領域を解放する。
 
 PSKをコマンド引数へ指定する `--psk` 形式は使用しない。
 
@@ -212,8 +226,22 @@ npm.cmd run node-config -- rotate-executor-key --node-id <executorのnode_id>
 出力された新しいPSKをexecutor側へ設定する。
 
 ```powershell
-'<新しいPSK>' | npm.cmd run node-config -- set-coordinator --host <統括ノードの接続先> --port <通信ポート> --psk-stdin
+$secure = Read-Host '新しいPSK' -AsSecureString
+$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try {
+  $psk = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+  $psk | npm.cmd run node-config -- set-coordinator --host <統括ノードの接続先> --port <通信ポート> --psk-stdin
+}
+finally {
+  if ($ptr -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+  }
+  Remove-Variable psk -ErrorAction SilentlyContinue
+  Remove-Variable secure -ErrorAction SilentlyContinue
+}
 ```
+
+入力したPSKは処理中だけメモリ上で扱い、引数、環境変数、ファイル、履歴、画面出力へ実値を残さない。
 
 更新中は旧接続を継続利用できる前提にせず、新しいPSKによる相互認証が完了した接続だけを利用する。旧PSKでの再接続は拒否される。
 
