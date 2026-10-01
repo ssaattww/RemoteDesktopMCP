@@ -245,3 +245,76 @@ test("remote file_read rejects a disconnected bound node without failover", asyn
   }
 });
 
+test("remote search and patch use fixed internal operations on the bound node", async () => {
+  const { configured, registry } = clusterRegistry();
+  activateRemote(registry);
+  const operations: Array<{ operation: unknown; args: unknown }> = [];
+  const f = await fixture({
+    nodeId: configured.local.node_id,
+    nodeLabel: configured.local.label,
+    nodeRegistry: registry,
+    nodeRequest: async (_nodeId: string, payload: unknown) => {
+      assert.ok(payload && typeof payload === "object" && !Array.isArray(payload));
+      const request = payload as Record<string, unknown>;
+      if (request.operation === "session_validate_working_directory") {
+        const args = request.args as { working_directory?: unknown };
+        return { working_directory: args.working_directory };
+      }
+      operations.push({ operation: request.operation, args: request.args });
+      if (request.operation === "file_search") return { output: "name-result" };
+      if (request.operation === "content_search") return { output: "content-result" };
+      if (request.operation === "file_patch") return { output: "patched" };
+      throw new Error("unexpected remote operation");
+    },
+  });
+  const api = await mcp(f.service);
+  try {
+    const opened = await api.call("session_open", {
+      node_id: remoteId,
+      working_directory: "D:\\work",
+      purpose: "Remote file operations",
+    });
+    const sessionId = opened.session_id as string;
+
+    assert.equal((await api.call("file_search", {
+      session_id: sessionId,
+      node_id: remoteId,
+      root_id: "remote",
+      query: "*.txt",
+    })).output, "name-result");
+    assert.equal((await api.call("content_search", {
+      session_id: sessionId,
+      node_id: remoteId,
+      root_id: "remote",
+      query: "needle",
+    })).output, "content-result");
+    assert.equal((await api.call("file_patch", {
+      session_id: sessionId,
+      node_id: remoteId,
+      root_id: "remote",
+      relative_path: "note.txt",
+      old_string: "before",
+      new_string: "after",
+      expected_replacements: 1,
+    })).output, "patched");
+
+    assert.deepEqual(operations, [
+      { operation: "file_search", args: { root_id: "remote", query: "*.txt" } },
+      { operation: "content_search", args: { root_id: "remote", query: "needle" } },
+      {
+        operation: "file_patch",
+        args: {
+          root_id: "remote",
+          relative_path: "note.txt",
+          old_string: "before",
+          new_string: "after",
+          expected_replacements: 1,
+        },
+      },
+    ]);
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
+
