@@ -1132,9 +1132,10 @@ test("REV001: accepted and rejected operations preserve safe correlation contrac
     await f.service.audit("session.open", { user: owner, sessionId: historical });
 
     await api.call("node_list", { session_id: session });
+    const unverifiedSession = "unverified-input-session";
     await assert.rejects(api.callRaw("file_read", {
       comment: "Verify rejected correlation contract",
-      session_id: session,
+      session_id: unverifiedSession,
       root_id: "files",
       relative_path: "missing.txt",
       offset: -1,
