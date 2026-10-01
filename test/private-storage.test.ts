@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/pro
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { assertPrivateAuditStorage, assertPrivateDirectory, assertPrivateFile, assertSafePrivateParent, createPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory, protectPrivateDirectory } from "../src/private-storage.js";
+import { assertPrivateAuditStorage, assertPrivateDirectory, assertPrivateFile, assertSafePrivateParent, createPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateDirectory } from "../src/private-storage.js";
 
 const execFileAsync = promisify(execFile);
 const workspace = path.resolve(process.cwd());
@@ -32,6 +32,14 @@ async function cleanup(base: string) {
 async function grantBroadRead(target: string) {
   if (process.platform === "win32") {
     await execFileAsync("icacls.exe", [target, "/grant", "*S-1-5-32-545:(RX)"], { windowsHide: true });
+    return;
+  }
+  await chmod(target, 0o755);
+}
+
+async function grantInheritedRead(target: string) {
+  if (process.platform === "win32") {
+    await execFileAsync("icacls.exe", [target, "/grant", "*S-1-5-32-545:(OI)(CI)(RX)"], { windowsHide: true });
     return;
   }
   await chmod(target, 0o755);
@@ -85,12 +93,25 @@ async function runPrivateStorageChecks() {
     await ensurePrivateDirectory(broadAuditDirectory);
     await createPrivateFile(broadAuditFile, "audit");
     await grantBroadRead(broadAuditDirectory);
+    await assertPrivateAuditStorage(broadAuditDirectory, broadAuditFile);
+    await grantBroadWrite(broadAuditDirectory);
     await assert.rejects(assertPrivateAuditStorage(broadAuditDirectory, broadAuditFile), /Private storage/);
 
     const readonlyParent = path.join(base, "readonly-parent");
     await ensurePrivateDirectory(readonlyParent);
-    await grantBroadRead(readonlyParent);
+    await grantInheritedRead(readonlyParent);
     await assertSafePrivateParent(readonlyParent);
+    const ordinaryData = path.join(readonlyParent, "ordinary-data");
+    await ensureSafeDataDirectory(ordinaryData);
+    await assertSafePrivateParent(ordinaryData);
+    const ordinarySecret = path.join(ordinaryData, "oauth-state.json");
+    await createPrivateFile(ordinarySecret, "secret");
+    await assertPrivateFile(ordinarySecret);
+    const ordinaryTemporary = await createPrivateTemporaryFile(ordinaryData, "oauth-state");
+    await writeFile(ordinaryTemporary, "new-secret");
+    await assertPrivateFile(ordinaryTemporary);
+    await rename(ordinaryTemporary, ordinarySecret);
+    await assertPrivateFile(ordinarySecret);
     const readonlyDirectory = path.join(readonlyParent, "safe-new-directory");
     await ensurePrivateDirectory(readonlyDirectory);
     await assertPrivateDirectory(readonlyDirectory);

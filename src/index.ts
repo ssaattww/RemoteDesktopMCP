@@ -14,7 +14,7 @@ import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
 import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
-import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, protectPrivateFile } from "./private-storage.js";
+import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateFile } from "./private-storage.js";
 import { type NodeListEntry, type NodeRegistry } from "./node-registry.js";
 import {
   createNodeOperationRequest,
@@ -240,7 +240,7 @@ export class RemoteDesktopService {
   private expiryTimer?: NodeJS.Timeout;
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
   async initialize(): Promise<void> {
-    await ensurePrivateDirectory(this.cfg.dataDir);
+    await ensureSafeDataDirectory(this.cfg.dataDir);
     await this.loadAuditIndex();
     await this.loadExecutionStates();
     const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
