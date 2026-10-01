@@ -13,6 +13,7 @@ import {
   type NodeFrameDirection,
   type NodeFrameType,
 } from "./node-cluster.js";
+import { parseNodeOperationRequest, type NodeOperationRequest } from "./node-operation.js";
 import {
   NodeRegistry,
   type NodeCapabilities,
@@ -75,7 +76,7 @@ type CoordinatorNodeServerOptions = {
 type ExecutorNodeClientOptions = {
   config: ClusterConfig;
   capabilities: ExecutorCapabilities;
-  onRequest: (payload: unknown) => Promise<unknown>;
+  onRequest: (payload: NodeOperationRequest) => Promise<unknown>;
   onUserState?: (state: UserState) => Promise<void>;
   authenticationTimeoutMs?: number;
 };
@@ -610,7 +611,7 @@ export class CoordinatorNodeServer {
     if (!connection.socket.destroyed) connection.socket.destroy();
   }
 
-  async request(nodeId: string, payload: unknown): Promise<unknown> {
+  async request(nodeId: string, payload: NodeOperationRequest): Promise<unknown> {
     const active = this.options.registry.activeConnection(nodeId);
     if (!active) throw new Error("Node is disconnected.");
     const connection = this.connections.get(active.connection_id);
@@ -780,7 +781,8 @@ export class ExecutorNodeClient {
         }
         if (frame.type === "request") {
           try {
-            const response = await this.options.onRequest(frame.payload);
+            const request = parseNodeOperationRequest(frame.payload);
+            const response = await this.options.onRequest(request);
             await channel.send("response", frame.request_id, response);
           } catch (error) {
             await channel.send("error", frame.request_id, {

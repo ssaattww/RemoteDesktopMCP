@@ -7,6 +7,7 @@ import {
   createInitialClusterConfig,
   setCoordinator,
 } from "../src/node-cluster.js";
+import { type NodeOperationName } from "../src/node-operation.js";
 import { NodeRegistry } from "../src/node-registry.js";
 import { CoordinatorNodeServer, ExecutorNodeClient } from "../src/node-transport.js";
 import { fixture, mcp } from "./fixture.js";
@@ -457,7 +458,7 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     return { client, handledPromise, release };
   };
 
-  const envelope = (sessionId: string, operation: string, args: Record<string, unknown>) => ({
+  const envelope = (sessionId: string, operation: NodeOperationName, args: Record<string, unknown>) => ({
     principal_id: "owner@example.test",
     stop_generation: 0,
     session_id: sessionId,

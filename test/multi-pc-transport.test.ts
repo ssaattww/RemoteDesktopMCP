@@ -85,16 +85,16 @@ test("executor authenticates, becomes active, and serves authenticated requests"
       principal_id: "owner@example.test",
       stop_generation: 0,
       session_id: "session-test",
-      operation: "echo",
-      args: { value: 42 },
+      operation: "file_read",
+      args: { root_id: "remote", relative_path: "note.txt" },
     });
     assert.deepEqual(response, {
       received: {
         principal_id: "owner@example.test",
         stop_generation: 0,
         session_id: "session-test",
-        operation: "echo",
-        args: { value: 42 },
+        operation: "file_read",
+        args: { root_id: "remote", relative_path: "note.txt" },
       },
     });
   } finally {
