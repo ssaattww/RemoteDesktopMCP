@@ -1,5 +1,6 @@
 ﻿import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -334,6 +335,14 @@ async function waitForRemoteActive(registry: NodeRegistry, previousConnection?: 
   }
 }
 
+async function waitForRemoteInactive(registry: NodeRegistry): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (registry.activeConnection(remoteId)) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for the remote node to disconnect.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 test("RDMCP-25-DR-003: public MCP reaches the executor common handler through authenticated node transport", async () => {
   const local = createInitialClusterConfig("both", "Coordinator", 41000);
   const added = addExecutor(local, remoteId, "Remote A");
@@ -488,8 +497,9 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     await current.handledPromise;
     const firstConnection = registry.activeConnection(remoteId)?.connection_id;
     const firstClose = current.client.close();
-    current.release();
     await firstClose;
+    await waitForRemoteInactive(registry);
+    current.release();
     await firstAttempt;
 
     current = makeClient();
@@ -519,8 +529,9 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     await current.handledPromise;
     const finalConnection = registry.activeConnection(remoteId)?.connection_id;
     const finalClose = current.client.close();
-    current.release();
     await finalClose;
+    await waitForRemoteInactive(registry);
+    current.release();
     await finalAttempt;
 
     current = makeClient();
@@ -538,5 +549,46 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     await current.client.close();
     await server.close();
     await executorFixture.cleanup();
+  }
+});
+
+test("RDMCP-25-DR-003: executor common handler owns the upload state machine", async () => {
+  const f = await fixture({ nodeId: remoteId, nodeLabel: "Remote A", chunkBytes: 1024 });
+  const sessionId = "remote-upload-session";
+  const payload = Buffer.from("upload through the shared operation core");
+  const sha256 = createHash("sha256").update(payload).digest("hex");
+  const envelope = (operation: string, args: Record<string, unknown>) => ({
+    principal_id: "owner@example.test",
+    stop_generation: 0,
+    session_id: sessionId,
+    operation,
+    args,
+  });
+  try {
+    const begun = await f.service.executeNodeRequest(envelope("file_transfer_upload_begin", {
+      root_id: "files",
+      relative_path: "shared-upload.bin",
+      size: payload.length,
+      sha256,
+      overwrite: false,
+    })) as { transfer_id: string; chunk_bytes: number };
+    assert.ok(begun.transfer_id);
+    assert.equal(begun.chunk_bytes, 1024);
+
+    const chunked = await f.service.executeNodeRequest(envelope("file_transfer_upload_chunk", {
+      transfer_id: begun.transfer_id,
+      offset: 0,
+      data: payload.toString("base64"),
+    })) as { next_offset: number };
+    assert.equal(chunked.next_offset, payload.length);
+
+    const committed = await f.service.executeNodeRequest(envelope("file_transfer_upload_commit", {
+      transfer_id: begun.transfer_id,
+    })) as { size: number; sha256: string };
+    assert.equal(committed.size, payload.length);
+    assert.equal(committed.sha256, sha256);
+    assert.deepEqual(await readFile(path.join(f.root, "shared-upload.bin")), payload);
+  } finally {
+    await f.cleanup();
   }
 });
