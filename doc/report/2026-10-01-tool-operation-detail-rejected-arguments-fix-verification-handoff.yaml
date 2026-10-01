@@ -1,0 +1,396 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+  generated_at: 2026-10-01T15:27:34+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #26 / PR #33"
+task_id: tool-operation-detail-rejected-arguments-fix-verification
+branch: feat/tool-operation-detail-logs
+base_ref: main
+
+target:
+  current_head: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  reviewed_head: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  technical_implementation_head: b7bcb1b29db9188f39b660755f835425d454d794
+  previous_review_head: 2db3eb40cd1c5a6f95c95ad116cb593afa095347
+  commit_range: 2db3eb40cd1c5a6f95c95ad116cb593afa095347..4fcb89a5a753490fb63a6e202843cc2ae1a40797
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  machine_id: local
+  connection: available
+  os: Windows
+  shell: cmd.exe / PowerShell
+  working_directory: C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue26
+  repository: ssaattww/RemoteDesktopMCP
+  branch: feat/tool-operation-detail-logs
+  head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  source_state: clean
+  source_fingerprint: null
+  ownership: current_task
+  writable_paths:
+    - C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue26
+  dependencies:
+    - name: git
+      status: available
+      evidence: local/remote/PR HEAD were resolved with git and gh.
+    - name: node
+      status: available
+      evidence: REV-001 focused tests executed on current HEAD.
+    - name: npm
+      status: available
+      evidence: lint/check/build executed on current HEAD.
+    - name: rg
+      status: available
+      evidence: registered tools and projection cases were inspected with rg.
+  evidence:
+    - Existing PR #33 / Issue #26 session was reused; no new review session was created.
+    - Worktree was clean before report persistence.
+
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - RemoteDesktopMCP process_start executed repository validation on the connected Windows computer.
+  technical_head: b7bcb1b29db9188f39b660755f835425d454d794
+  administrative_parent: null
+  commit:
+    state: committed
+    review_target_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  push:
+    state: pushed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  ci_wait:
+    state: ci_wait_completed
+    required_for: route_verification
+  final_publication:
+    sequence: not_applicable
+    pr_action: update
+
+authoritative_requirements:
+  - source: report
+    reference: doc/report/2026-10-01-tool-operation-detail-fix-verification.md / RDMCP-PR33-REV-001
+    summary: Bound rejected arguments in a tool-specific safe projection before audit/detail generation; cap comment and variable-length payload processing; add Red tests.
+  - source: project_instruction
+    reference: TDD / diagnostics / exact-head CI
+    summary: Preserve Red-before-Green evidence, diagnostic artifacts, and use only current-HEAD matching CI.
+
+development_policy:
+  method: TDD review follow-up
+  testing_order: Red test -> implementation -> focused Green -> validation -> exact-head CI
+  governing_source: project instructions
+
+validation_plan:
+  commands:
+    - npm run lint
+    - npm run check
+    - npm run build
+    - git diff --check
+    - node --import tsx --test "--test-name-pattern=schema validation rejection" test/regressions.test.ts
+  required_failure_diagnostics:
+    - test result
+    - stdout
+    - stderr
+    - environment / cause investigation logs
+
+blocked: []
+
+authorized_actions:
+  - read_repository
+  - write_report
+  - write_handoff
+  - commit
+  - push
+  - comment_pr
+
+write_boundary:
+  allowed:
+    - path_or_operation: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification.md
+      reason: detailed normal fix-verification report
+    - path_or_operation: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification-handoff.yaml
+      reason: lossless review handoff
+    - path_or_operation: PR #33 comment
+      reason: concise review result
+  forbidden:
+    - path_or_operation: product/test/design/workflow/configuration changes
+      reason: reviewer does not implement fixes
+    - path_or_operation: merge
+      reason: merge is reserved for the user
+
+scope:
+  - Verify RDMCP-PR33-REV-001 closure on the final publication HEAD.
+  - Inspect direct sibling rejected variable-length arguments and projection coverage.
+  - Recheck current-head local validation and exact-head CI.
+non_goals:
+  - Fix the pre-existing Issue 13 asynchronous fixture cleanup race.
+  - Perform independent final review.
+  - Merge PR #33.
+
+files:
+  changed:
+    - path: src/index.ts
+      purpose: bounded tool-specific rejected argument projection
+    - path: test/regressions.test.ts
+      purpose: oversized comment and variable-length rejected-input regressions
+    - path: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix.md
+      purpose: implementation report
+    - path: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-handoff.yaml
+      purpose: implementation handoff
+  inspected:
+    - path: src/index.ts
+      purpose: projection implementation, request-handler rejection path, current registerTool coverage
+    - path: test/regressions.test.ts
+      purpose: actual composition fixtures and sibling cases
+    - path: .github/workflows/lint.yml
+      purpose: failure diagnostic artifact workflow
+    - path: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix.md
+      purpose: implementation evidence accuracy
+    - path: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-handoff.yaml
+      purpose: implementation handoff accuracy
+  intentionally_untouched:
+    - path_or_area: Issue 13 asynchronous cleanup race
+      reason: pre-existing and outside REV-001 scope
+
+commands:
+  - command: npm run lint
+    purpose: TypeScript, Markdown, and design-term lint on current HEAD
+    exit_code: 0
+    result: passed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+    evidence: markdownlint 65 files / 0 issues; design term lint completed successfully
+    execution_environment: null
+    source_fingerprint: null
+  - command: npm run check && npm run build
+    purpose: type/build validation on current HEAD
+    exit_code: 0
+    result: passed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+    evidence: both commands completed exit 0
+    execution_environment: null
+    source_fingerprint: null
+  - command: git diff --check
+    purpose: diff integrity
+    exit_code: 0
+    result: passed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+    evidence: no output
+    execution_environment: null
+    source_fingerprint: null
+  - command: node --import tsx --test "--test-name-pattern=schema validation rejection" test/regressions.test.ts
+    purpose: REV-001 focused composition fixtures
+    exit_code: 0
+    result: passed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+    evidence: 3 pass / 0 fail / 0 skipped
+    execution_environment: null
+    source_fingerprint: null
+
+tests:
+  - name: schema validation rejections persist safe operation detail
+    phase: verification
+    result: passed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+    evidence: focused current-HEAD run
+  - name: schema validation rejection bounds oversized comments before audit persistence
+    phase: verification
+    result: passed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+    evidence: focused current-HEAD run
+  - name: schema validation rejection bounds variable-length bodies before detail processing
+    phase: verification
+    result: passed
+    head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+    evidence: focused current-HEAD run
+
+ci:
+  required: true
+  workflow: lint
+  run_id: 36821469506
+  head_sha: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  conclusion: success
+  artifacts:
+    - id: unknown
+      name: ubuntu diagnostics
+      purpose: current-head validation diagnostics
+    - id: unknown
+      name: windows shard 1 diagnostics
+      purpose: current-head validation diagnostics
+    - id: unknown
+      name: windows shard 2 diagnostics
+      purpose: current-head validation diagnostics
+    - id: unknown
+      name: windows shard 3 diagnostics
+      purpose: current-head validation diagnostics
+
+implementation:
+  outcome: completed
+  final_head: b7bcb1b29db9188f39b660755f835425d454d794
+  commits:
+    - sha: 2bd5e71eac74b9a8a5cf455a17c764e0bd7ad830
+      purpose: Red test for bounded rejected audit arguments
+    - sha: b7bcb1b29db9188f39b660755f835425d454d794
+      purpose: bounded rejected argument projection implementation
+  addressed_findings:
+    - id: RDMCP-PR33-REV-001
+      reviewed_head: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+      disposition: addressed
+      evidence: all required-action matrix cells satisfied and focused/current-head CI evidence passes
+  failure_diagnostics:
+    - type: test_result
+      location: implementation report diagnostics paths
+      summary: Red oversized comment test failed as expected before implementation.
+    - type: test_result
+      location: implementation report diagnostics paths
+      summary: repository-wide local npm test retains the pre-existing Issue 13 cleanup race.
+  blocked_items: []
+  summary:
+    - Raw rejected arguments are bounded before audit/detail processing.
+    - Comment persistence obeys the 500-character limit.
+    - Patch/upload rejected bodies are bounded before split/decode work.
+
+review:
+  mode: fix_verification
+  reviewed_head: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  reviewer:
+    identity: same ChatGPT normal-review chat
+    role: normal_reviewer
+    continuity:
+      previous_reviewer_identity: same ChatGPT normal-review chat
+      changed: false
+      reason: normal fix verification intentionally reused the prior reviewer chat
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: true
+      inherited_conversation: true
+      evidence:
+        - This chat created the prior normal review findings and did not implement the fix.
+  verdict: pass_with_held
+  required_coverage:
+    - criterion: requirement_and_design_conformance
+      disposition: checked_no_finding
+      evidence: bounded projection satisfies the carried safe-prevalidation requirement
+    - criterion: correctness_and_edge_cases
+      disposition: checked_no_finding
+      evidence: oversized comment, patch body, and upload data sibling cases pass
+    - criterion: scope_discipline
+      disposition: checked_no_finding
+      evidence: product/test diff is limited to REV-001 and direct sibling cases
+    - criterion: direct_dependency_impact
+      disposition: checked_no_finding
+      evidence: MCP SDK pre-handler input-validation behavior remains the trigger and is handled at the request layer
+    - criterion: api_data_compatibility
+      disposition: checked_no_finding
+      evidence: public tool result contracts are unchanged
+    - criterion: error_handling
+      disposition: checked_no_finding
+      evidence: rejected operation audit remains visible while values are bounded
+    - criterion: security_and_secret_handling
+      disposition: checked_no_finding
+      evidence: rejected variable-length values no longer bypass normal safety bounds before persistence/processing
+    - criterion: tests_and_validation
+      disposition: checked_no_finding
+      evidence: current-head focused 3/3 pass and exact-head CI success
+    - criterion: current_head_ci
+      disposition: checked_no_finding
+      evidence: run 36821469506 headSha exactly equals reviewed HEAD and all four jobs succeeded
+    - criterion: report_tracking_documentation_accuracy
+      disposition: checked_no_finding
+      evidence: implementation report distinguishes technical/publication HEAD and the publication result is recorded in the PR comment
+    - criterion: regression_and_maintainability
+      disposition: checked_no_finding
+      evidence: bounded projection is centralized and defaults to omitting unknown fields
+  independent_closure:
+    initial_independent_reviewed_head: null
+    closure_reviewed_heads: []
+    reviewer_continuity: null
+    closure_scope: []
+    completeness_matrix:
+      - finding_id: RDMCP-PR33-REV-001
+        required_action: bounded tool-specific safe projection before audit/detail generation
+        production_path: src/index.ts rejectedArgumentProjection and input-validation request-handler branch
+        actual_composition_fixture: schema validation rejection bounds oversized comments / variable-length bodies tests through MCP callRaw
+        focused_evidence: current-head schema validation rejection focused run 3 pass / 0 fail
+  validation_assessment:
+    - item: REV-001 required actions
+      result: supported
+      evidence: completeness matrix satisfied
+    - item: current-head local focused validation
+      result: supported
+      evidence: lint/check/build/diff-check and focused tests pass
+    - item: repository-wide local npm test
+      result: failed
+      evidence: pre-existing Issue 13 asynchronous cleanup race; isolated Issue 13 passes
+    - item: current-head CI
+      result: supported
+      evidence: exact-head run 36821469506 success, four diagnostics artifacts present
+  reserved_report_paths: []
+  report_attestation:
+    allowed: not_applicable
+    reviewed_implementation_head: null
+    allowed_paths: []
+    required_first_parent: null
+    maximum_commits_after_reviewed_head: null
+    forbidden_path_classes: []
+    no_later_commits_required: not_applicable
+    validation_status: not_applicable
+    validation_evidence: []
+  summary:
+    - RDMCP-PR33-REV-001 is resolved at Medium severity without reclassification.
+    - No new required findings were detected.
+    - Pre-existing Issue 13 local-suite race remains as non-blocking held evidence.
+
+report:
+  report_type: verification_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification.md
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification-handoff.yaml
+  reviewed_head: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  attestation_head: null
+  pr_comments: []
+  summary:
+    - Normal fix verification passes with one pre-existing held local-test race.
+
+findings:
+  - id: RDMCP-PR33-REV-001
+    severity: medium
+    origin: introduced_by_change
+    location: src/index.ts rejectedArgumentProjection / input-validation request-handler branch
+    description: Previous rejected-input path processed raw variable-length values before schema bounds.
+    impact: Oversized rejected values could bypass expected audit limits and cause unbounded secondary processing.
+    evidence: Current bounded projection and three composition fixtures close all required actions.
+    required_action: completed
+    disposition: resolved
+
+held:
+  - item: Existing Issue 13 asynchronous fixture cleanup race in repository-wide local npm test
+    owner: existing repository test infrastructure
+    evidence: technical HEAD full local test 103 pass / 1 fail / 1 skip; isolated Issue 13 pass; current exact-head CI all success
+    remaining_risk: local full-suite execution can still report ENOENT after fixture cleanup
+    verdict_impact: non_blocking
+
+unexplored: []
+blocked_items: []
+remaining_risks:
+  - Existing Issue 13 local full-suite asynchronous cleanup race remains outside this PR finding fix.
+  - Future tool additions must update rejectedArgumentProjection together with the normal input schema/detail contract.
+
+next_action:
+  type: review
+  target_skill: chat-review-worker
+  mode: independent_final_review
+  summary: Normal review findings are resolved; start one fresh independent final review chat on the frozen implementation target after normal-review publication completes.
+  required_attachments_or_references:
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification.md
+    - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification-handoff.yaml
+  requested_authorized_actions:
+    - read_repository
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification-handoff.yaml
+  transport_note: Do not merge. Normal review is pass_with_held; use a fresh chat for independent final review.
