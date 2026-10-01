@@ -1,0 +1,84 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: review
+  generated_at: 2026-10-01T11:36:43+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #26 / PR #33"
+task_id: tool-operation-detail-review
+branch: feat/tool-operation-detail-logs
+base_ref: main
+
+target:
+  reviewed_head: 8c925d6e7011721489f64b5f7d671a6fcc9ce39e
+  worktree_clean: true
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  os: Windows
+  working_directory: C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue26
+  session_id: PeerpvD19VmY5mdHVA2ye-a72mlR-4Uw_n25XA6eHj0
+
+verdict: fail
+
+findings:
+  - id: RDMCP-PR33-REV-001
+    severity: Medium
+    origin: review
+    status: open
+    summary: Input-schema validation failures occur before the RDMCP audit wrapper and are missing from operation detail.
+  - id: RDMCP-PR33-REV-002
+    severity: Medium
+    origin: review
+    status: open
+    summary: Upload-commit preview rereads the mutable destination instead of using content bound to the verified commit.
+  - id: RDMCP-PR33-REV-003
+    severity: Medium
+    origin: review
+    status: open
+    summary: The design document uses inline-code markup to bypass the whitelist term checker for ordinary technical terms.
+  - id: RDMCP-PR33-REV-004
+    severity: Low
+    origin: review
+    status: open
+    summary: file_transfer_cancel detail omits the current transfer offset required by the design.
+
+validation:
+  local:
+    lint: pass
+    check: pass
+    build: pass
+    diff_check: pass
+    focused_operation_detail_tests: pass
+    focused_user_console_tests: pass
+    full_test: fail
+    full_test_note: "The local run exited 1 after four passes with a Windows file-in-use error; no completed full-suite result was obtained."
+  ci:
+    policy: exact_head_only
+    run_id: 36798964947
+    head_sha: 8c925d6e7011721489f64b5f7d671a6fcc9ce39e
+    event: pull_request
+    conclusion: success
+    jobs:
+      ubuntu: success
+      windows_1_of_3: success
+      windows_2_of_3: success
+      windows_3_of_3: success
+    diagnostics_uploaded: true
+
+diagnostic_workflow:
+  path: .github/workflows/lint.yml
+  change_required: false
+
+scope_notes:
+  - No product implementation was changed by the reviewer.
+  - No merge was performed.
+  - Existing owner scoping, HTML escaping, redaction, bounded previews, and focused tests were reviewed.
+
+next_steps:
+  - Fix RDMCP-PR33-REV-001 through RDMCP-PR33-REV-004 with TDD.
+  - Push a new technical HEAD.
+  - Validate only CI runs whose headSha exactly matches the new PR current HEAD.
+  - Re-review the same finding IDs without changing their severities.
