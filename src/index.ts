@@ -952,7 +952,7 @@ export class RemoteDesktopService {
     }
     if (tool === "file_transfer_upload_commit") {
       const entries = transferEntries();
-      if (transfer) {
+      if (transfer && typeof output.resolved_path === "string") {
         const preview = await this.previewFile(transfer.target, transfer.size);
         if (preview) entries.push(preview);
       }
