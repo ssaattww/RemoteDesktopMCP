@@ -195,11 +195,17 @@ ci:
   head_sha: 09f0c9177a759627a4293138f3742c8786bba6de
   conclusion: success
   artifacts:
-    - id: unknown
-      name: ubuntu-diagnostics-09f0c9177a759627a4293138f3742c8786bba6de
+    - id: 11138601319
+      name: ubuntu-diagnostics-ef052e03e80cdb4b48a878af9017536162a25cf9
       purpose: stdout/stderr/results/environment
-    - id: unknown
-      name: windows-diagnostics-shard-*-09f0c9177a759627a4293138f3742c8786bba6de
+    - id: 11139166162
+      name: windows-diagnostics-shard-1-ef052e03e80cdb4b48a878af9017536162a25cf9
+      purpose: stdout/stderr/results/environment
+    - id: 11139151165
+      name: windows-diagnostics-shard-2-ef052e03e80cdb4b48a878af9017536162a25cf9
+      purpose: stdout/stderr/results/environment
+    - id: 11138741601
+      name: windows-diagnostics-shard-3-ef052e03e80cdb4b48a878af9017536162a25cf9
       purpose: stdout/stderr/results/environment
 
 implementation:
