@@ -84,7 +84,7 @@ test("executor authenticates, becomes active, and serves authenticated requests"
     const response = await server.request(remoteId, {
       principal_id: "owner@example.test",
       stop_generation: 0,
-      session_id: "session-test",
+      session_id: "session-test-123456",
       operation: "file_read",
       args: { root_id: "remote", relative_path: "note.txt" },
     });
@@ -92,7 +92,7 @@ test("executor authenticates, becomes active, and serves authenticated requests"
       received: {
         principal_id: "owner@example.test",
         stop_generation: 0,
-        session_id: "session-test",
+        session_id: "session-test-123456",
         operation: "file_read",
         args: { root_id: "remote", relative_path: "note.txt" },
       },
