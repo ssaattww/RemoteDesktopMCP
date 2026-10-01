@@ -2,6 +2,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { runNodeConfig } from "../src/node-config-cli.js";
 import { ClusterConfigStore } from "../src/node-config.js";
 import { assertPrivateDirectory, assertPrivateFile, protectPrivateDirectory } from "../src/private-storage.js";
 import {
@@ -204,6 +205,81 @@ test("cluster config store preserves node identity while coordinator settings ar
     assert.equal(cleared.local.node_id, initial.local.node_id);
     assert.equal(cleared.coordinator, undefined);
     assert.deepEqual(await store.load(), cleared);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+async function invokeNodeConfig(dataDir: string, args: string[], input = ""): Promise<string[]> {
+  const output: string[] = [];
+  await runNodeConfig(
+    args,
+    { DATA_DIR: dataDir },
+    {
+      readStdin: async () => input,
+      write: (value) => {
+        output.push(value);
+      },
+    },
+  );
+  return output;
+}
+
+test("node-config coordinator commands reveal generated PSKs once but never through show", async () => {
+  const fixture = await clusterDataFixture();
+  try {
+    const initialized = await invokeNodeConfig(fixture.data, ["init", "--role", "coordinator", "--label", "Coordinator", "--port", "41000"]);
+    assert.match(initialized.join("\n"), /node_[A-Za-z0-9_-]{22}/);
+
+    const remote = createInitialClusterConfig("executor", "Remote A");
+    const added = await invokeNodeConfig(fixture.data, ["add-executor", "--node-id", remote.local.node_id, "--label", "Remote A"]);
+    const addedSecret = JSON.parse(added.at(-1) ?? "{}") as { node_id?: string; psk?: string };
+    assert.equal(addedSecret.node_id, remote.local.node_id);
+    assert.match(addedSecret.psk ?? "", /^[A-Za-z0-9_-]{43}$/);
+
+    const shown = (await invokeNodeConfig(fixture.data, ["show"])).join("\n");
+    assert.match(shown, /Remote A/);
+    assert.doesNotMatch(shown, new RegExp(addedSecret.psk ?? "impossible-secret"));
+
+    const rotated = await invokeNodeConfig(fixture.data, ["rotate-executor-key", "--node-id", remote.local.node_id]);
+    const rotatedSecret = JSON.parse(rotated.at(-1) ?? "{}") as { psk?: string };
+    assert.match(rotatedSecret.psk ?? "", /^[A-Za-z0-9_-]{43}$/);
+    assert.notEqual(rotatedSecret.psk, addedSecret.psk);
+
+    await invokeNodeConfig(fixture.data, ["remove-executor", "--node-id", remote.local.node_id]);
+    assert.doesNotMatch((await invokeNodeConfig(fixture.data, ["show"])).join("\n"), /Remote A/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("node-config executor commands accept coordinator PSK only through stdin and clear it atomically", async () => {
+  const fixture = await clusterDataFixture();
+  try {
+    const initialized = await invokeNodeConfig(fixture.data, ["init", "--role", "executor", "--label", "Remote A"]);
+    assert.match(initialized.join("\n"), /node_[A-Za-z0-9_-]{22}/);
+
+    const psk = generatePsk();
+    await assert.rejects(
+      invokeNodeConfig(fixture.data, ["set-coordinator", "--host", "100.64.0.10", "--port", "41000", "--psk", psk]),
+      /psk-stdin|standard input|stdin/i,
+    );
+
+    const configuredOutput = await invokeNodeConfig(
+      fixture.data,
+      ["set-coordinator", "--host", "100.64.0.10", "--port", "41000", "--psk-stdin"],
+      psk + "\n",
+    );
+    assert.doesNotMatch(configuredOutput.join("\n"), new RegExp(psk));
+
+    const store = new ClusterConfigStore(fixture.data);
+    assert.deepEqual((await store.load())?.coordinator, { host: "100.64.0.10", port: 41000, psk });
+    const shown = (await invokeNodeConfig(fixture.data, ["show"])).join("\n");
+    assert.match(shown, /100\.64\.0\.10/);
+    assert.doesNotMatch(shown, new RegExp(psk));
+
+    await invokeNodeConfig(fixture.data, ["clear-coordinator"]);
+    assert.equal((await store.load())?.coordinator, undefined);
   } finally {
     await fixture.cleanup();
   }
