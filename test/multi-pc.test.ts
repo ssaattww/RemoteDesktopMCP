@@ -284,4 +284,3 @@ test("node-config executor commands accept coordinator PSK only through stdin an
     await fixture.cleanup();
   }
 });
-
