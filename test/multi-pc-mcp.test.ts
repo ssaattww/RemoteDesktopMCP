@@ -1,10 +1,14 @@
 ﻿import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import {
   addExecutor,
   createInitialClusterConfig,
+  setCoordinator,
 } from "../src/node-cluster.js";
 import { NodeRegistry } from "../src/node-registry.js";
+import { CoordinatorNodeServer, ExecutorNodeClient } from "../src/node-transport.js";
 import { fixture, mcp } from "./fixture.js";
 
 const remoteId = "node_AAAAAAAAAAAAAAAAAAAAAA";
@@ -315,5 +319,217 @@ test("remote search and patch use fixed internal operations on the bound node", 
   } finally {
     await api.close();
     await f.cleanup();
+  }
+});
+
+
+async function waitForRemoteActive(registry: NodeRegistry, previousConnection?: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (true) {
+    const active = registry.activeConnection(remoteId)?.connection_id;
+    if (active && active !== previousConnection) return;
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for the remote node to become active.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("RDMCP-25-DR-003: public MCP reaches the executor common handler through authenticated node transport", async () => {
+  const local = createInitialClusterConfig("both", "Coordinator", 41000);
+  const added = addExecutor(local, remoteId, "Remote A");
+  const registry = new NodeRegistry(added.config);
+  registry.setLocalCapabilities({ operations: ["file", "transfer"], roots: [], path_base: "root" });
+
+  const executorFixture = await fixture({ nodeId: remoteId, nodeLabel: "Remote A" });
+  const server = new CoordinatorNodeServer({
+    host: "127.0.0.1",
+    expectedBindHost: "127.0.0.1",
+    port: 0,
+    config: added.config,
+    registry,
+    userStates: () => [],
+  });
+  const address = await server.start();
+  const executorBase = createInitialClusterConfig("executor", "Remote A");
+  const executorConfig = setCoordinator(
+    { ...executorBase, local: { ...executorBase.local, node_id: remoteId } },
+    "127.0.0.1",
+    address.port,
+    added.psk,
+  );
+  const client = new ExecutorNodeClient({
+    config: executorConfig,
+    capabilities: {
+      executor_generation: executorGeneration,
+      desktop_commander_generation: commanderGeneration,
+      operations: ["file", "transfer"],
+      roots: [{ root_id: "files", absolute_path: executorFixture.root }],
+      path_base: "root",
+    },
+    onRequest: (payload) => executorFixture.service.executeNodeRequest(payload),
+  });
+
+  let coordinatorFixture: Awaited<ReturnType<typeof fixture>> | undefined;
+  let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  try {
+    await writeFile(path.join(executorFixture.root, "note.txt"), "remote-through-common-handler", "utf8");
+    await client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry);
+
+    coordinatorFixture = await fixture({
+      nodeId: added.config.local.node_id,
+      nodeLabel: added.config.local.label,
+      nodeRegistry: registry,
+      nodeRequest: (nodeId, payload) => server.request(nodeId, payload),
+    });
+    api = await mcp(coordinatorFixture.service);
+    const opened = await api.call("session_open", {
+      node_id: remoteId,
+      working_directory: executorFixture.root,
+      purpose: "Common operation composition",
+    });
+    const read = await api.call("file_read", {
+      session_id: opened.session_id,
+      node_id: remoteId,
+      root_id: "files",
+      relative_path: "note.txt",
+    });
+    assert.match(String(read.output), /remote-through-common-handler/);
+  } finally {
+    await api?.close();
+    await coordinatorFixture?.cleanup();
+    await client.close();
+    await server.close();
+    await executorFixture.cleanup();
+  }
+});
+
+test("RDMCP-25-DR-001: download replay survives lost node responses and same-generation reconnects", async () => {
+  const local = createInitialClusterConfig("both", "Coordinator", 41000);
+  const added = addExecutor(local, remoteId, "Remote A");
+  const registry = new NodeRegistry(added.config);
+  registry.setLocalCapabilities({ operations: ["file", "transfer"], roots: [], path_base: "root" });
+
+  const executorFixture = await fixture({ nodeId: remoteId, nodeLabel: "Remote A", chunkBytes: 1024 });
+  await writeFile(path.join(executorFixture.root, "payload.bin"), Buffer.alloc(1536, 0x5a));
+
+  const server = new CoordinatorNodeServer({
+    host: "127.0.0.1",
+    expectedBindHost: "127.0.0.1",
+    port: 0,
+    config: added.config,
+    registry,
+    userStates: () => [],
+    requestTimeoutMs: 1_000,
+  });
+  const address = await server.start();
+  const executorBase = createInitialClusterConfig("executor", "Remote A");
+  const executorConfig = setCoordinator(
+    { ...executorBase, local: { ...executorBase.local, node_id: remoteId } },
+    "127.0.0.1",
+    address.port,
+    added.psk,
+  );
+
+  const makeClient = (blockedOffset?: number) => {
+    let handled!: () => void;
+    let release!: () => void;
+    const handledPromise = new Promise<void>((resolve) => { handled = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+    const client = new ExecutorNodeClient({
+      config: executorConfig,
+      capabilities: {
+        executor_generation: executorGeneration,
+        desktop_commander_generation: commanderGeneration,
+        operations: ["file", "transfer"],
+        roots: [{ root_id: "files", absolute_path: executorFixture.root }],
+        path_base: "root",
+      },
+      onRequest: async (payload) => {
+        const response = await executorFixture.service.executeNodeRequest(payload);
+        const request = payload as { operation?: unknown; args?: { offset?: unknown } };
+        if (request.operation === "file_transfer_download_chunk" && request.args?.offset === blockedOffset) {
+          handled();
+          await releasePromise;
+        }
+        return response;
+      },
+    });
+    return { client, handledPromise, release };
+  };
+
+  const envelope = (sessionId: string, operation: string, args: Record<string, unknown>) => ({
+    principal_id: "owner@example.test",
+    stop_generation: 0,
+    session_id: sessionId,
+    operation,
+    args,
+  });
+  const sessionId = "remote-session-for-replay";
+
+  let current = makeClient(0);
+  try {
+    await current.client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry);
+
+    const begin = await server.request(remoteId, envelope(sessionId, "file_transfer_download_begin", {
+      root_id: "files",
+      relative_path: "payload.bin",
+    })) as { transfer_id: string };
+    assert.ok(begin.transfer_id);
+
+    const firstAttempt = server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
+      transfer_id: begin.transfer_id,
+      offset: 0,
+    }));
+    await current.handledPromise;
+    const firstConnection = registry.activeConnection(remoteId)?.connection_id;
+    const firstClose = current.client.close();
+    current.release();
+    await firstClose;
+    await assert.rejects(firstAttempt, /NODE_OUTCOME_UNKNOWN|closed/i);
+
+    current = makeClient();
+    await current.client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry, firstConnection);
+    const replayedFirst = await server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
+      transfer_id: begin.transfer_id,
+      offset: 0,
+    })) as { data: string; next_offset: number; complete: boolean };
+    assert.equal(replayedFirst.next_offset, 1024);
+    assert.equal(replayedFirst.complete, false);
+
+    const finalOffset = replayedFirst.next_offset;
+    const priorConnection = registry.activeConnection(remoteId)?.connection_id;
+    await current.client.close();
+    current = makeClient(finalOffset);
+    await current.client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry, priorConnection);
+
+    const finalAttempt = server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
+      transfer_id: begin.transfer_id,
+      offset: finalOffset,
+    }));
+    await current.handledPromise;
+    const finalConnection = registry.activeConnection(remoteId)?.connection_id;
+    const finalClose = current.client.close();
+    current.release();
+    await finalClose;
+    await assert.rejects(finalAttempt, /NODE_OUTCOME_UNKNOWN|closed/i);
+
+    current = makeClient();
+    await current.client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry, finalConnection);
+    const replayedFinal = await server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
+      transfer_id: begin.transfer_id,
+      offset: finalOffset,
+    })) as { data: string; next_offset: number; complete: boolean };
+    assert.equal(replayedFinal.next_offset, 1536);
+    assert.equal(replayedFinal.complete, true);
+    assert.equal(Buffer.from(replayedFirst.data, "base64").length + Buffer.from(replayedFinal.data, "base64").length, 1536);
+  } finally {
+    current.release();
+    await current.client.close();
+    await server.close();
+    await executorFixture.cleanup();
   }
 });
