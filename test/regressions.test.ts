@@ -276,6 +276,39 @@ test("built-in file tools persist structured operation details for user monitori
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("failed upload commit does not expose existing destination content in operation detail", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const existingBody = "EXISTING_DESTINATION_SECRET";
+    const targetName = "existing-detail-target.txt";
+    await writeFile(path.join(f.root, targetName), existingBody);
+    const opened = await api.call("session_open", { working_directory: f.root, purpose: "Verify failed upload commit details" });
+    const session = String(opened.session_id);
+    const replacement = Buffer.from("replacement upload content ".repeat(4));
+    const upload = await api.call("file_transfer_upload_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: targetName,
+      size: replacement.length,
+      sha256: sha256(replacement),
+      overwrite: false,
+    });
+    await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: replacement.toString("base64") });
+    await assert.rejects(api.call("file_transfer_upload_commit", { session_id: session, transfer_id: upload.transfer_id }));
+
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_transfer_upload_commit"
+      && candidate.status === "failed"
+      && candidate.sessionId === session);
+    assert.ok(event, "missing failed upload commit audit");
+    const detail = event.detail as { entries?: Array<{ label?: unknown; value?: unknown }> } | undefined;
+    const entries = detail?.entries ?? [];
+    assert.ok(entries.some((entry) => entry.label === "エラー"), "failed commit keeps its public error detail");
+    assert.equal(entries.some((entry) => entry.label === "内容見本"), false, "failed commit must not preview a pre-existing destination");
+    assert.equal(JSON.stringify(detail).includes(existingBody), false, "pre-existing destination content must not enter the failed operation detail");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("long UTF-8 transfer previews remain text when the byte limit splits a code point", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   try {
