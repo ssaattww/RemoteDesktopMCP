@@ -309,6 +309,102 @@ test("failed upload commit does not expose existing destination content in opera
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("schema validation rejections persist safe operation detail", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+    await assert.rejects(api.callRaw("file_read", {
+      comment: "Verify schema rejection detail",
+      session_id: session,
+      root_id: "files",
+      relative_path: "schema-invalid.txt",
+      offset: -1,
+      length: 3,
+    }), /Input validation error/);
+
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_read"
+      && candidate.status === "rejected"
+      && candidate.sessionId === session);
+    assert.ok(event, "schema rejection must create a terminal operation audit");
+    assert.equal(event.reason, "input_validation");
+    const detail = event.detail as { entries?: Array<{ label?: unknown; value?: unknown }> } | undefined;
+    const entries = detail?.entries ?? [];
+    const value = (label: string) => String(entries.find((entry) => entry.label === label)?.value ?? "");
+    assert.match(value("対象"), /files.*schema-invalid\.txt/);
+    assert.match(value("読取範囲"), /offset=-1.*length=3/);
+    assert.match(value("エラー"), /Input validation error/);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("successful upload commit detail is pinned to verified upload bytes", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  const originalAudit = f.service.audit.bind(f.service);
+  try {
+    const targetName = "verified-upload-detail.txt";
+    const target = path.join(f.root, targetName);
+    const verified = Buffer.from("VERIFIED_UPLOAD_CONTENT");
+    const mutated = "MUTATED_AFTER_COMMIT";
+    const session = await openSession(api);
+    const upload = await api.call("file_transfer_upload_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: targetName,
+      size: verified.length,
+      sha256: sha256(verified),
+      overwrite: false,
+    });
+    await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: verified.toString("base64") });
+
+    f.service.audit = async (event, fields) => {
+      await originalAudit(event, fields);
+      if (event === "transfer.complete") await writeFile(target, mutated);
+    };
+    await api.call("file_transfer_upload_commit", { session_id: session, transfer_id: upload.transfer_id });
+
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_transfer_upload_commit"
+      && candidate.status === "succeeded"
+      && candidate.sessionId === session);
+    assert.ok(event, "missing successful upload commit audit");
+    const detail = event.detail as { entries?: Array<{ label?: unknown; value?: unknown }> } | undefined;
+    const preview = String(detail?.entries?.find((entry) => entry.label === "内容見本")?.value ?? "");
+    assert.match(preview, /VERIFIED_UPLOAD_CONTENT/, "detail must use the bytes verified before commit");
+    assert.doesNotMatch(preview, /MUTATED_AFTER_COMMIT/, "detail must not re-read the mutable destination path");
+  } finally {
+    f.service.audit = originalAudit;
+    await api.close();
+    await f.cleanup();
+  }
+});
+
+test("file transfer cancel detail includes the transferred position", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+    const bytes = Buffer.from("abcdef");
+    const upload = await api.call("file_transfer_upload_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "cancel-detail.txt",
+      size: bytes.length,
+      sha256: sha256(bytes),
+      overwrite: false,
+    });
+    await api.call("file_transfer_upload_chunk", { session_id: session, transfer_id: upload.transfer_id, offset: 0, data: bytes.subarray(0, 3).toString("base64") });
+    await api.call("file_transfer_cancel", { session_id: session, transfer_id: upload.transfer_id });
+
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_transfer_cancel"
+      && candidate.status === "succeeded"
+      && candidate.sessionId === session);
+    assert.ok(event, "missing transfer cancel audit");
+    const detail = event.detail as { entries?: Array<{ label?: unknown; value?: unknown }> } | undefined;
+    const position = String(detail?.entries?.find((entry) => entry.label === "位置")?.value ?? "");
+    assert.equal(position, "3");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("long UTF-8 transfer previews remain text when the byte limit splits a code point", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   try {
