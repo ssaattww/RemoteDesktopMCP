@@ -18,6 +18,15 @@ const nodeScriptCommand = (file: string) => process.platform === "win32"
 const hasAuditEvent = (text: string, event: string, processId: string) => text.split("\n").some((line) => {
   try { const entry = JSON.parse(line) as { event?: unknown; processId?: unknown }; return entry.event === event && entry.processId === processId; } catch { return false; }
 });
+const transferAuditEvents = async (dataDir: string, transferId: string) => {
+  const text = await readFile(path.join(dataDir, "audit.jsonl"), "utf8");
+  return text.split("\n").flatMap((line) => {
+    try {
+      const entry = JSON.parse(line) as { event?: unknown; transferId?: unknown; direction?: unknown; sessionId?: unknown; size?: unknown; sha256?: unknown };
+      return entry.transferId === transferId ? [entry] : [];
+    } catch { return []; }
+  });
+};
 const safeAuditDetail = (value: unknown): string | undefined => {
   if (typeof value !== "string") return undefined;
   const redacted = value.replace(/(?:[A-Za-z]:)?(?:[\\/][^\s"']+)+/g, "[path]").replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]");
@@ -192,6 +201,8 @@ test("Issue 29: small transfers complete in one MCP call while large transfers k
     assert.equal(downloaded.next_offset, downloadBytes.length);
     assert.deepEqual(Buffer.from(downloaded.data as string, "base64"), downloadBytes);
     assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: downloaded.transfer_id })).state, "complete");
+    const inlineDownloadAudit = await transferAuditEvents(f.data, downloaded.transfer_id as string);
+    assert.ok(inlineDownloadAudit.some((entry) => entry.event === "transfer.complete" && entry.direction === "download" && entry.sessionId === session && entry.size === downloadBytes.length && entry.sha256 === sha256(downloadBytes)), "inline download completion must be audited with transfer metadata");
 
     const uploadBytes = Buffer.from("single-call upload");
     const uploaded = await api.call("file_transfer_upload_begin", {
@@ -213,7 +224,12 @@ test("Issue 29: small transfers complete in one MCP call while large transfers k
     const largeDownload = await api.call("file_transfer_download_begin", { session_id: session, root_id: "files", relative_path: "large-download.bin", inline: true });
     assert.equal(largeDownload.complete, false);
     assert.equal(largeDownload.data, undefined);
-    await api.call("file_transfer_cancel", { session_id: session, transfer_id: largeDownload.transfer_id });
+    const firstLargeChunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: largeDownload.transfer_id, offset: 0 });
+    assert.equal(firstLargeChunk.complete, false);
+    const finalLargeChunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: largeDownload.transfer_id, offset: 1024 });
+    assert.equal(finalLargeChunk.complete, true);
+    const chunkedDownloadAudit = await transferAuditEvents(f.data, largeDownload.transfer_id as string);
+    assert.ok(chunkedDownloadAudit.some((entry) => entry.event === "transfer.complete" && entry.direction === "download" && entry.sessionId === session && entry.size === largeBytes.length && entry.sha256 === sha256(largeBytes)), "chunked download completion must be audited with transfer metadata");
 
     await assert.rejects(api.call("file_transfer_upload_begin", {
       session_id: session,
