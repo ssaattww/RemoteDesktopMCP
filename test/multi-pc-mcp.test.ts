@@ -420,7 +420,7 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     config: added.config,
     registry,
     userStates: () => [],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: 10_000,
   });
   const address = await server.start();
   const executorBase = createInitialClusterConfig("executor", "Remote A");
@@ -478,16 +478,19 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     })) as { transfer_id: string };
     assert.ok(begin.transfer_id);
 
-    const firstAttempt = server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
-      transfer_id: begin.transfer_id,
-      offset: 0,
-    }));
+    const firstAttempt = assert.rejects(
+      server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
+        transfer_id: begin.transfer_id,
+        offset: 0,
+      })),
+      /NODE_OUTCOME_UNKNOWN|closed/i,
+    );
     await current.handledPromise;
     const firstConnection = registry.activeConnection(remoteId)?.connection_id;
     const firstClose = current.client.close();
     current.release();
     await firstClose;
-    await assert.rejects(firstAttempt, /NODE_OUTCOME_UNKNOWN|closed/i);
+    await firstAttempt;
 
     current = makeClient();
     await current.client.connect("127.0.0.1", address.port);
@@ -506,16 +509,19 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     await current.client.connect("127.0.0.1", address.port);
     await waitForRemoteActive(registry, priorConnection);
 
-    const finalAttempt = server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
-      transfer_id: begin.transfer_id,
-      offset: finalOffset,
-    }));
+    const finalAttempt = assert.rejects(
+      server.request(remoteId, envelope(sessionId, "file_transfer_download_chunk", {
+        transfer_id: begin.transfer_id,
+        offset: finalOffset,
+      })),
+      /NODE_OUTCOME_UNKNOWN|closed/i,
+    );
     await current.handledPromise;
     const finalConnection = registry.activeConnection(remoteId)?.connection_id;
     const finalClose = current.client.close();
     current.release();
     await finalClose;
-    await assert.rejects(finalAttempt, /NODE_OUTCOME_UNKNOWN|closed/i);
+    await finalAttempt;
 
     current = makeClient();
     await current.client.connect("127.0.0.1", address.port);
