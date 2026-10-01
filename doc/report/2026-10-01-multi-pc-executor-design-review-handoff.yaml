@@ -1,0 +1,233 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: initial_review
+  generated_at: 2026-10-01T13:42:25+09:00
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #28"
+task_id: null
+branch: issue-25-design
+base_ref: main
+target:
+  current_head: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  reviewed_head: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  commit_range: "origin/main...9908eb6e5ff198bfb8cea85f5a4386856767bd52"
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  machine_id: local
+  connection: available
+  os: Windows
+  shell: cmd
+  reviewed_working_directory: 'C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue25'
+  report_working_directory: 'C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-multi-pc-design-review'
+  source_state: clean
+  ownership: current_task
+  evidence:
+    - Exact reviewed HEAD matched PR current HEAD throughout review.
+    - Implementation worktree was read-only for this review.
+    - Review report uses a separate worktree and branch.
+verification:
+  capability: local_execution_available
+  technical_head: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  ci_wait:
+    state: unavailable
+    required_for: current_head
+    reason: no workflow run with matching headSha
+authoritative_requirements:
+  - source: github_issue
+    reference: "Issue #25"
+    summary: multiple registered PCs, authenticated executor connections, explicit node routing, reconnect, local-only node management
+  - source: user_instruction
+    reference: current chat
+    summary: review the design for RDMCP #25
+development_policy:
+  method: review_only
+  testing_order: inspect then validate
+blocked: []
+authorized_actions:
+  - read_repository
+  - write_report
+  - write_handoff
+  - commit
+  - push
+  - comment_pr
+write_boundary:
+  allowed:
+    - path_or_operation: doc/report/2026-10-01-multi-pc-executor-design-review.md
+      reason: detailed review report
+    - path_or_operation: doc/report/2026-10-01-multi-pc-executor-design-review-handoff.yaml
+      reason: lossless review handoff
+  forbidden:
+    - path_or_operation: product_or_design_fixes
+      reason: reviewer boundary
+    - path_or_operation: merge
+      reason: user boundary
+scope:
+  - multiple-PC executor registration and routing design
+  - reconnect and transfer state semantics
+  - direct design dependencies
+non_goals:
+  - implement findings
+  - merge
+files:
+  inspected:
+    - path: doc/design/functional-requirements.md
+      purpose: requirements
+    - path: doc/design/multi-pc-architecture.md
+      purpose: detailed multiple-PC design
+    - path: doc/workflow/multi-pc-executor-registration-workflow.md
+      purpose: implementation and validation workflow
+    - path: doc/design/file-paths-and-live-logs.md
+      purpose: direct node_list path contract dependency
+    - path: doc/design/tailscale-funnel-architecture.md
+      purpose: exposure and Tailscale boundary
+    - path: doc/design/user-console-emergency-stop.md
+      purpose: user stop generation dependency
+    - path: .github/workflows/lint.yml
+      purpose: failure diagnostics artifacts
+    - path: src/index.ts
+      purpose: implementation contract evidence
+    - path: src/node-transport.ts
+      purpose: node transport outcome semantics
+    - path: test/multi-pc-mcp.test.ts
+      purpose: MCP routing tests
+    - path: test/multi-pc-registry.test.ts
+      purpose: registry tests
+    - path: test/multi-pc-transport.test.ts
+      purpose: transport tests
+    - path: test/multi-pc.test.ts
+      purpose: config and CLI tests
+commands:
+  - command: npm.cmd run lint:md
+    result: passed
+    head_sha: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+    evidence: markdownlint 62 files, 0 issues
+  - command: npm.cmd run lint:md:terms:design
+    result: passed
+    head_sha: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  - command: git diff --check origin/main...HEAD -- design files
+    result: passed
+    head_sha: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  - command: npm.cmd run check
+    result: passed
+    head_sha: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  - command: node --import tsx --test test/multi-pc.test.ts test/multi-pc-registry.test.ts test/multi-pc-transport.test.ts test/multi-pc-mcp.test.ts
+    result: passed
+    head_sha: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+    evidence: 23 passed, 0 failed
+  - command: git diff --check origin/main...HEAD
+    result: failed_outside_design_scope
+    exit_code: 2
+    evidence: three implementation/test files contain a new blank line at EOF
+tests:
+  - name: focused multiple-PC tests
+    phase: verification
+    result: passed
+    head_sha: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+    evidence: 23/23
+ci:
+  required: true
+  workflow: lint
+  run_id: null
+  head_sha: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  conclusion: not_run
+  note: run 36806648645 is success for e0c85779fe44a40f46a7972604cc4d229217be1f and was not substituted
+review:
+  mode: initial_review
+  reviewed_head: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  reviewer:
+    identity: current PR #28 design review chat
+    role: normal_reviewer
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: true
+  verdict: fail
+  required_coverage:
+    - criterion: requirement and design conformance
+      disposition: checked_finding
+      evidence: RDMCP-25-DR-002
+    - criterion: correctness and edge cases
+      disposition: checked_finding
+      evidence: RDMCP-25-DR-001
+    - criterion: scope discipline and unrelated changes
+      disposition: checked_observation
+      evidence: PR body scope does not match current implementation commits
+    - criterion: changed files and direct dependency impact
+      disposition: checked_finding
+      evidence: RDMCP-25-DR-002
+    - criterion: API data configuration workflow compatibility
+      disposition: checked_finding
+      evidence: RDMCP-25-DR-002
+    - criterion: error handling and failure diagnostics
+      disposition: checked_finding
+      evidence: RDMCP-25-DR-001
+    - criterion: security and secret handling
+      disposition: checked_no_finding
+      evidence: PSK and authenticated-frame handling inspected
+    - criterion: tests and validation adequacy
+      disposition: checked_finding
+      evidence: missing lost-download-response recovery fixture
+    - criterion: current-HEAD CI evidence
+      disposition: unavailable
+      evidence: no matching headSha run
+    - criterion: report tracking documentation accuracy
+      disposition: checked_observation
+      evidence: PR body scope mismatch
+    - criterion: regression and maintainability risks
+      disposition: checked_finding
+      evidence: RDMCP-25-DR-001
+findings:
+  - id: RDMCP-25-DR-001
+    severity: high
+    origin: introduced_by_change
+    location: "doc/design/multi-pc-architecture.md:614,644-646,674-680,974"
+    description: remote download transfer cannot recover a chunk whose executor-side state advanced before its response was lost
+    impact: same-generation reconnect can report a next offset after bytes the coordinator never received; final-chunk loss may leave no snapshot to replay
+    required_action: define idempotent/acknowledged download replay semantics and add middle/final response-loss reconnect tests
+  - id: RDMCP-25-DR-002
+    severity: medium
+    origin: introduced_by_change
+    location: "doc/design/file-paths-and-live-logs.md:15-17 versus functional-requirements.md:31,254 and multi-pc-architecture.md:804,1072"
+    description: node_list is sessionless pre-session discovery in the new design but a direct dependency still requires an active session
+    impact: authoritative design documents describe mutually incompatible API preconditions
+    required_action: align file-paths-and-live-logs.md with authenticated but session-optional node_list semantics
+held:
+  - item: current PR whitespace errors outside design files
+    reason: implementation review is outside this review scope
+    owner: implementation worker
+    remaining_risk: full diff check fails
+  - item: PR body says code implementation is out of scope
+    reason: administrative scope metadata, not a design defect
+    owner: PR owner
+    remaining_risk: reviewers may apply incorrect scope
+unexplored:
+  - area: exact-current-HEAD GitHub Actions
+    blocker: no run exists for reviewed head
+    remaining_risk: CI-only failure
+not_applicable:
+  - field_or_area: independent final attestation
+    reason: normal failing review
+  - field_or_area: merge
+    reason: user boundary
+report:
+  report_type: review_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-10-01-multi-pc-executor-design-review.md
+    - doc/report/2026-10-01-multi-pc-executor-design-review-handoff.yaml
+  reviewed_head: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+next_action:
+  type: design_rework
+  target_skill: chat-implementation-worker
+  mode: review_followup
+  summary: Address RDMCP-25-DR-001 and RDMCP-25-DR-002, then return to this review chat for verification.
+  instructions:
+    - Preserve finding IDs and severities.
+    - Add explicit failure-injection evidence for RDMCP-25-DR-001.
+    - Do not treat a non-matching CI run as current-HEAD evidence.
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-10-01-multi-pc-executor-design-review-handoff.yaml
