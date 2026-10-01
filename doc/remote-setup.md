@@ -1,4 +1,4 @@
-# ChatGPT からこの PC を操作する設定
+﻿# ChatGPT からこの PC を操作する設定
 
 この手順は、Google 認証を使い、Tailscale Funnel 経由で1台の Windows PC に接続するためのものです。
 Google の設定と本人ログインを終えるまで、ChatGPT からの操作は利用できません。
@@ -131,3 +131,12 @@ ChatGPT の接続画面や開発者モードの利用可否はアカウント設
 | 再起動で認証をやり直す必要がある | `.env` の署名用設定と `DATA_DIR` を保持したか。認証中の再起動は最初からやり直す |
 
 秘密を含む `.env`、Google JSON、トークン、認可コードを問題報告へ添付しないでください。
+
+## 複数PC executor 運用手順（DR005 対応）
+
+executor追加、PSK更新、登録解除は専用CLI経由で行う。
+
+- coordinator側でexecutorを登録し専用PSKを発行する。
+- executor側はPSKを標準入力で設定し、引数や履歴へ残さない。
+- PSK更新や削除では既存接続と旧世代操作対応を無効化する。
+- node_id、表示名、接続状態を確認し、PSKは表示しない。
