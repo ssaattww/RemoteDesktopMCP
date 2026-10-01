@@ -337,6 +337,28 @@ test("schema validation rejections persist safe operation detail", async () => {
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("schema validation rejection bounds oversized comments before audit persistence", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+    await assert.rejects(api.callRaw("file_read", {
+      comment: "c".repeat(5_001),
+      session_id: session,
+      root_id: "files",
+      relative_path: "schema-invalid.txt",
+      offset: -1,
+      length: 3,
+    }), /Input validation error/);
+
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_read"
+      && candidate.status === "rejected"
+      && candidate.sessionId === session);
+    assert.ok(event, "oversized rejected comment must still create a terminal operation audit");
+    assert.equal(String(event.comment ?? "").length, 500, "rejected comment must obey the normal schema limit before audit persistence");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("successful upload commit detail is pinned to verified upload bytes", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   const originalAudit = f.service.audit.bind(f.service);
