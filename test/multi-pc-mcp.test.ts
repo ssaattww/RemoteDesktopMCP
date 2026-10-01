@@ -135,3 +135,113 @@ test("session_open rejects an explicitly selected registered node while it is di
   }
 });
 
+test("file_read dispatches to the session node and rejects a different node_id", async () => {
+  const { configured, registry } = clusterRegistry();
+  activateRemote(registry);
+  const remoteRequests: Array<Record<string, unknown>> = [];
+  const f = await fixture({
+    nodeId: configured.local.node_id,
+    nodeLabel: configured.local.label,
+    nodeRegistry: registry,
+    nodeRequest: async (nodeId: string, payload: unknown) => {
+      assert.equal(nodeId, remoteId);
+      assert.ok(payload && typeof payload === "object" && !Array.isArray(payload));
+      const request = payload as Record<string, unknown>;
+      remoteRequests.push(request);
+      if (request.operation === "session_validate_working_directory") {
+        const args = request.args as { working_directory?: unknown };
+        return { working_directory: args.working_directory };
+      }
+      if (request.operation === "file_read") return { output: "remote-data" };
+      throw new Error("unexpected remote operation");
+    },
+  });
+  const api = await mcp(f.service);
+  try {
+    const opened = await api.call("session_open", {
+      node_id: remoteId,
+      working_directory: "D:\\work",
+      purpose: "Remote read",
+    });
+    const read = await api.call("file_read", {
+      session_id: opened.session_id,
+      node_id: remoteId,
+      root_id: "remote",
+      relative_path: "note.txt",
+    });
+    assert.equal(read.output, "remote-data");
+
+    const fileRequest = remoteRequests.find((request) => request.operation === "file_read");
+    assert.ok(fileRequest);
+    assert.equal(fileRequest.principal_id, "owner@example.test");
+    assert.equal(fileRequest.stop_generation, 0);
+    assert.equal(fileRequest.session_id, opened.session_id);
+    assert.deepEqual(fileRequest.args, {
+      root_id: "remote",
+      relative_path: "note.txt",
+    });
+
+    const beforeMismatch = remoteRequests.length;
+    await assert.rejects(
+      api.call("file_read", {
+        session_id: opened.session_id,
+        node_id: configured.local.node_id,
+        root_id: "files",
+        relative_path: "local.txt",
+      }),
+      /SESSION_NODE_MISMATCH|session.*node/i,
+    );
+    assert.equal(remoteRequests.length, beforeMismatch);
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
+
+test("remote file_read rejects a disconnected bound node without failover", async () => {
+  const { configured, registry } = clusterRegistry();
+  activateRemote(registry);
+  let fileReadRequests = 0;
+  const f = await fixture({
+    nodeId: configured.local.node_id,
+    nodeLabel: configured.local.label,
+    nodeRegistry: registry,
+    nodeRequest: async (_nodeId: string, payload: unknown) => {
+      assert.ok(payload && typeof payload === "object" && !Array.isArray(payload));
+      const request = payload as Record<string, unknown>;
+      if (request.operation === "session_validate_working_directory") {
+        const args = request.args as { working_directory?: unknown };
+        return { working_directory: args.working_directory };
+      }
+      if (request.operation === "file_read") {
+        fileReadRequests += 1;
+        return { output: "must-not-be-used" };
+      }
+      throw new Error("unexpected remote operation");
+    },
+  });
+  const api = await mcp(f.service);
+  try {
+    const opened = await api.call("session_open", {
+      node_id: remoteId,
+      working_directory: "D:\\work",
+      purpose: "Disconnect check",
+    });
+    registry.disconnect(remoteId, connectionId);
+
+    await assert.rejects(
+      api.call("file_read", {
+        session_id: opened.session_id,
+        node_id: remoteId,
+        root_id: "remote",
+        relative_path: "note.txt",
+      }),
+      /disconnected/i,
+    );
+    assert.equal(fileReadRequests, 0);
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
+
