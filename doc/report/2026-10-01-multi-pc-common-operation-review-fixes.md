@@ -88,12 +88,12 @@ RDMCP の `process_start` は復旧し、技術 HEAD `6134288bc231a63dce5dcb9a50
 
 ### GitHub Actions
 
-- Git branch `issue-25-design` の ref は技術 HEAD `6134288bc231a63dce5dcb9a50b02c47a1bc8446` まで更新されている。
-- 確認時点の GitHub PR #28 metadata は `831e95a8d43ce3ceb710cde22247a3fe7723b5ce` を HEAD として返しており、branch ref への追随に遅延がある。
-- workflow run 一覧には `831e95a...`、`6134288...` のどちらと一致する `pull_request` run も存在しない。
+- 技術 HEAD は `6134288bc231a63dce5dcb9a50b02c47a1bc8446` で、以降のコミットは report / handoff と CI 起動確認だけを対象とする。
+- PR #28 metadata と branch ref は CI 起動確認用の空コミット `1bd79ebed2d4d2644974d194e5d4d239961c1586` まで一致することを確認した。
+- `1bd79ebed2d4d2644974d194e5d4d239961c1586` と一致する `pull_request` workflow run は確認時点で0件だった。
 - したがって CI は未実施として扱い、過去 SHA の成功 run は代用していない。
-- `.github/workflows/lint.yml` には失敗調査用のテスト結果、標準出力、標準エラー、環境ログを保存する artifact 構成が既にあるため、今回の指摘対応では workflow を変更していない。
-- この report 追加後は branch HEAD が変わるため、最終 PR HEAD と一致する run の有無は PR コメントで記録する。
+- `.github/workflows/lint.yml` は `main` と同一で、`pull_request:` トリガーと失敗調査用のテスト結果、標準出力、標準エラー、環境ログを保存する artifact 構成を保持している。
+- この report-only 訂正の push 後は branch HEAD が再度変わるため、最終 PR HEAD と一致する run の有無を PR コメントで記録する。
 
 ### 静的確認
 

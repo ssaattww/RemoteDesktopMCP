@@ -82,9 +82,9 @@ verification:
     added_line_trailing_whitespace_detected: false
   ci:
     branch_technical_head: 6134288bc231a63dce5dcb9a50b02c47a1bc8446
-    pr_metadata_head_at_check: 831e95a8d43ce3ceb710cde22247a3fe7723b5ce
+    pr_metadata_head_at_check: 1bd79ebed2d4d2644974d194e5d4d239961c1586
     matching_pull_request_runs: 0
-    state: pr_head_metadata_lag_ci_pending
+    state: exact_head_ci_triggered_but_run_missing
     alternate_sha_used: false
   diagnostics:
     workflow: .github/workflows/lint.yml
@@ -93,11 +93,11 @@ report:
   path: doc/report/2026-10-01-multi-pc-common-operation-review-fixes.md
   status: updated_pending_push
 remaining_risks:
-  - exact PR current HEAD CI evidence is still unavailable because PR metadata has not followed the branch ref yet
+  - exact PR current HEAD CI evidence is still unavailable because no matching pull_request workflow run has been created
   - remote upload public-id to remote_transfer_id mapping remains later implementation scope
   - remote process public-id to remote_process_id mapping remains later implementation scope
 next_action:
   type: review
-  summary: push the updated report, re-read PR current HEAD, check only exact-head CI, then return DR-001 and DR-003 to normal re-review
+  summary: push this report-only verification correction, check only the resulting exact-head CI, then return DR-001 and DR-003 to normal re-review
 merge:
   performed: false
