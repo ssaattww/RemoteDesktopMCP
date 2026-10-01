@@ -1108,7 +1108,9 @@ test("REV001: operation correlation ownership only accepts active owned sessions
   try {
     await f.service.audit("session.open", { user: "owner@example.test", sessionId: "historical-session" });
     assert.equal(f.service.userOwnsActiveSession("owner@example.test", "historical-session"), false);
-    const opened = await f.service.openSession("owner@example.test", process.cwd(), "REV001 correlation test");
-    assert.equal(f.service.userOwnsActiveSession("owner@example.test", opened.id), true);
+    const api = await mcp(f.service);
+    const opened = await api.call("session_open", { working_directory: process.cwd(), purpose: "REV001 correlation test" });
+    assert.equal(f.service.userOwnsActiveSession("owner@example.test", String(opened.session_id)), true);
+    await api.close();
   } finally { await f.cleanup(); }
 });
