@@ -1,0 +1,102 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #28"
+branch: issue-25-design
+base_ref: main
+target:
+  previous_reviewed_head: 9908eb6e5ff198bfb8cea85f5a4386856767bd52
+  current_head: ad7fb065a99740c43453f5fab58b8bc2ef837422
+  reviewed_head: ad7fb065a99740c43453f5fab58b8bc2ef837422
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  working_directory: 'C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue25'
+  head_sha: ad7fb065a99740c43453f5fab58b8bc2ef837422
+  source_state: clean
+  ownership: other_task_read_only
+verification:
+  capability: local_execution_available
+  technical_head: ad7fb065a99740c43453f5fab58b8bc2ef837422
+  ci_wait:
+    state: unavailable
+    reason: no matching pull_request workflow run
+review:
+  mode: fix_verification
+  reviewed_head: ad7fb065a99740c43453f5fab58b8bc2ef837422
+  reviewer:
+    identity: current PR #28 normal review chat
+    role: normal_reviewer
+    continuity:
+      changed: false
+      reason: same chat as initial review
+  verdict: fail
+  completeness_matrix:
+    - finding_id: RDMCP-25-DR-001
+      required_action: remote node response-loss replay for middle and final chunks
+      production_path: src/index.ts downloadReplay/file_transfer_download_chunk
+      actual_composition_fixture: missing; current test reconnects public MCP client only
+      focused_evidence: focused test passed but does not traverse CoordinatorNodeServer/ExecutorNodeClient
+    - finding_id: RDMCP-25-DR-002
+      required_action: align node_list session contract
+      production_path: design docs and existing node_list tool
+      actual_composition_fixture: test/multi-pc-mcp.test.ts pre-session node_list test
+      focused_evidence: passed
+findings:
+  - id: RDMCP-25-DR-001
+    severity: high
+    origin: introduced_by_change
+    location: remote download response-loss/reconnect path
+    description: replay state exists but the required node-to-node response-loss composition path is not tested
+    impact: remote implementation may still fail to recover an unreceived chunk
+    required_action: add actual node transport fault-injection fixture and prove shared transfer core
+    disposition: open
+  - id: RDMCP-25-DR-002
+    severity: medium
+    origin: introduced_by_change
+    location: node_list session contract
+    description: direct dependency contract was aligned
+    impact: resolved
+    required_action: none
+    disposition: closed
+  - id: RDMCP-25-DR-003
+    severity: medium
+    origin: pre_existing
+    location: src/index.ts remote routing and src/node-transport.ts executor onRequest
+    description: public MCP and executor internal operations do not have one canonical typed operation registry and shared execution core
+    impact: duplicated remote implementations can drift in validation, replay semantics, capability mapping and audit
+    required_action: centralize internal operation contract and reuse the same core handlers from MCP and executor adapters
+    disposition: open
+validation:
+  - command: npm.cmd run lint
+    result: passed
+  - command: npm.cmd run check
+    result: passed
+  - command: focused DR001 + node_list tests
+    result: 2/2 passed
+  - command: git diff --check origin/main...HEAD
+    result: passed
+  - command: npm.cmd test
+    result: unavailable
+    evidence: RDMCP process_start internal failure/timeout prevented a completed full-suite result
+ci:
+  matching_run: null
+  conclusion: not_run
+remaining_risks:
+  - actual remote node response-loss behavior is not proven
+  - operation contract and execution logic can drift between public and executor paths
+next_action:
+  type: design_rework
+  target_skill: chat-implementation-worker
+  mode: review_followup
+  summary: Address RDMCP-25-DR-001 and RDMCP-25-DR-003, then return to the same normal review chat.
+  instructions:
+    - Preserve finding IDs and severities.
+    - Build one shared operation core/registry where practical.
+    - Add an actual node transport response-loss composition fixture for DR-001.
+    - Do not substitute CI from another SHA.
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-10-01-multi-pc-executor-design-rereview-handoff.yaml
