@@ -8,9 +8,9 @@
 - ベース: `main`
 - 対象プルリクエスト: #28
 - 指摘元レビュー HEAD: `ad7fb065a99740c43453f5fab58b8bc2ef837422`
-- 指摘対応の技術 HEAD: `6214352db8d30bbc7f95feaa21f63255e6de4a29`
+- 指摘対応の技術 HEAD: `6134288bc231a63dce5dcb9a50b02c47a1bc8446`
 - 実装モード: review follow-up
-- 検証能力: `remote_ci_only`
+- 検証能力: `local_execution_available`
 
 ## 対象指摘
 
@@ -38,8 +38,9 @@
 - `CoordinatorNodeServer.request` と `ExecutorNodeClient.onRequest` を `NodeOperationRequest` に固定した。
 - 実行ノードの transport 境界で `parseNodeOperationRequest` を実行し、未知操作や不正入力を共通処理へ渡さないようにした。
 - `RemoteDesktopService.executeNodeRequest` と内部 `executeNodeOperation` を共通実行経路として追加した。
-- 現在遠隔対応対象になっている検索、読取、部分編集、ダウンロード開始・チャンク・状態確認・中断を共通処理へ集約した。
-- ダウンロードの位置更新、SHA-256 更新、`downloadReplay` を含む状態機械を共通実行処理へ移した。
+- 検索、読取、部分編集、ダウンロード、アップロード、プロセス操作の内部処理を共通実行処理へ集約した。
+- ダウンロードの位置更新、SHA-256 更新、`downloadReplay`、アップロードの一時ファイル・確定処理、プロセス所有・状態監視を共通実行処理へ移した。
+- 公開 MCP 側の upload / process は薄い adapter とし、ローカル実行では同じ operation registry と共通 handler を呼ぶようにした。
 - 任意の Desktop Commander ツール名を実ノード間 transport に送って `NODE_REQUEST_FAILED` になる境界試験を追加した。
 - operation registry の capability、入力 schema、応答 schema を固定する試験を追加した。
 
@@ -53,27 +54,46 @@
 | `c09239927483fe7a05680df541d1208297e54adb` | 共通操作基盤と実構成故障注入の設計契約を文書化 |
 | `6dc92f5932e7eacce0c45fa24fcddf9735dca42a` | transport 試験のセッション識別子を共通 parser 契約へ適合 |
 | `6214352db8d30bbc7f95feaa21f63255e6de4a29` | 未定義操作拒否と registry schema の境界試験を追加 |
+| `e8da598f93b48292600641ca34b94d8c58dee578` | 応答喪失試験の要求期限と rejection 捕捉を安定化 |
+| `c0ba7083b728b6efbb658d93611b2396f3194664` | ノード応答喪失を決定的に再現する fixture へ改善 |
+| `24f6a9daf1856700e0d4a34823c568b6b275844b` | upload の registry・状態機械・公開 adapter を共通化 |
+| `831e95a8d43ce3ceb710cde22247a3fe7723b5ce` | 設計用語 lint の列挙表現を修正 |
+| `6134288bc231a63dce5dcb9a50b02c47a1bc8446` | process の registry・状態監視・公開 adapter を共通化 |
 
 ## TDD 状態
 
 実構成試験は `8cd0fec...` で実装コミット `877ba1f...` より先に追加した。
 
-ただし現在の実行環境では RDMCP の `process_start` が `Process start failed.` となり、Remote Desktop Commander の全端末も offline である。さらにテスト先行 HEAD に完全一致する GitHub Actions run が発生しなかった。このため、テストを先に配置した Git 履歴は存在するが、RED の実行結果は観測できていない。RED を確認済みとは扱わない。
+RDMCP の `process_start` 復旧後に TDD と回帰検証を再開した。
+
+- RDMCP-25-DR-001 は actual composition 試験の初回実行で `NODE_OUTCOME_UNKNOWN` を再現した。原因を切り分け、通常の download begin を誤って1秒で期限切れにしないことと、意図的な切断 rejection を発生時点から捕捉するよう fixture を修正した後、単独試験 1/1 が成功した。
+- RDMCP-25-DR-003 の upload 共通 handler 試験は、共通 registry 実装前に `Node operation is not supported.` で失敗することを確認し、その後の共通化実装で成功へ転じた。
+- process 共通 handler と registry の focused test は共通化後に 2/2 成功した。
+
+応答喪失試験の最初期コミット `8cd0fec...` については当時実行経路が利用できず、当該コミットそのものの RED 実行証跡はない。今回復旧後の失敗・成功記録を検証根拠とする。
 
 ## 検証
 
 ### 実行環境
 
-- RDMCP: ファイル系操作は利用できたが `process_start` は最小コマンドでも `Process start failed.`。
-- Remote Desktop Commander: 確認時点で全端末 offline。
-- よってローカルの lint、型検査、build、focused test、全テストを current HEAD に対して実行できていない。
+RDMCP の `process_start` は復旧し、技術 HEAD `6134288bc231a63dce5dcb9a50b02c47a1bc8446` の内容に対してローカル検証を実行できた。
+
+- `npm run lint`: 成功。Markdown 64ファイル、0 issue。設計用語検査も成功。
+- `npm run check`: 成功。
+- `npm run build`: 成功。
+- 複数PC focused tests: 25/25 成功。
+- upload / process 既存回帰試験: 4/4 成功。
+- 全テスト: 124件中123件成功、1件はPOSIX専用試験のためWindowsで除外、失敗0件。
+- `git diff --check origin/main...HEAD`: 成功。
 
 ### GitHub Actions
 
-- 技術 HEAD `6214352db8d30bbc7f95feaa21f63255e6de4a29` に一致する workflow run: 0件。
-- CI は未実施として扱う。
-- 過去 SHA の成功 run は代用していない。
+- Git branch `issue-25-design` の ref は技術 HEAD `6134288bc231a63dce5dcb9a50b02c47a1bc8446` まで更新されている。
+- 確認時点の GitHub PR #28 metadata は `831e95a8d43ce3ceb710cde22247a3fe7723b5ce` を HEAD として返しており、branch ref への追随に遅延がある。
+- workflow run 一覧には `831e95a...`、`6134288...` のどちらと一致する `pull_request` run も存在しない。
+- したがって CI は未実施として扱い、過去 SHA の成功 run は代用していない。
 - `.github/workflows/lint.yml` には失敗調査用のテスト結果、標準出力、標準エラー、環境ログを保存する artifact 構成が既にあるため、今回の指摘対応では workflow を変更していない。
+- この report 追加後は branch HEAD が変わるため、最終 PR HEAD と一致する run の有無は PR コメントで記録する。
 
 ### 静的確認
 
@@ -86,7 +106,7 @@ GitHub 上の PR 差分について次を確認した。
 - 共通内部操作契約と共通実行処理を要求する設計記述が存在する。
 - PR 差分の追加行に末尾空白を検出していない。
 
-これらはソース構造の確認であり、コンパイル・テスト成功の代替ではない。
+これらの静的確認に加え、上記の型検査、build、focused tests、全テストでも成功を確認した。
 
 ## 設計更新
 
@@ -106,16 +126,14 @@ GitHub 上の PR 差分について次を確認した。
 
 ## 残存リスクと未確認事項
 
-- current HEAD はコンパイル・実行試験未確認。
-- RDMCP-25-DR-001 の実構成故障注入試験は追加済みだが未実行。
-- RDMCP-25-DR-003 の共通操作境界試験も追加済みだが未実行。
-- operation registry は現在遠隔対応候補になっているファイル操作とダウンロード系を中心に共通化している。今後アップロード・プロセスを遠隔対応する際も、設計契約どおり同じ registry と共通実行処理へ追加する必要がある。
-- current HEAD に一致する CI 証跡がないため、指摘解消の技術的合格判定はまだできない。
+- RDMCP-25-DR-001 の actual composition 故障注入試験と RDMCP-25-DR-003 の共通 operation core 試験は実行済みで成功している。
+- upload / process を含む内部 operation registry とローカル公開 MCP adapter の共通化は完了した。
+- 遠隔アップロードの公開 ID と `remote_transfer_id` の対応、遠隔プロセスの公開論理IDと `remote_process_id` の対応は、このレビュー指摘対応の範囲外として未実装のままである。
+- PR metadata の HEAD が branch ref へ追随しておらず、current PR HEAD と完全一致する CI 証跡をまだ取得できていない。このためレビュー指摘の最終合格判定は CI と再レビュー待ちである。
 
 ## 次の操作
 
-1. 利用可能な実行経路が復旧したら `npm run lint`、`npm run check`、`npm run build`、対象 focused test、全テストを current HEAD で実行する。
-2. 失敗時は既存の診断 artifact 契約に従い stdout、stderr、テスト結果、必要ログを保存して原因調査する。
-3. PR current HEAD と完全一致する `pull_request` workflow run を確認する。一致 run がなければ引き続き CI 未実施とする。
-4. 同一 finding ID のまま通常再レビューへ戻し、RDMCP-25-DR-001 と RDMCP-25-DR-003 の解消確認を依頼する。
-5. merge は利用者が行う。
+1. この report / handoff 更新を push し、GitHub PR metadata の current HEAD を再取得する。
+2. その current HEAD と完全一致する `pull_request` workflow run だけを確認する。一致 run がなければ CI 未実施として報告し、別 SHA を代用しない。
+3. 同一 finding ID のまま通常再レビューへ戻し、RDMCP-25-DR-001 と RDMCP-25-DR-003 の解消確認を依頼する。
+4. merge は利用者が行う。
