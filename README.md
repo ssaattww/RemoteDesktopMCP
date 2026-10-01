@@ -79,7 +79,10 @@ npm.cmd run lint
 ことを確認してください。
 
 RemoteDesktopMCP 専用の Desktop Commander 設定と private cache は `DATA_DIR` 内に隔離し、
-既存ユーザーの Desktop Commander 設定を変更しません。Desktop Commander と
+既存ユーザーの Desktop Commander 設定を変更しません。
+`DATA_DIR` 自体は親フォルダから権限を継承できます。認証状態と監査ログの
+ファイルは、本人・SYSTEM・Administrators のみがアクセスできる設定を維持します。
+Desktop Commander と
 `process_start` の子プロセスは、サーバー起動時の `USERPROFILE`、`APPDATA`、
 `LOCALAPPDATA`、`HOME` などのユーザー環境を継承し、CLI ごとの設定先は
 上書きしません。`process_start` はこのサーバーと同じ OS ユーザーの任意コマンドを

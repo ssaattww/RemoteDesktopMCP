@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createLocalJWKSet, jwtVerify, type JWTVerifyOptions } from "jose";
-import { assertPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory } from "./private-storage.js";
+import { assertPrivateFile, createPrivateTemporaryFile, ensureSafeDataDirectory } from "./private-storage.js";
 
 export const CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json";
 export const CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect";
@@ -16,6 +16,8 @@ const TRANSACTION_TTL = 5 * 60_000;
 const CODE_TTL = 5 * 60_000;
 const ACCESS_TTL = 10 * 60;
 const REFRESH_TTL = 7 * 24 * 60 * 60_000;
+const REFRESH_RETRY_MS = 60_000;
+const MAX_RECENT_REFRESHES = 32;
 const MAX_ACTIVE_FAMILIES = 32;
 
 export type GoogleIdentity = { iss: string; sub: string; email?: string };
@@ -25,7 +27,7 @@ export interface OidcVerifier {
   authorizationUrl(input: OidcAuthorizationInput): string;
   exchangeCode(input: OidcExchangeInput): Promise<GoogleIdentity>;
 }
-export type RefreshRecord = { hash: string; family: string; subject: GoogleIdentity; clientId: string; resource: string; scope: "mcp"; expires: number; epoch: number; used?: boolean };
+export type RefreshRecord = { hash: string; family: string; subject: GoogleIdentity; clientId: string; resource: string; scope: "mcp"; expires: number; epoch: number; id?: string; issuedAt?: number; recent?: Array<{ hash: string; until: number }>; used?: boolean };
 export type OAuthState = {
   version: 1;
   epoch: number;
@@ -49,12 +51,12 @@ export function createFileOAuthStateStore(dataDir: string): OAuthStateStore {
   const file = path.join(dataDir, "oauth-state.json");
   return {
     async load() {
-      await ensurePrivateDirectory(dataDir);
+      await ensureSafeDataDirectory(dataDir);
       try { await assertPrivateFile(file); const raw = await readFile(file, "utf8"); const state: unknown = JSON.parse(raw); if (!isState(state)) throw new Error("OAuth state is invalid."); return state; }
       catch (error) { if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT") return freshState(); throw error; }
     },
     async save(state) {
-      await ensurePrivateDirectory(dataDir); await assertPrivateFile(file).catch((error: unknown) => { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; });
+      await ensureSafeDataDirectory(dataDir); await assertPrivateFile(file).catch((error: unknown) => { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; });
       const temporary = await createPrivateTemporaryFile(dataDir, "oauth-state");
       try { await writeFile(temporary, JSON.stringify(state), { encoding: "utf8" }); await assertPrivateFile(temporary); await rename(temporary, file); await assertPrivateFile(file); }
       catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
@@ -220,14 +222,24 @@ export class PublicAuthService {
   }); }
   private sign(body: object) { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
   private verify(token: string): Record<string, unknown> | undefined { const [encoded, signature, extra] = token.split("."); if (!encoded || !signature || extra || !same(createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url"), signature)) return undefined; try { const value: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")); return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined; } catch { return undefined; } }
-  private async issue(subject: GoogleIdentity, clientId: string, resource: string, scope: "mcp", family = this.makeId()) {
+  private refreshToken(record: RefreshRecord): string {
+    return this.sign({ type: "refresh", iss: this.cfg.baseUrl, sub: record.subject.sub, google_iss: record.subject.iss, aud: record.resource, client_id: record.clientId, scope: record.scope, epoch: record.epoch, family: record.family, id: record.id, iat: record.issuedAt, exp: Math.floor(record.expires / 1000) });
+  }
+  private tokenResponse(record: RefreshRecord) {
+    const now = Math.floor(this.now() / 1000);
+    const access = this.sign({ type: "access", iss: this.cfg.baseUrl, sub: record.subject.sub, google_iss: record.subject.iss, aud: record.resource, client_id: record.clientId, scope: record.scope, epoch: record.epoch, family: record.family, iat: now, nbf: now, exp: now + ACCESS_TTL });
+    return { access_token: access, refresh_token: this.refreshToken(record), token_type: "Bearer", expires_in: ACCESS_TTL, scope: record.scope };
+  }
+  private async issue(subject: GoogleIdentity, clientId: string, resource: string, scope: "mcp", family = this.makeId(), prior?: RefreshRecord) {
     const state = this.current(); this.clean();
     if (!state.families[family] && Object.keys(state.families).length >= MAX_ACTIVE_FAMILIES) throw new Error("Too many active refresh-token families.");
-    const expires = this.now() + REFRESH_TTL; state.families[family] = { active: true, epoch: state.epoch, expires };
-    const refresh = this.sign({ type: "refresh", iss: this.cfg.baseUrl, sub: subject.sub, google_iss: subject.iss, aud: resource, client_id: clientId, scope, epoch: state.epoch, family, id: this.makeId(), iat: Math.floor(this.now() / 1000), exp: Math.floor(expires / 1000) });
-    state.refreshes = state.refreshes.filter((item) => item.family !== family); state.refreshes.push({ hash: digest(refresh), family, subject, clientId, resource, scope, expires, epoch: state.epoch }); await this.persist();
-    const access = this.sign({ type: "access", iss: this.cfg.baseUrl, sub: subject.sub, google_iss: subject.iss, aud: resource, client_id: clientId, scope, epoch: state.epoch, family, iat: Math.floor(this.now() / 1000), nbf: Math.floor(this.now() / 1000), exp: Math.floor(this.now() / 1000) + ACCESS_TTL });
-    return { access_token: access, refresh_token: refresh, token_type: "Bearer", expires_in: ACCESS_TTL, scope };
+    const now = this.now(); const expires = now + REFRESH_TTL; state.families[family] = { active: true, epoch: state.epoch, expires };
+    // Overlapping client refreshes must receive the same replacement even if responses arrive out of order.
+    const recent = prior ? [...(prior.recent ?? []).filter((item) => item.until > now), { hash: prior.hash, until: now + REFRESH_RETRY_MS }].slice(-MAX_RECENT_REFRESHES) : [];
+    const record: RefreshRecord = { hash: "", family, subject, clientId, resource, scope, expires, epoch: state.epoch, id: this.makeId(), issuedAt: Math.floor(now / 1000), recent };
+    record.hash = digest(this.refreshToken(record));
+    state.refreshes = state.refreshes.filter((item) => item.family !== family); state.refreshes.push(record); await this.persist();
+    return this.tokenResponse(record);
   }
   async token(input: { grantType: string; code?: string; verifier?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string }) { return this.serialized(async () => this.tokenUnlocked(input)); }
   private async tokenUnlocked(input: { grantType: string; code?: string; verifier?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string }) {
@@ -242,8 +254,15 @@ export class PublicAuthService {
     const state = this.current(); const presented = this.verify(input.refreshToken!); const family = typeof presented?.family === "string" ? presented.family : undefined; const item = family ? state.refreshes.find((token) => token.family === family) : undefined;
     const validClaims = presented?.type === "refresh" && presented.iss === this.cfg.baseUrl && presented.aud === input.resource && presented.client_id === input.clientId && presented.scope === "mcp" && typeof presented.sub === "string" && typeof presented.google_iss === "string" && typeof presented.epoch === "number" && typeof presented.exp === "number" && presented.exp > Math.floor(this.now() / 1000);
     if (!item || !family || !validClaims || item.clientId !== input.clientId || item.resource !== input.resource || item.expires <= this.now() || item.epoch !== state.epoch || !this.allowed(item.subject) || state.families[family]?.active !== true || state.families[family]?.epoch !== state.epoch) return { error: "invalid_grant" as const };
-    if (!same(item.hash, digest(input.refreshToken!))) { delete state.families[family]; state.refreshes = state.refreshes.filter((token) => token.family !== family); await this.persist(); return { error: "invalid_grant" as const }; }
-    return this.issue(item.subject, item.clientId, item.resource, item.scope, family);
+    const presentedHash = digest(input.refreshToken!);
+    if (!same(item.hash, presentedHash)) {
+      if (item.id && item.issuedAt !== undefined && item.recent?.some((recent) => recent.until > this.now() && same(recent.hash, presentedHash))) {
+        const currentToken = this.refreshToken(item);
+        if (same(item.hash, digest(currentToken))) return this.tokenResponse(item);
+      }
+      delete state.families[family]; state.refreshes = state.refreshes.filter((token) => token.family !== family); await this.persist(); return { error: "invalid_grant" as const };
+    }
+    return this.issue(item.subject, item.clientId, item.resource, item.scope, family, item);
   }
   async authenticate(header?: string): Promise<string | undefined> { return this.serialized(async () => this.authenticateUnlocked(header)); }
   private async authenticateUnlocked(header?: string): Promise<string | undefined> {
