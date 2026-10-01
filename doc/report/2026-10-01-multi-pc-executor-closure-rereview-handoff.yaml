@@ -1,0 +1,138 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "PR #28"
+task_id: null
+branch: issue-25-design
+base_ref: main
+target:
+  previous_reviewed_head: ad7fb065a99740c43453f5fab58b8bc2ef837422
+  current_head: 6f4cae8b3df5456463691104962e85bf6c10b3d1
+  reviewed_head: 6f4cae8b3df5456463691104962e85bf6c10b3d1
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  machine_id: local
+  connection: degraded_after_initial_reads
+  os: Windows
+  working_directory: 'C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-issue25'
+  repository: ssaattww/RemoteDesktopMCP
+  branch: issue-25-design
+  head_sha: 6f4cae8b3df5456463691104962e85bf6c10b3d1
+  source_state: clean
+  ownership: other_task_read_only
+  evidence:
+    - current HEAD and clean worktree confirmed through RDMCP at review start
+    - later RDMCP process/file calls failed internally
+    - Remote Desktop Commander devices were all offline
+verification:
+  capability: local_execution_available
+  technical_head: 6f4cae8b3df5456463691104962e85bf6c10b3d1
+  ci_wait:
+    state: ci_wait_completed
+    run_id: 36848628110
+    head_sha: 6f4cae8b3df5456463691104962e85bf6c10b3d1
+    event: pull_request
+    conclusion: success
+    jobs:
+      ubuntu: success
+      windows_shard_1: success
+      windows_shard_2: success
+      windows_shard_3: success
+    diagnostics_upload: success_all_jobs
+review:
+  mode: fix_verification
+  reviewer:
+    identity: current PR #28 normal review chat
+    role: normal_reviewer
+    continuity:
+      previous_reviewer_identity: current PR #28 normal review chat
+      changed: false
+      reason: null
+  verdict: fail
+  completeness_matrix:
+    - finding_id: RDMCP-25-DR-001
+      severity: high
+      required_action: replay middle and final download chunks after node response loss and same-generation reconnect
+      production_path: src/index.ts shared download state machine
+      actual_composition_fixture: test/multi-pc-mcp.test.ts CoordinatorNodeServer/ExecutorNodeClient response-loss fixture
+      focused_evidence: exact-head CI run 36848628110 success
+      disposition: closed
+    - finding_id: RDMCP-25-DR-002
+      severity: medium
+      required_action: align node_list session contract
+      production_path: design documents and node_list implementation
+      actual_composition_fixture: pre-session node_list test
+      focused_evidence: exact-head CI run 36848628110 success
+      disposition: closed
+    - finding_id: RDMCP-25-DR-003
+      severity: medium
+      required_action: centralize typed operation contract and common execution core
+      production_path: src/node-operation.ts; src/index.ts; src/node-transport.ts
+      actual_composition_fixture: public MCP to coordinator to executor common-handler test
+      focused_evidence: exact-head CI run 36848628110 success
+      disposition: closed
+findings:
+  - id: RDMCP-25-DR-004
+    severity: high
+    origin: incomplete_implementation
+    location: src/index.ts:1701-1760
+    description: remote transfer and process public MCP mappings are explicitly not implemented
+    impact: ChatGPT cannot use public MCP to transfer files or start/status/output/kill processes on a selected remote executor, so Issue #25 completion conditions are not met
+    evidence:
+      - remote download begin throws "Remote download public transfer mapping is not implemented yet."
+      - remote upload begin throws "Remote upload public transfer mapping is not implemented yet."
+      - remote process public operations throw "Remote process public mapping is not implemented yet."
+      - design requires public transfer_id to remote_transfer_id mapping and public logical process ID to remote_process_id mapping
+    required_action: implement coordinator-side public ID mappings and route all remote transfer/process public MCP operations through the existing shared operation core; add full public-MCP composition fixtures
+  - id: RDMCP-25-DR-005
+    severity: medium
+    origin: incomplete_documentation
+    location: doc/remote-setup.md
+    description: user-facing multi-PC add/rotate/remove setup procedure is absent
+    impact: Issue #25 requires documented PC addition, PSK update, and unregister procedures, but the current document only covers the single-PC Funnel/OAuth path
+    evidence:
+      - no node-config init executor procedure
+      - no add-executor or set-coordinator procedure
+      - no PSK rotation procedure
+      - no remove-executor or clear-coordinator procedure
+    required_action: add actual CLI-based multi-PC setup, PSK update, and unregister steps to doc/remote-setup.md and validate them against current implementation
+required_coverage:
+  requirement_and_design_conformance: checked_finding
+  correctness_and_edge_cases: checked_finding
+  scope_discipline_and_unrelated_changes: checked_no_finding
+  changed_files_and_direct_dependencies: checked_finding
+  api_data_configuration_workflow_compatibility: checked_finding
+  error_handling_and_failure_diagnostics: checked_no_finding
+  security_and_secret_handling: checked_no_finding
+  tests_and_validation_adequacy: checked_finding
+  current_head_ci_evidence: checked_no_finding
+  report_tracking_documentation_accuracy: checked_finding
+  regression_and_maintainability_risks: checked_no_finding
+held:
+  - item: additional local focused rerun
+    reason: RDMCP execution degraded during review and RDC devices were offline
+    verdict_impact: non_blocking_because_exact_head_ci_is_successful
+unexplored: []
+remaining_risks:
+  - public remote transfer/process mapping is absent despite executor common core being implemented
+  - user setup documentation remains single-PC only
+report:
+  report_type: review_report
+  persistence_mode: repository_file
+  path: doc/report/2026-10-01-multi-pc-executor-closure-rereview.md
+  report_branch: review/multi-pc-executor-closure-rereview-20261001
+next_action:
+  type: implementation_fix
+  target_skill: chat-implementation-worker
+  mode: review_followup
+  summary: fix RDMCP-25-DR-004 and RDMCP-25-DR-005, preserve IDs and severities, then return to the same normal review chat
+  instructions:
+    - reuse the existing shared operation core; do not duplicate remote transfer/process state machines
+    - provide public-MCP actual composition fixtures for remote download/upload/process
+    - document PC add, PSK rotation, and unregister procedures in doc/remote-setup.md
+    - use only exact-current-HEAD CI evidence
+merge:
+  performed: false
