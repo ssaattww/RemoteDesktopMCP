@@ -134,9 +134,110 @@ ChatGPT の接続画面や開発者モードの利用可否はアカウント設
 
 ## 複数PC executor 運用手順（DR005 対応）
 
-executor追加、PSK更新、登録解除は専用CLI経由で行う。
+複数PC構成では、統括ノード（coordinator）と実行ノード（executor）を別PCへ設定する。
+この手順の `<値>` は利用者の環境値を表す記号であり、実際のPSKや接続情報を生成・表示するものではない。
 
-- coordinator側でexecutorを登録し専用PSKを発行する。
-- executor側はPSKを標準入力で設定し、引数や履歴へ残さない。
-- PSK更新や削除では既存接続と旧世代操作対応を無効化する。
-- node_id、表示名、接続状態を確認し、PSKは表示しない。
+### 追加PCをexecutorとして登録する
+
+#### 1. 統括ノードを初期化する
+
+まだ複数PC設定を作成していない統括PCで実行する。
+
+```powershell
+npm.cmd run node-config -- init --role both --label <統括PC表示名> --port <通信ポート>
+```
+
+表示された `node_id` を控える。既存設定がある場合は `init` で作り直さない。
+
+#### 2. executor PCを初期化する
+
+追加PCで実行する。
+
+```powershell
+npm.cmd run node-config -- init --role executor --label <executor表示名>
+```
+
+生成された `node_id` を確認する。
+
+```powershell
+npm.cmd run node-config -- show
+```
+
+この時点では統括ノードへの接続設定はまだ行わない。
+
+#### 3. 統括ノードへexecutorを登録する
+
+統括ノードで実行する。
+
+```powershell
+npm.cmd run node-config -- add-executor --node-id <executorのnode_id> --label <executor表示名>
+```
+
+出力されたPSKは対象executorへ安全な方法で設定する。PSKをログ、チャット、コマンド履歴へ保存しない。
+
+#### 4. executorへ接続先を設定する
+
+executor PCで、PSKを標準入力から渡す。
+
+```powershell
+'<生成済みPSK>' | npm.cmd run node-config -- set-coordinator --host <統括ノードの接続先> --port <通信ポート> --psk-stdin
+```
+
+PSKをコマンド引数へ指定する `--psk` 形式は使用しない。
+
+#### 5. 接続確認を行う
+
+executorと統括ノードのサービスを起動した後、統括ノード側で確認する。
+
+```powershell
+npm.cmd run node-config -- show
+```
+
+ChatGPTから次を実行し、登録状態を確認する。
+
+```text
+node_list を実行して executor の node_id、表示名、接続状態を確認してください。
+```
+
+`connected=true` となり、利用可能な操作が表示されることを確認する。
+
+### PSKを更新する
+
+統括ノードで対象executorの鍵を更新する。
+
+```powershell
+npm.cmd run node-config -- rotate-executor-key --node-id <executorのnode_id>
+```
+
+出力された新しいPSKをexecutor側へ設定する。
+
+```powershell
+'<新しいPSK>' | npm.cmd run node-config -- set-coordinator --host <統括ノードの接続先> --port <通信ポート> --psk-stdin
+```
+
+更新中は旧接続を継続利用できる前提にせず、新しいPSKによる相互認証が完了した接続だけを利用する。旧PSKでの再接続は拒否される。
+
+### executorを登録解除する
+
+登録解除前に、対象executor上の必要な転送中断やプロセス停止を明示的に完了させる。
+
+統括ノードで実行する。
+
+```powershell
+npm.cmd run node-config -- remove-executor --node-id <executorのnode_id>
+```
+
+executor側で接続情報を削除する。
+
+```powershell
+npm.cmd run node-config -- clear-coordinator
+```
+
+確認:
+
+```powershell
+npm.cmd run node-config -- show
+```
+
+接続先が未設定になり、旧PSKでは再接続できないことを確認する。
+登録解除後に同じ `node_id` を再登録しても、以前のセッション、転送、プロセス操作の対応は復元しない。
