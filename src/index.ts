@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+﻿import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -15,6 +15,7 @@ import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
 import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, protectPrivateFile } from "./private-storage.js";
+import { type NodeListEntry, type NodeRegistry } from "./node-registry.js";
 
 import { mountAdmin } from "./admin.js";
 import { mountUserConsole } from "./user-console.js";
@@ -23,7 +24,7 @@ type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
 type OAuthClient = { client_id: string; client_name: string; redirect_uris: string[] };
 type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string; expires: number; scope: "mcp" };
-type Session = { id: string; user: string; workingDirectory: string; purpose: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
+type Session = { id: string; user: string; nodeId: string; workingDirectory: string; purpose: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
 // Node's default Stats numbers lose NTFS file-id precision above 2^53.  Keep
 // identity values as decimal strings derived from bigint stats so unrelated
 // files cannot collide with a protected config pin or an owned upload.
@@ -51,7 +52,7 @@ const MAX_AUDIT_EVENTS = 20_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: unknown) => Promise<unknown> };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -537,6 +538,58 @@ export class RemoteDesktopService {
   }
   async sweepExpired(): Promise<void> { await this.transferLock.run(() => this.sweepExpiredLocked()); }
   session(user: string, sessionId: string): Session { this.requireCurrentOperation(); const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; const operation = this.operationContext.getStore(); if (operation?.user === user) operation.sessionAccessAt = new Date(value.touched).toISOString(); return value; }
+  private nodeEntries(): NodeListEntry[] {
+    if (this.cfg.nodeRegistry) return this.cfg.nodeRegistry.list();
+    return [{
+      node_id: this.cfg.nodeId,
+      label: this.cfg.nodeLabel,
+      root_ids: this.cfg.roots.map((root) => root.id),
+      roots: this.cfg.roots.map((root) => ({ root_id: root.id, absolute_path: root.path })),
+      path_base: "root",
+      connected: true,
+      coordinator: true,
+      operations: ["file", "process", "transfer"],
+      last_seen_at: null,
+    }];
+  }
+  private sessionTarget(nodeId?: string): NodeListEntry {
+    const nodes = this.nodeEntries();
+    let target: NodeListEntry | undefined;
+    if (nodeId) {
+      target = nodes.find((node) => node.node_id === nodeId);
+      if (!target) throw new Error("Unknown or unsupported node.");
+    } else {
+      if (nodes.length !== 1) throw new Error("node_id is required when multiple operation targets are configured.");
+      target = nodes[0];
+    }
+    if (!target.connected) throw new Error("Selected node is disconnected.");
+    return target;
+  }
+  private async validateSessionWorkingDirectory(target: NodeListEntry, requested: string): Promise<string> {
+    if (target.node_id === this.cfg.nodeId) {
+      try {
+        if (!path.isAbsolute(requested)) throw new Error();
+        const workingDirectory = await realpath(requested);
+        if (!(await lstat(workingDirectory)).isDirectory()) throw new Error();
+        return workingDirectory;
+      } catch {
+        throw new Error("Working directory must be an existing absolute directory.");
+      }
+    }
+    if (!this.cfg.nodeRequest) throw new Error("Remote node request handling is unavailable.");
+    const response = await this.cfg.nodeRequest(target.node_id, {
+      operation: "session_validate_working_directory",
+      args: { working_directory: requested },
+    });
+    if (!isRecord(response) || typeof response.working_directory !== "string") {
+      throw new Error("Remote node did not validate the working directory.");
+    }
+    const workingDirectory = response.working_directory.trim();
+    if (!workingDirectory || workingDirectory.length > 4096 || (!path.win32.isAbsolute(workingDirectory) && !path.posix.isAbsolute(workingDirectory))) {
+      throw new Error("Remote node returned an invalid working directory.");
+    }
+    return workingDirectory;
+  }
   node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
   private configPath(): string { return path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json"); }
@@ -851,7 +904,7 @@ export class RemoteDesktopService {
       const message = error instanceof Error ? error.message : "Operation failed.";
       const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
       await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...sessionAccess() });
-      const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory)/.test(message) ? message : "Operation failed.";
+      const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory|node_id|Selected node|Remote node)/.test(message) ? message : "Operation failed.";
       return failure(publicMessage);
     }
     };
@@ -878,10 +931,21 @@ export class RemoteDesktopService {
       return originalRegisterTool(name, { ...config, description: `${config.description ?? ""} A non-empty comment explaining what this call is intended to accomplish is required and is recorded with the operation.`, inputSchema: { ...config.inputSchema, comment: z.string().trim().min(1).max(500).describe("Briefly explain what this call is intended to accomplish.") }, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
     };
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
-    server.registerTool("session_open", { description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Set the required absolute working_directory and brief purpose. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Opening is rejected while the caller's Emergency Stop is active.", inputSchema: { working_directory: z.string().trim().min(1).max(4096), purpose: z.string().trim().min(1).max(200) } }, this.tool(user, async ({ working_directory, purpose }) => { await this.sweepExpired(); this.requireCurrentOperation(); let workingDirectory: string; try { if (!path.isAbsolute(working_directory)) throw new Error(); workingDirectory = await realpath(working_directory); if (!(await lstat(workingDirectory)).isDirectory()) throw new Error(); } catch { throw new Error("Working directory must be an existing absolute directory."); } this.requireCurrentOperation(); const now = Date.now(); const session: Session = { id: makeId(), user, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active" }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, workingDirectory, purpose: session.purpose, stopGeneration: this.userExecutionState(user).stopGeneration }); return { session_id: session.id, connection_id: session.id, working_directory: session.workingDirectory, purpose: session.purpose, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state }; }));
-    server.registerTool("session_list", { description: "List the caller's active sessions with their working directory and purpose.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
+    server.registerTool("session_open", { description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Select node_id when multiple operation targets are configured, and set that node's required absolute working_directory plus a brief purpose. The session remains bound to that node for its lifetime. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Opening is rejected while the caller's Emergency Stop is active.", inputSchema: { node_id: nodeId, working_directory: z.string().trim().min(1).max(4096), purpose: z.string().trim().min(1).max(200) } }, this.tool(user, async ({ node_id, working_directory, purpose }) => {
+      await this.sweepExpired();
+      this.requireCurrentOperation();
+      const target = this.sessionTarget(node_id);
+      const workingDirectory = await this.validateSessionWorkingDirectory(target, working_directory);
+      this.requireCurrentOperation();
+      const now = Date.now();
+      const session: Session = { id: makeId(), user, nodeId: target.node_id, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active" };
+      this.sessions.set(session.id, session);
+      await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, nodeId: session.nodeId, workingDirectory, purpose: session.purpose, stopGeneration: this.userExecutionState(user).stopGeneration });
+      return { session_id: session.id, connection_id: session.id, node_id: session.nodeId, working_directory: session.workingDirectory, purpose: session.purpose, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state };
+    }));
+    server.registerTool("session_list", { description: "List the caller's active sessions with their selected node, working directory, and purpose.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, node_id: entry.nodeId, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
     server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
-    server.registerTool("node_list", { description: "List the one supported local node and its configured file roots. Requires an active session_id belonging to the authenticated caller. roots contains each root_id and its canonical absolute_path; root_ids is retained for compatibility. File and transfer relative_path values are relative to the returned root, while process_start uses the session working_directory. node_id selects the local node for file and process operations.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, root_ids: this.cfg.roots.map((root) => root.id), roots: this.cfg.roots.map((root) => ({ root_id: root.id, absolute_path: root.path })), path_base: "root", connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
+    server.registerTool("node_list", { description: "List registered operation nodes, including disconnected remote nodes. It is available before session_open. An optional session_id is validated for compatibility but does not filter the node list. roots contains each root_id and its canonical absolute_path; root_ids is retained for compatibility. File and transfer relative_path values are relative to the returned root, while process_start uses the selected session working_directory.", inputSchema: { session_id: sessionId.optional() } }, this.tool(user, async ({ session_id }) => { if (session_id) this.session(user, session_id); return { nodes: this.nodeEntries() }; }));
     server.registerTool("file_search", { description: "Search file names through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches names only and does not search file contents. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
     server.registerTool("content_search", { description: "Search file contents through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches contents and does not search file names. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "content"); await this.audit("file.content_search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
     const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500).describe("Path relative to root_id, never the session working_directory.") };

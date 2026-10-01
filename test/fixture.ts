@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { link, mkdtemp, mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -9,7 +9,7 @@ import { protectPrivateDirectory } from "../src/private-storage.js";
 
 export type Fixture = { service: RemoteDesktopService; root: string; data: string; base: string; cleanup: () => Promise<void> };
 
-export async function fixture(): Promise<Fixture> {
+export async function fixture(overrides: Partial<RuntimeConfig> = {}): Promise<Fixture> {
   // Node 22 does not keep the test process alive for an in-memory MCP handshake.
   // This referenced timer belongs to the fixture and is always cleared by cleanup.
   const keepAlive = setInterval(() => undefined, 1_000);
@@ -34,6 +34,7 @@ export async function fixture(): Promise<Fixture> {
     dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"],
     dcManagedConfig: true,
     allowedRedirectOrigins: new Set(["https://chatgpt.com"]),
+    ...overrides,
   };
   const service = new RemoteDesktopService(cfg);
   try { await service.initialize(); }
