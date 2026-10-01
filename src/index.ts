@@ -16,6 +16,14 @@ import { verifyPassword } from "./hash-password.js";
 import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, protectPrivateFile } from "./private-storage.js";
 import { type NodeListEntry, type NodeRegistry } from "./node-registry.js";
+import {
+  createNodeOperationRequest,
+  nodeOperationContract,
+  parseNodeOperationRequest,
+  parseNodeOperationResponse,
+  type NodeOperationName,
+  type NodeOperationRequest,
+} from "./node-operation.js";
 
 import { mountAdmin } from "./admin.js";
 import { mountUserConsole } from "./user-console.js";
@@ -32,7 +40,7 @@ type FileIdentity = { dev: string; ino: string };
 type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type DownloadChunkReplay = { offset: number; data: string; nextOffset: number; complete: boolean };
-type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; downloadReplay?: DownloadChunkReplay };
+type Transfer = { id: string; direction: "download" | "upload"; principalId: string; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; downloadReplay?: DownloadChunkReplay };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
 type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; sessionAccessAt?: string };
@@ -53,7 +61,7 @@ const MAX_AUDIT_EVENTS = 20_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: unknown) => Promise<unknown> };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: NodeOperationRequest) => Promise<unknown> };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -566,22 +574,11 @@ export class RemoteDesktopService {
     if (!target.connected) throw new Error("Selected node is disconnected.");
     return target;
   }
-  private async validateSessionWorkingDirectory(target: NodeListEntry, requested: string): Promise<string> {
-    if (target.node_id === this.cfg.nodeId) {
-      try {
-        if (!path.isAbsolute(requested)) throw new Error();
-        const workingDirectory = await realpath(requested);
-        if (!(await lstat(workingDirectory)).isDirectory()) throw new Error();
-        return workingDirectory;
-      } catch {
-        throw new Error("Working directory must be an existing absolute directory.");
-      }
-    }
-    if (!this.cfg.nodeRequest) throw new Error("Remote node request handling is unavailable.");
-    const response = await this.cfg.nodeRequest(target.node_id, {
-      operation: "session_validate_working_directory",
-      args: { working_directory: requested },
-    });
+  private async validateSessionWorkingDirectory(user: string, target: NodeListEntry, requested: string): Promise<string> {
+    const operation: NodeOperationName = "session_validate_working_directory";
+    const response = target.node_id === this.cfg.nodeId
+      ? await this.executeLocalNodeOperation(user, undefined, operation, { working_directory: requested })
+      : await this.requestRemoteWithoutSession(user, target, operation, { working_directory: requested });
     if (!isRecord(response) || typeof response.working_directory !== "string") {
       throw new Error("Remote node did not validate the working directory.");
     }
@@ -601,27 +598,228 @@ export class RemoteDesktopService {
     if (!target.connected) throw new Error("Selected node is disconnected.");
     return { session, target };
   }
+  private async requestRemoteWithoutSession(
+    user: string,
+    target: NodeListEntry,
+    operation: NodeOperationName,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    if (target.node_id === this.cfg.nodeId) throw new Error("Remote node request targeted the local node.");
+    const contract = nodeOperationContract(operation);
+    if (!target.operations.includes(contract.capability)) {
+      throw new Error(`Remote node does not provide the ${contract.capability} operation capability.`);
+    }
+    if (!this.cfg.nodeRequest) throw new Error("Remote node request handling is unavailable.");
+    const state = this.userExecutionState(user);
+    const request = createNodeOperationRequest(user, state.stopGeneration, undefined, operation, args);
+    return parseNodeOperationResponse(operation, await this.cfg.nodeRequest(target.node_id, request));
+  }
   private async requestRemote(
     user: string,
     session: Session,
     target: NodeListEntry,
-    operation: string,
+    operation: NodeOperationName,
     args: Record<string, unknown>,
-    capability: "file" | "process" | "transfer",
   ): Promise<unknown> {
     if (target.node_id === this.cfg.nodeId) throw new Error("Remote node request targeted the local node.");
-    if (!target.operations.includes(capability)) {
-      throw new Error(`Remote node does not provide the ${capability} operation capability.`);
+    const contract = nodeOperationContract(operation);
+    if (!target.operations.includes(contract.capability)) {
+      throw new Error(`Remote node does not provide the ${contract.capability} operation capability.`);
     }
     if (!this.cfg.nodeRequest) throw new Error("Remote node request handling is unavailable.");
     const state = this.userExecutionState(user);
-    return this.cfg.nodeRequest(target.node_id, {
-      principal_id: user,
-      stop_generation: state.stopGeneration,
-      session_id: session.id,
-      operation,
-      args,
+    const request = createNodeOperationRequest(user, state.stopGeneration, session.id, operation, args);
+    return parseNodeOperationResponse(operation, await this.cfg.nodeRequest(target.node_id, request));
+  }
+  private async dispatchNodeOperation(
+    user: string,
+    session: Session,
+    target: NodeListEntry,
+    operation: NodeOperationName,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    return target.node_id === this.cfg.nodeId
+      ? this.executeLocalNodeOperation(user, session.id, operation, args)
+      : this.requestRemote(user, session, target, operation, args);
+  }
+  private async executeLocalNodeOperation(
+    user: string,
+    sessionId: string | undefined,
+    operation: NodeOperationName,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    const state = this.userExecutionState(user);
+    const request = createNodeOperationRequest(user, state.stopGeneration, sessionId, operation, args);
+    return parseNodeOperationResponse(operation, await this.executeNodeOperation(request));
+  }
+  async executeNodeRequest(payload: unknown): Promise<unknown> {
+    const request = parseNodeOperationRequest(payload);
+    const state = this.userExecutionState(request.principal_id);
+    if (state.stopped || state.stopGeneration !== request.stop_generation) {
+      throw new Error("Remote node user state is stopped, stale, or unsynchronized.");
+    }
+    const operation: ExecutionOperation = {
+      user: request.principal_id,
+      operationId: makeId(),
+      stopGeneration: request.stop_generation,
+    };
+    const response = await this.operationContext.run(operation, async () => {
+      this.requireCurrentOperation();
+      return this.executeNodeOperation(request);
     });
+    return parseNodeOperationResponse(request.operation, response);
+  }
+  private async executeNodeOperation(request: NodeOperationRequest): Promise<unknown> {
+    const user = request.principal_id;
+    const sessionId = request.session_id;
+    switch (request.operation) {
+      case "session_validate_working_directory": {
+        const { working_directory } = request.args as { working_directory: string };
+        try {
+          if (!path.isAbsolute(working_directory)) throw new Error();
+          const resolved = await realpath(working_directory);
+          if (!(await lstat(resolved)).isDirectory()) throw new Error();
+          return { working_directory: resolved };
+        } catch {
+          throw new Error("Working directory must be an existing absolute directory.");
+        }
+      }
+      case "file_search": {
+        const { root_id, query } = request.args as { root_id: string; query: string };
+        const output = await this.search(this.root(root_id), query, "files");
+        await this.audit(nodeOperationContract(request.operation).auditEvent, { user, sessionId, nodeId: this.cfg.nodeId, rootId: root_id });
+        return { output };
+      }
+      case "content_search": {
+        const { root_id, query } = request.args as { root_id: string; query: string };
+        const output = await this.search(this.root(root_id), query, "content");
+        await this.audit(nodeOperationContract(request.operation).auditEvent, { user, sessionId, nodeId: this.cfg.nodeId, rootId: root_id });
+        return { output };
+      }
+      case "file_read": {
+        const { root_id, relative_path, offset, length } = request.args as {
+          root_id: string; relative_path: string; offset?: number; length?: number;
+        };
+        const filePath = await this.safePath(root_id, relative_path);
+        this.requireCurrentOperation();
+        const output = await this.dc.call("read_file", { path: filePath, offset, length });
+        await this.audit(nodeOperationContract(request.operation).auditEvent, { user, sessionId, nodeId: this.cfg.nodeId, rootId: root_id, relativePath: relative_path });
+        return { output };
+      }
+      case "file_patch": {
+        const { root_id, relative_path, old_string, new_string, expected_replacements } = request.args as {
+          root_id: string; relative_path: string; old_string: string; new_string: string; expected_replacements: number;
+        };
+        const filePath = await this.safePath(root_id, relative_path);
+        this.requireCurrentOperation();
+        const output = await this.dc.call("edit_block", {
+          file_path: filePath,
+          old_string,
+          new_string,
+          expected_replacements,
+        });
+        await this.audit(nodeOperationContract(request.operation).auditEvent, { user, sessionId, nodeId: this.cfg.nodeId, rootId: root_id, relativePath: relative_path });
+        return { output };
+      }
+      case "file_transfer_download_begin":
+        return this.transferLock.run(async () => {
+          if (!sessionId) throw new Error("Node operation session is required.");
+          const { root_id, relative_path } = request.args as { root_id: string; relative_path: string };
+          await this.sweepExpiredLocked();
+          if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached.");
+          const source = await this.safePath(root_id, relative_path);
+          const info = await lstat(source);
+          if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed.");
+          const directory = path.join(this.cfg.dataDir, "transfers");
+          this.requireCurrentOperation();
+          await mkdir(directory, { recursive: true, mode: 0o700 });
+          const snapshot = path.join(directory, `${makeId()}.snapshot`);
+          try {
+            this.requireCurrentOperation();
+            const metadata = await this.privateSnapshot(source, snapshot);
+            const item: Transfer = {
+              id: makeId(),
+              direction: "download",
+              principalId: user,
+              sessionId,
+              nodeId: this.cfg.nodeId,
+              rootId: root_id,
+              target: source,
+              snapshot,
+              ...metadata,
+              offset: 0,
+              touched: Date.now(),
+              state: "active",
+              sent: createHash("sha256"),
+            };
+            this.transfers.set(item.id, item);
+            await this.audit(nodeOperationContract(request.operation).auditEvent, { transferId: item.id, direction: item.direction, sessionId, nodeId: this.cfg.nodeId, size: item.size, sha256: item.sha256 });
+            return { transfer_id: item.id, filename: path.basename(source), resolved_path: await realpath(source), root_id, path_base: "root", size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes };
+          } catch (error) {
+            await rm(snapshot, { force: true }).catch(() => undefined);
+            throw error;
+          }
+        });
+      case "file_transfer_download_chunk":
+        return this.transferLock.run(async () => {
+          if (!sessionId) throw new Error("Node operation session is required.");
+          const { transfer_id, offset } = request.args as { transfer_id: string; offset: number };
+          await this.sweepExpiredLocked();
+          const item = this.downloadTransfer(user, sessionId, transfer_id);
+          const replay = item.downloadReplay;
+          if (replay && replay.offset === offset) {
+            return { data: replay.data, next_offset: replay.nextOffset, complete: replay.complete };
+          }
+          if (item.state !== "active" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid.");
+          let handle: FileHandle | undefined;
+          try {
+            handle = await open(item.snapshot, "r");
+            const length = Math.min(this.cfg.chunkBytes, item.size - item.offset);
+            const bytes = Buffer.alloc(length);
+            const read = await handle.read(bytes, 0, length, item.offset);
+            if (read.bytesRead !== length) throw new Error("Snapshot read failed.");
+            const data = bytes.subarray(0, read.bytesRead);
+            item.sent?.update(data);
+            item.offset += read.bytesRead;
+            const complete = item.offset === item.size;
+            if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed.");
+            const encoded = data.toString("base64");
+            item.downloadReplay = { offset, data: encoded, nextOffset: item.offset, complete };
+            if (complete) {
+              item.state = "complete";
+              await this.cleanup(item);
+              this.rememberTerminal(item);
+            }
+            return { data: encoded, next_offset: item.offset, complete };
+          } catch (error) {
+            await this.fail(item, "snapshot_read_failed");
+            throw error;
+          } finally {
+            await handle?.close().catch(() => undefined);
+          }
+        });
+      case "file_transfer_status":
+        return this.transferLock.run(async () => {
+          if (!sessionId) throw new Error("Node operation session is required.");
+          const { transfer_id } = request.args as { transfer_id: string };
+          await this.sweepExpiredLocked();
+          const item = this.transfers.get(transfer_id);
+          if (!item || item.principalId !== user || item.sessionId !== sessionId) throw new Error("Transfer is unavailable.");
+          return { state: item.state, next_offset: item.offset, transferred_bytes: item.offset };
+        });
+      case "file_transfer_cancel":
+        return this.transferLock.run(async () => {
+          if (!sessionId) throw new Error("Node operation session is required.");
+          const { transfer_id } = request.args as { transfer_id: string };
+          await this.sweepExpiredLocked();
+          const item = this.transfer(user, sessionId, transfer_id);
+          item.state = "cancelled";
+          await this.cleanup(item);
+          this.rememberTerminal(item);
+          await this.audit(nodeOperationContract(request.operation).auditEvent, { transferId: item.id, sessionId });
+          return { cancelled: true };
+        });
+    }
   }
   node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
@@ -826,11 +1024,10 @@ export class RemoteDesktopService {
     if (overlaps(candidate, this.cfg.dataDir)) throw new Error("Protected service files cannot be accessed.");
     return candidate;
   }
-  private transfer(user: string, sessionId: string, transferId: string): Transfer { this.session(user, sessionId); const item = this.transfers.get(transferId); if (!item || item.sessionId !== sessionId || item.state !== "active") throw new Error("Transfer is unavailable."); item.touched = Date.now(); return item; }
+  private transfer(user: string, sessionId: string, transferId: string): Transfer { const item = this.transfers.get(transferId); if (!item || item.principalId !== user || item.sessionId !== sessionId || item.state !== "active") throw new Error("Transfer is unavailable."); item.touched = Date.now(); return item; }
   private downloadTransfer(user: string, sessionId: string, transferId: string): Transfer {
-    this.session(user, sessionId);
     const item = this.transfers.get(transferId);
-    if (!item || item.sessionId !== sessionId || item.direction !== "download" || (item.state !== "active" && item.state !== "complete")) {
+    if (!item || item.principalId !== user || item.sessionId !== sessionId || item.direction !== "download" || (item.state !== "active" && item.state !== "complete")) {
       throw new Error("Transfer is unavailable.");
     }
     item.touched = Date.now();
@@ -977,7 +1174,7 @@ export class RemoteDesktopService {
       await this.sweepExpired();
       this.requireCurrentOperation();
       const target = this.sessionTarget(node_id);
-      const workingDirectory = await this.validateSessionWorkingDirectory(target, working_directory);
+      const workingDirectory = await this.validateSessionWorkingDirectory(user, target, working_directory);
       this.requireCurrentOperation();
       const now = Date.now();
       const session: Session = { id: makeId(), user, nodeId: target.node_id, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active" };
@@ -991,128 +1188,53 @@ export class RemoteDesktopService {
     server.registerTool("file_search", { description: "Search file names through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches names only and does not search file contents. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => {
       await this.sweepExpired();
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) {
-        const response = await this.requestRemote(user, session, target, "file_search", { root_id, query }, "file");
-        if (!isRecord(response) || typeof response.output !== "string") throw new Error("Remote node returned an invalid file_search response.");
-        await this.audit("file.search", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id });
-        return { output: response.output };
-      }
-      const output = await this.search(this.root(root_id), query, "files");
-      await this.audit("file.search", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id });
-      return { output };
+      return this.dispatchNodeOperation(user, session, target, "file_search", { root_id, query });
     }));
     server.registerTool("content_search", { description: "Search file contents through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches contents and does not search file names. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => {
       await this.sweepExpired();
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) {
-        const response = await this.requestRemote(user, session, target, "content_search", { root_id, query }, "file");
-        if (!isRecord(response) || typeof response.output !== "string") throw new Error("Remote node returned an invalid content_search response.");
-        await this.audit("file.content_search", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id });
-        return { output: response.output };
-      }
-      const output = await this.search(this.root(root_id), query, "content");
-      await this.audit("file.content_search", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id });
-      return { output };
+      return this.dispatchNodeOperation(user, session, target, "content_search", { root_id, query });
     }));
     const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500).describe("Path relative to root_id, never the session working_directory.") };
     server.registerTool("file_read", { description: "Read text from a configured file root using root_id and a root-relative relative_path. Requires the caller's active session_id and permits path checks to reject protected service files and escapes from that root. Optional offset is nonnegative; length is 1–1000.", inputSchema: { ...fileInput, offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().max(1000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, offset, length }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) {
-        const response = await this.requestRemote(user, session, target, "file_read", {
-          root_id,
-          relative_path,
-          ...(offset === undefined ? {} : { offset }),
-          ...(length === undefined ? {} : { length }),
-        }, "file");
-        if (!isRecord(response) || typeof response.output !== "string") throw new Error("Remote node returned an invalid file_read response.");
-        await this.audit("file.read", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id, relativePath: relative_path });
-        return { output: response.output };
-      }
-      const filePath = await this.safePath(root_id, relative_path);
-      this.requireCurrentOperation();
-      const output = await this.dc.call("read_file", { path: filePath, offset, length });
-      await this.audit("file.read", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id, relativePath: relative_path });
-      return { output };
+      return this.dispatchNodeOperation(user, session, target, "file_read", {
+        root_id,
+        relative_path,
+        ...(offset === undefined ? {} : { offset }),
+        ...(length === undefined ? {} : { length }),
+      });
     }));
     server.registerTool("file_patch", { description: "Replace matching text in a configured file root using root_id and a root-relative relative_path. Requires the caller's active session_id; old_string must match and expected_replacements (1–100, default 1) controls the expected match count. This is a text replacement, not a general file upload.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) {
-        const response = await this.requestRemote(user, session, target, "file_patch", {
-          root_id,
-          relative_path,
-          old_string,
-          new_string,
-          expected_replacements,
-        }, "file");
-        if (!isRecord(response) || typeof response.output !== "string") throw new Error("Remote node returned an invalid file_patch response.");
-        await this.audit("file.patch", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id, relativePath: relative_path });
-        return { output: response.output };
-      }
-      const filePath = await this.safePath(root_id, relative_path);
-      this.requireCurrentOperation();
-      const output = await this.dc.call("edit_block", { file_path: filePath, old_string, new_string, expected_replacements });
-      await this.audit("file.patch", { user, sessionId: session_id, nodeId: target.node_id, rootId: root_id, relativePath: relative_path });
-      return { output };
+      return this.dispatchNodeOperation(user, session, target, "file_patch", {
+        root_id,
+        relative_path,
+        old_string,
+        new_string,
+        expected_replacements,
+      });
     }));
-    server.registerTool("file_transfer_download_begin", { description: "Begin a chunked download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Creates a private snapshot copy and returns the source resolved_path, root_id, path_base=root, size, and SHA-256; later changes to the source file do not change this copy. Read it with file_transfer_download_chunk using the returned transfer_id and sequential offsets.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); this.requireCurrentOperation(); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { this.requireCurrentOperation(); const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), resolved_path: await realpath(source), root_id, path_base: "root", size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
-    server.registerTool("file_transfer_download_chunk", { description: "Read the next chunk from the snapshot copy. A retry of the most recently returned offset replays the same chunk without advancing transfer state. The completed download is checked against its SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => {
-      await this.sweepExpiredLocked();
-      const item = this.downloadTransfer(user, session_id, transfer_id);
-      const replay = item.downloadReplay;
-      if (replay && replay.offset === offset) {
-        return {
-          data: replay.data,
-          next_offset: replay.nextOffset,
-          complete: replay.complete,
-        };
-      }
-      if (item.state !== "active" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid.");
-      let handle: FileHandle | undefined;
-      try {
-        handle = await open(item.snapshot, "r");
-        const length = Math.min(this.cfg.chunkBytes, item.size - item.offset);
-        const bytes = Buffer.alloc(length);
-        const read = await handle.read(bytes, 0, length, item.offset);
-        if (read.bytesRead !== length) throw new Error("Snapshot read failed.");
-        const data = bytes.subarray(0, read.bytesRead);
-        item.sent?.update(data);
-        item.offset += read.bytesRead;
-        const complete = item.offset === item.size;
-        if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed.");
-        const encoded = data.toString("base64");
-        item.downloadReplay = { offset, data: encoded, nextOffset: item.offset, complete };
-        if (complete) {
-          item.state = "complete";
-          await this.cleanup(item);
-          this.rememberTerminal(item);
-        }
-        return { data: encoded, next_offset: item.offset, complete };
-      } catch (error) {
-        await this.fail(item, "snapshot_read_failed");
-        throw error;
-      } finally {
-        await handle?.close().catch(() => undefined);
-      }
-    })));
-    server.registerTool("file_transfer_upload_begin", { description: "Begin a chunked upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Returns the destination resolved_path, root_id, and path_base=root before accepting chunks. Declare the total size (0–25 MiB), SHA-256, and whether an existing destination may be overwritten; then send sequential chunks with the returned transfer_id. The destination is changed only by file_transfer_upload_commit after full size and hash verification.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); const resolvedTarget = path.join(await realpath(path.dirname(target)), path.basename(target)); this.requireCurrentOperation(); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { this.requireCurrentOperation(); handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, resolved_path: resolvedTarget, root_id, path_base: "root", chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_download_begin", { description: "Begin a chunked download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Creates a private snapshot copy and returns the source resolved_path, root_id, path_base=root, size, and SHA-256; later changes to the source file do not change this copy. Read it with file_transfer_download_chunk using the returned transfer_id and sequential offsets.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => {
+      const { session, target } = this.operationTarget(user, session_id, node_id);
+      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote download public transfer mapping is not implemented yet.");
+      return this.dispatchNodeOperation(user, session, target, "file_transfer_download_begin", { root_id, relative_path });
+    }));
+    server.registerTool("file_transfer_download_chunk", { description: "Read the next chunk from the snapshot copy. A retry of the most recently returned offset replays the same chunk without advancing transfer state. The completed download is checked against its SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => {
+      this.session(user, session_id);
+      return this.executeLocalNodeOperation(user, session_id, "file_transfer_download_chunk", { transfer_id, offset });
+    }));
+    server.registerTool("file_transfer_upload_begin", { description: "Begin a chunked upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Returns the destination resolved_path, root_id, and path_base=root before accepting chunks. Declare the total size (0–25 MiB), SHA-256, and whether an existing destination may be overwritten; then send sequential chunks with the returned transfer_id. The destination is changed only by file_transfer_upload_commit after full size and hash verification.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); const resolvedTarget = path.join(await realpath(path.dirname(target)), path.basename(target)); this.requireCurrentOperation(); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { this.requireCurrentOperation(); handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", principalId: user, sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, resolved_path: resolvedTarget, root_id, path_base: "root", chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
     server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); this.requireCurrentOperation(); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
     server.registerTool("file_transfer_upload_commit", { description: "Finish the upload identified by transfer_id for the caller's active session_id. Requires all declared bytes; verifies the exact size and SHA-256 before moving the temporary file into the root-relative destination. The destination replacement is atomic when overwrite=true; when false, commit atomically fails if a destination already exists. Returns the committed resolved_path, root_id, path_base=root, size, and SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); this.requireCurrentOperation(); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { resolved_path: await realpath(item.target), root_id: item.rootId, path_base: "root", size: item.size, sha256: item.sha256 }; })));
-    server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
-      await this.sweepExpiredLocked();
+    server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => {
       this.session(user, session_id);
-      const item = this.transfers.get(transfer_id);
-      if (!item || item.sessionId !== session_id) throw new Error("Transfer is unavailable.");
-      return { state: item.state, next_offset: item.offset, transferred_bytes: item.offset };
-    })));
-    server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
-      await this.sweepExpiredLocked();
-      const item = this.transfer(user, session_id, transfer_id);
-      item.state = "cancelled";
-      await this.cleanup(item);
-      this.rememberTerminal(item);
-      await this.audit("transfer.cancel", { transferId: item.id, sessionId });
-      return { cancelled: true };
-    })));
+      return this.executeLocalNodeOperation(user, session_id, "file_transfer_status", { transfer_id });
+    }));
+    server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => {
+      this.session(user, session_id);
+      return this.executeLocalNodeOperation(user, session_id, "file_transfer_cancel", { transfer_id });
+    }));
     const processKey = (item: Pick<Process, "generation" | "pid">) => `${this.cfg.nodeId}:${item.generation}:${item.pid}`;
     const stopWatching = (processId: string) => { const watcher = this.processWatchers.get(processId); if (watcher) clearInterval(watcher); this.processWatchers.delete(processId); };
     const markStale = (item: Process) => { if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); item.state = "stale"; stopWatching(item.id); };
