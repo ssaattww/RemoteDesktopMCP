@@ -1,0 +1,81 @@
+﻿schema_version: 3
+task:
+  repository: ssaattww/RemoteDesktopMCP
+  pr: 28
+  branch: issue-25-design
+  base_ref: main
+  mode: review_follow_up
+target_identity:
+  reviewed_head: ad7fb065a99740c43453f5fab58b8bc2ef837422
+  technical_head: 6214352db8d30bbc7f95feaa21f63255e6de4a29
+findings:
+  - id: RDMCP-25-DR-001
+    severity: high
+    status: fix_candidate_unverified
+    required_action: actual CoordinatorNodeServer/ExecutorNodeClient response-loss fixture for intermediate and final download chunks
+    evidence:
+      - test/multi-pc-mcp.test.ts
+      - 8cd0fec5937ee0570082acf88346e7aa823b6d89
+  - id: RDMCP-25-DR-003
+    severity: medium
+    status: fix_candidate_unverified
+    required_action: shared typed operation registry and common execution core for public MCP and executor request adapters
+    evidence:
+      - src/node-operation.ts
+      - src/index.ts
+      - src/node-transport.ts
+      - test/multi-pc-transport.test.ts
+      - test/multi-pc.test.ts
+      - 877ba1fa00e951ad8f22eeddbd733abb7a99f58e
+      - 0bf7d5973693c6da17369edfd6d147d33a5aedfa
+      - 6214352db8d30bbc7f95feaa21f63255e6de4a29
+implementation:
+  commits:
+    - 8cd0fec5937ee0570082acf88346e7aa823b6d89
+    - 877ba1fa00e951ad8f22eeddbd733abb7a99f58e
+    - 0bf7d5973693c6da17369edfd6d147d33a5aedfa
+    - c09239927483fe7a05680df541d1208297e54adb
+    - 6dc92f5932e7eacce0c45fa24fcddf9735dca42a
+    - 6214352db8d30bbc7f95feaa21f63255e6de4a29
+  tdd:
+    test_first_commit: 8cd0fec5937ee0570082acf88346e7aa823b6d89
+    red_observed: false
+    reason: no usable local executor and no exact-head CI run was created
+verification:
+  capability: remote_ci_only
+  execution_environment:
+    rdmcp_process_start: unavailable
+    rdmcp_error: Process start failed.
+    remote_desktop_commander: offline
+  local_validation:
+    lint: unavailable
+    check: unavailable
+    build: unavailable
+    focused_tests: unavailable
+    full_tests: unavailable
+  static_checks:
+    operation_registry_present: true
+    executor_request_parser_present: true
+    actual_composition_fixture_present: true
+    arbitrary_tool_rejection_fixture_present: true
+    added_line_trailing_whitespace_detected: false
+  ci:
+    exact_head: 6214352db8d30bbc7f95feaa21f63255e6de4a29
+    matching_pull_request_runs: 0
+    state: ci_wait_unavailable
+    alternate_sha_used: false
+  diagnostics:
+    workflow: .github/workflows/lint.yml
+    artifact_contract_present: true
+report:
+  path: doc/report/2026-10-01-multi-pc-common-operation-review-fixes.md
+  status: pending_commit
+remaining_risks:
+  - current technical head is uncompiled and unexecuted in this worker
+  - actual response-loss fixture has not produced runtime evidence
+  - remote upload and remote process resource mapping remain later implementation scope
+next_action:
+  type: review
+  summary: restore an execution route or obtain exact-head PR CI, run validation, then return DR-001 and DR-003 to normal re-review
+merge:
+  performed: false
