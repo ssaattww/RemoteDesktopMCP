@@ -359,6 +359,44 @@ test("schema validation rejection bounds oversized comments before audit persist
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("schema validation rejection bounds variable-length bodies before detail processing", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  const service = f.service as unknown as {
+    operationDetail: (tool: string, args: Record<string, unknown>, body?: unknown, error?: string) => Promise<unknown>;
+  };
+  const original = service.operationDetail.bind(f.service);
+  const observed = new Map<string, Record<string, unknown>>();
+  service.operationDetail = async (tool, args, body, error) => {
+    if (error?.includes("Input validation error:")) observed.set(tool, { ...args });
+    return original(tool, args, body, error);
+  };
+  try {
+    const session = await openSession(api);
+    await assert.rejects(api.callRaw("file_patch", {
+      comment: "Verify bounded patch rejection",
+      session_id: session,
+      root_id: "files",
+      relative_path: "schema-invalid.txt",
+      old_string: "x".repeat(10_000),
+      new_string: "replacement",
+      expected_replacements: 0,
+    }), /Input validation error/);
+    await assert.rejects(api.callRaw("file_transfer_upload_chunk", {
+      comment: "Verify bounded upload chunk rejection",
+      session_id: session,
+      transfer_id: "t".repeat(16),
+      offset: -1,
+      data: "A".repeat(10_000),
+    }), /Input validation error/);
+
+    assert.equal(String(observed.get("file_patch")?.old_string ?? "").length, 4_000);
+    assert.equal(String(observed.get("file_transfer_upload_chunk")?.data ?? "").length, 4_096);
+  } finally {
+    service.operationDetail = original;
+    await api.close(); await f.cleanup();
+  }
+});
+
 test("successful upload commit detail is pinned to verified upload bytes", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   const originalAudit = f.service.audit.bind(f.service);

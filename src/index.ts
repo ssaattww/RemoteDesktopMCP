@@ -872,6 +872,36 @@ export class RemoteDesktopService {
     return `${item.rootId}/${relative}`;
   }
 
+  private rejectedArgumentProjection(tool: string, raw: Record<string, unknown>): Record<string, unknown> {
+    const projected: Record<string, unknown> = {};
+    const text = (name: string, limit: number) => {
+      const value = raw[name];
+      if (typeof value === "string") projected[name] = value.slice(0, limit);
+    };
+    const number = (name: string) => { if (typeof raw[name] === "number") projected[name] = raw[name]; };
+    const boolean = (name: string) => { if (typeof raw[name] === "boolean") projected[name] = raw[name]; };
+    const session = () => { text("session_id", 128); text("node_id", 128); };
+    const file = () => { session(); text("root_id", 500); text("relative_path", 500); };
+    const transfer = () => { session(); text("transfer_id", 128); };
+
+    text("comment", 500);
+    switch (tool) {
+      case "session_open": text("working_directory", 4096); text("purpose", 200); break;
+      case "session_close": case "node_list": session(); break;
+      case "file_search": case "content_search": session(); text("root_id", 500); text("query", 120); break;
+      case "file_read": file(); number("offset"); number("length"); break;
+      case "file_patch": file(); text("old_string", 4000); text("new_string", 4000); number("expected_replacements"); break;
+      case "file_transfer_download_begin": file(); break;
+      case "file_transfer_download_chunk": transfer(); number("offset"); break;
+      case "file_transfer_upload_begin": file(); number("size"); text("sha256", 64); boolean("overwrite"); break;
+      case "file_transfer_upload_chunk": transfer(); number("offset"); text("data", 4096); break;
+      case "file_transfer_upload_commit": case "file_transfer_status": case "file_transfer_cancel": transfer(); break;
+      case "process_start": session(); text("command", 4000); number("timeout_ms"); break;
+      case "process_output": case "process_status": case "process_kill": session(); text("process_id", 128); break;
+    }
+    return projected;
+  }
+
   private async operationDetail(tool: string, args: Record<string, unknown>, body?: unknown, error?: string): Promise<OperationDetail | undefined> {
     const output = isRecord(body) ? body : {};
     const entry = (label: string, value: unknown, format: "text" | "diff" = "text") => this.operationDetailEntry(label, value, format);
@@ -1033,7 +1063,7 @@ export class RemoteDesktopService {
       const response = await handler(...args);
       const request = isRecord(args[0]) ? args[0] : {};
       const params = isRecord(request.params) ? request.params : {};
-      const record = isRecord(params.arguments) ? params.arguments : {};
+      const rawRecord = isRecord(params.arguments) ? params.arguments : {};
       const errorText = isRecord(response) && response.isError === true && Array.isArray(response.content)
         ? response.content.map((item) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? item.text : undefined)
           .find((value) => value?.includes("Input validation error:"))
@@ -1041,6 +1071,7 @@ export class RemoteDesktopService {
       if (!errorText) return response;
       const operationId = makeId();
       const toolName = typeof params.name === "string" ? params.name : "unknown";
+      const record = this.rejectedArgumentProjection(toolName, rawRecord);
       const comment = typeof record.comment === "string" ? record.comment.trim() : "";
       const connectionId = typeof record.session_id === "string" ? record.session_id : `request:${operationId}`;
       const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
