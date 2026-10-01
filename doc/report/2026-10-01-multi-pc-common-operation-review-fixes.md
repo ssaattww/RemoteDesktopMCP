@@ -86,14 +86,28 @@ RDMCP の `process_start` は復旧し、技術 HEAD `6134288bc231a63dce5dcb9a50
 - 全テスト: 124件中123件成功、1件はPOSIX専用試験のためWindowsで除外、失敗0件。
 - `git diff --check origin/main...HEAD`: 成功。
 
+### main 同期後の最終ローカルゲート
+
+PR #28 が `mergeable=false` となり `pull_request` workflow が生成されない状態だったため、最新 `origin/main` の `ef54f7a93dc10bafcd8114f740bdd666f26b0e7a` を取り込んだ。
+`src/index.ts` の import 1箇所で競合し、main 側の `ensureSafeDataDirectory` と #25 側の NodeRegistry / NodeOperation import を両方保持して解消した。
+merge commit 前の未コミット状態で次を確認し、検証済み merge commit `722765f081de0e1b71136a90e27f98759bacac30` を作成した。
+
+- `npm run lint`: 成功。Markdown 64ファイル、0 issue。設計用語検査も成功。
+- `npm run check`: 成功。
+- `npm run build`: 成功。
+- 複数PC focused tests: 28/28 成功。
+- 全テスト: 125件中124件成功、1件はPOSIX専用試験のためWindowsで除外、失敗0件。
+- staged diff check: 成功。
+- stdout、stderr、exit code は `C:\Users\donabe\RemoteDesktopWorkspace\_diagnostics\RemoteDesktopMCP-issue25\merge-main` に保存した。
+
 ### GitHub Actions
 
-- 技術 HEAD は `6134288bc231a63dce5dcb9a50b02c47a1bc8446` で、以降のコミットは report / handoff と CI 起動確認だけを対象とする。
-- PR #28 metadata と branch ref は CI 起動確認用の空コミット `1bd79ebed2d4d2644974d194e5d4d239961c1586` まで一致することを確認した。
-- `1bd79ebed2d4d2644974d194e5d4d239961c1586` と一致する `pull_request` workflow run は確認時点で0件だった。
-- したがって CI は未実施として扱い、過去 SHA の成功 run は代用していない。
-- `.github/workflows/lint.yml` は `main` と同一で、`pull_request:` トリガーと失敗調査用のテスト結果、標準出力、標準エラー、環境ログを保存する artifact 構成を保持している。
-- この report-only 訂正の push 後は branch HEAD が再度変わるため、最終 PR HEAD と一致する run の有無を PR コメントで記録する。
+- PR #28 current HEAD `722765f081de0e1b71136a90e27f98759bacac30` と `head_sha` が完全一致する `pull_request` workflow run `36847395864` を確認した。
+- run `36847395864` の結論は `success`。
+- Ubuntu の `Lint, check, build, and test` と Windows shard 1/3、2/3、3/3 の4 jobがすべて `success`。
+- 別 SHA の成功 run は判定に使用していない。
+- `.github/workflows/lint.yml` はテスト結果、標準出力、標準エラー、環境ログを失敗時にも保存する診断 artifact 契約を保持している。
+- この report / handoff の最終更新は report-only commit になるため、その push 後の最終 PR HEAD と一致する run は PR コメントで記録し、それ以降はリポジトリを変更しない。
 
 ### 静的確認
 
@@ -129,11 +143,13 @@ GitHub 上の PR 差分について次を確認した。
 - RDMCP-25-DR-001 の actual composition 故障注入試験と RDMCP-25-DR-003 の共通 operation core 試験は実行済みで成功している。
 - upload / process を含む内部 operation registry とローカル公開 MCP adapter の共通化は完了した。
 - 遠隔アップロードの公開 ID と `remote_transfer_id` の対応、遠隔プロセスの公開論理IDと `remote_process_id` の対応は、このレビュー指摘対応の範囲外として未実装のままである。
-- PR metadata の HEAD が branch ref へ追随しておらず、current PR HEAD と完全一致する CI 証跡をまだ取得できていない。このためレビュー指摘の最終合格判定は CI と再レビュー待ちである。
+- 最新 main 取り込み後のローカルゲートと publication candidate `722765f081de0e1b71136a90e27f98759bacac30` の exact-head CI は成功した。
+- 指摘の解消判定自体は通常再レビュー担当へ委ねる。実装担当は独立したレビュー verdict を出さない。
 
 ## 次の操作
 
-1. この report / handoff 更新を push し、GitHub PR metadata の current HEAD を再取得する。
-2. その current HEAD と完全一致する `pull_request` workflow run だけを確認する。一致 run がなければ CI 未実施として報告し、別 SHA を代用しない。
-3. 同一 finding ID のまま通常再レビューへ戻し、RDMCP-25-DR-001 と RDMCP-25-DR-003 の解消確認を依頼する。
-4. merge は利用者が行う。
+1. この report / handoff の最終更新だけを report-only commit として push する。
+2. その最終 PR HEAD と完全一致する `pull_request` workflow run だけを確認する。別 SHA の run は代用しない。
+3. CI 成功後はリポジトリを追加変更せず、PR コメントへ final HEAD と検証結果を記録する。
+4. 同一 finding ID のまま通常再レビューへ戻し、RDMCP-25-DR-001 と RDMCP-25-DR-003 の解消確認を依頼する。
+5. merge は利用者が行う。

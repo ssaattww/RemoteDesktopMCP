@@ -80,24 +80,43 @@ verification:
     upload_common_handler_present: true
     process_common_handler_present: true
     added_line_trailing_whitespace_detected: false
+  publication_validation:
+    candidate_head: 722765f081de0e1b71136a90e27f98759bacac30
+    merged_main_head: ef54f7a93dc10bafcd8114f740bdd666f26b0e7a
+    conflict_resolution: src/index.ts retained ensureSafeDataDirectory and NodeRegistry/NodeOperation imports
+    lint: pass
+    markdown_files: 64
+    markdown_issues: 0
+    check: pass
+    build: pass
+    multi_pc_focused_tests: 28/28 pass
+    full_tests: 124 pass / 1 skip / 0 fail
+    full_test_total: 125
+    staged_diff_check: pass
+    diagnostics_path: C:\Users\donabe\RemoteDesktopWorkspace\_diagnostics\RemoteDesktopMCP-issue25\merge-main
   ci:
-    branch_technical_head: 6134288bc231a63dce5dcb9a50b02c47a1bc8446
-    pr_metadata_head_at_check: 1bd79ebed2d4d2644974d194e5d4d239961c1586
-    matching_pull_request_runs: 0
-    state: exact_head_ci_triggered_but_run_missing
+    publication_candidate_head: 722765f081de0e1b71136a90e27f98759bacac30
+    run_id: 36847395864
+    matching_pull_request_runs: 1
+    ubuntu_job: success
+    windows_shard_1: success
+    windows_shard_2: success
+    windows_shard_3: success
+    conclusion: success
     alternate_sha_used: false
   diagnostics:
     workflow: .github/workflows/lint.yml
     artifact_contract_present: true
 report:
   path: doc/report/2026-10-01-multi-pc-common-operation-review-fixes.md
-  status: updated_pending_push
+  status: final_update_pending_commit
 remaining_risks:
-  - exact PR current HEAD CI evidence is still unavailable because no matching pull_request workflow run has been created
+  - the final report-only commit still requires its own exact-head pull_request CI before repository changes stop
   - remote upload public-id to remote_transfer_id mapping remains later implementation scope
   - remote process public-id to remote_process_id mapping remains later implementation scope
+  - DR-001 and DR-003 disposition still requires normal re-review
 next_action:
   type: review
-  summary: push this report-only verification correction, check only the resulting exact-head CI, then return DR-001 and DR-003 to normal re-review
+  summary: commit and push only this final report/handoff update, verify exact-head CI, then stop repository writes and return DR-001 and DR-003 to normal re-review
 merge:
   performed: false
