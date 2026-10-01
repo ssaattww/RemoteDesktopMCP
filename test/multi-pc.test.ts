@@ -1,5 +1,9 @@
 ﻿import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
+import { ClusterConfigStore } from "../src/node-config.js";
+import { assertPrivateDirectory, assertPrivateFile, protectPrivateDirectory } from "../src/private-storage.js";
 import {
   addExecutor,
   clearCoordinator,
@@ -133,5 +137,75 @@ test("authenticated frames reject tampering, invalid request IDs, and replayed s
   assert.throws(() => verifyAuthenticatedFrame(sessionKey, { ...frame, request_id: "" }, "coordinator_to_executor", connectionId, 0), /request_id|MAC/i);
   assert.throws(() => verifyAuthenticatedFrame(sessionKey, { ...frame, payload: Buffer.from("{}").toString("base64url") }, "coordinator_to_executor", connectionId, 0), /MAC/i);
   assert.throws(() => verifyAuthenticatedFrame(sessionKey, frame, "coordinator_to_executor", connectionId, 1), /sequence/i);
+});
+
+async function clusterDataFixture(): Promise<{ data: string; cleanup: () => Promise<void> }> {
+  const validation = path.resolve("reference", "validation");
+  await mkdir(validation, { recursive: true });
+  const base = await mkdtemp(path.join(validation, "rdmcp-node-config-"));
+  const data = path.join(base, "data");
+  await mkdir(data);
+  await protectPrivateDirectory(data);
+  return {
+    data,
+    cleanup: async () => {
+      await rm(base, { recursive: true, force: true, maxRetries: 3 });
+    },
+  };
+}
+
+test("cluster config store initializes once and atomically persists registered executors", async () => {
+  const fixture = await clusterDataFixture();
+  try {
+    const store = new ClusterConfigStore(fixture.data);
+    assert.equal(await store.load(), undefined);
+
+    const initial = await store.initialize("coordinator", "Coordinator", 41000);
+    assert.match(initial.local.node_id, /^node_[A-Za-z0-9_-]{22}$/);
+    await assert.rejects(store.initialize("coordinator", "Replacement", 41000), /already|exist|initialized/i);
+
+    const remote = createInitialClusterConfig("executor", "Remote A");
+    const added = await store.addExecutor(remote.local.node_id, "Remote A");
+    assert.match(added.psk, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal((await store.load())?.executors[0]?.psk, added.psk);
+
+    const rotated = await store.rotateExecutorKey(remote.local.node_id);
+    assert.match(rotated.psk, /^[A-Za-z0-9_-]{43}$/);
+    assert.notEqual(rotated.psk, added.psk);
+    assert.equal((await store.load())?.executors[0]?.psk, rotated.psk);
+
+    await store.removeExecutor(remote.local.node_id);
+    assert.deepEqual((await store.load())?.executors, []);
+
+    const nodeDirectory = path.join(fixture.data, "node");
+    const configFile = path.join(nodeDirectory, "cluster.json");
+    await assertPrivateDirectory(nodeDirectory);
+    await assertPrivateFile(configFile);
+    assert.deepEqual(await readdir(nodeDirectory), ["cluster.json"]);
+    assert.doesNotMatch(await readFile(configFile, "utf8"), /Remote A/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("cluster config store preserves node identity while coordinator settings are set and cleared", async () => {
+  const fixture = await clusterDataFixture();
+  try {
+    const store = new ClusterConfigStore(fixture.data);
+    const initial = await store.initialize("executor", "Remote A");
+    const psk = generatePsk();
+
+    const configured = await store.setCoordinator("100.64.0.10", 41000, psk);
+    assert.equal(configured.local.node_id, initial.local.node_id);
+    assert.deepEqual(configured.coordinator, { host: "100.64.0.10", port: 41000, psk });
+    assert.deepEqual(await store.load(), configured);
+
+    const cleared = await store.clearCoordinator();
+    assert.equal(cleared.local.node_id, initial.local.node_id);
+    assert.equal(cleared.coordinator, undefined);
+    assert.deepEqual(await store.load(), cleared);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
