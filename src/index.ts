@@ -1101,7 +1101,7 @@ export class RemoteDesktopService {
       const toolName = typeof params.name === "string" ? params.name : "unknown";
       const record = this.rejectedArgumentProjection(toolName, rawRecord);
       const comment = typeof record.comment === "string" ? record.comment.trim() : "";
-      const connectionId = typeof record.session_id === "string" ? record.session_id : `request:${operationId}`;
+      const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
       const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
         : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
         : typeof record.transfer_id === "string" ? `transfer:${record.transfer_id.slice(0, 128)}`

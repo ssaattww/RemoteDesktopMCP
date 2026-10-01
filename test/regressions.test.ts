@@ -1052,6 +1052,13 @@ test("Issue 10: process_start inherits the service user profile environment", as
       if (observed.state === "finished" && output.includes("PROFILE_ENV=")) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    let finalState = "";
+    for (let attempt = 0; attempt < 40 && finalState !== "finished"; attempt += 1) {
+      const observed = await api.call("process_status", { session_id: session, process_id: processId });
+      finalState = String(observed.state ?? "");
+      if (finalState !== "finished") await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(finalState, "finished", "process completion must be observed before cleanup");
     const line = output.split(/\r?\n/).find((value) => value.startsWith("PROFILE_ENV=")); assert.ok(line, "profile environment output must be observable");
     const actual = JSON.parse(line.slice("PROFILE_ENV=".length)) as Record<string, { present: boolean; value: string | null }>;
     const expected = Object.fromEntries(keys.map((key) => [key, { present: Object.prototype.hasOwnProperty.call(process.env, key), value: process.env[key] ?? null }]));
