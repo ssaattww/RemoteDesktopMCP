@@ -928,7 +928,7 @@ export class RemoteDesktopService {
       case "file_transfer_download_begin":
         return this.transferLock.run(async () => {
           if (!sessionId) throw new Error("Node operation session is required.");
-          const { root_id, relative_path } = request.args as { root_id: string; relative_path: string };
+          const { root_id, relative_path, inline } = request.args as { root_id: string; relative_path: string; inline?: boolean };
           await this.sweepExpiredLocked();
           if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached.");
           const source = await this.safePath(root_id, relative_path);
@@ -958,7 +958,14 @@ export class RemoteDesktopService {
             };
             this.transfers.set(item.id, item);
             await this.audit(nodeOperationContract(request.operation).auditEvent, { transferId: item.id, direction: item.direction, sessionId, nodeId: this.cfg.nodeId, size: item.size, sha256: item.sha256 });
-            return { transfer_id: item.id, filename: path.basename(source), resolved_path: await realpath(source), root_id, path_base: "root", size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes };
+            const base = { transfer_id: item.id, filename: path.basename(source), resolved_path: await realpath(source), root_id, path_base: "root" as const, size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes };
+            if (!inline || item.size > this.cfg.chunkBytes) return { ...base, complete: false };
+            const data = await readFile(snapshot);
+            item.sent?.update(data);
+            item.offset = data.length;
+            if (item.sent?.digest("hex") !== item.sha256) { await this.fail(item, "snapshot_read_failed"); throw new Error("Snapshot integrity check failed."); }
+            await this.completeDownload(item);
+            return { ...base, data: data.toString("base64"), next_offset: item.offset, complete: true };
           } catch (error) {
             await rm(snapshot, { force: true }).catch(() => undefined);
             throw error;
@@ -989,11 +996,7 @@ export class RemoteDesktopService {
             if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed.");
             const encoded = data.toString("base64");
             item.downloadReplay = { offset, data: encoded, nextOffset: item.offset, complete };
-            if (complete) {
-              item.state = "complete";
-              await this.cleanup(item);
-              this.rememberTerminal(item);
-            }
+            if (complete) await this.completeDownload(item);
             return { data: encoded, next_offset: item.offset, complete };
           } catch (error) {
             await this.fail(item, "snapshot_read_failed");
@@ -1005,13 +1008,21 @@ export class RemoteDesktopService {
       case "file_transfer_upload_begin":
         return this.transferLock.run(async () => {
           if (!sessionId) throw new Error("Node operation session is required.");
-          const { root_id, relative_path, size, sha256, overwrite } = request.args as {
+          const { root_id, relative_path, size, sha256, overwrite, data } = request.args as {
             root_id: string;
             relative_path: string;
             size: number;
             sha256: string;
             overwrite: boolean;
+            data?: string;
           };
+          let inlineBytes: Buffer | undefined;
+          if (data !== undefined) {
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Inline upload must be valid base64.");
+            inlineBytes = Buffer.from(data, "base64");
+            if (inlineBytes.length > this.cfg.chunkBytes) throw new Error("Inline upload exceeds the configured chunk size.");
+            if (inlineBytes.length !== size || createHash("sha256").update(inlineBytes).digest("hex") !== sha256) throw new Error("Inline upload size or SHA-256 does not match the declaration.");
+          }
           await this.sweepExpiredLocked();
           if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached.");
           const target = await this.safePath(root_id, relative_path, true);
@@ -1052,7 +1063,13 @@ export class RemoteDesktopService {
               size,
               sha256,
             });
-            return { transfer_id: item.id, resolved_path: resolvedTarget, root_id, path_base: "root", chunk_bytes: this.cfg.chunkBytes };
+            const base = { transfer_id: item.id, resolved_path: resolvedTarget, root_id, path_base: "root" as const, chunk_bytes: this.cfg.chunkBytes };
+            if (inlineBytes === undefined) return { ...base, complete: false };
+            this.requireCurrentOperation();
+            if (inlineBytes.length) await handle.write(inlineBytes, 0, inlineBytes.length, 0);
+            item.offset = inlineBytes.length;
+            const completed = await this.completeUpload(item);
+            return { ...base, ...completed, complete: true };
           } catch (error) {
             await handle?.close().catch(() => undefined);
             await rm(temp, { force: true }).catch(() => undefined);
@@ -1086,43 +1103,7 @@ export class RemoteDesktopService {
           const { transfer_id } = request.args as { transfer_id: string };
           await this.sweepExpiredLocked();
           const item = this.transfer(user, sessionId, transfer_id);
-          if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete.");
-          const pathInfo = await this.identityForPath(item.temp).catch(() => undefined);
-          if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) {
-            await this.fail(item, "temp_path_replaced");
-            throw new Error("Upload temporary file identity changed.");
-          }
-          await item.tempHandle.sync();
-          await item.tempHandle.close();
-          item.tempHandle = undefined;
-          const bytes = await readFile(item.temp);
-          if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
-            await this.fail(item, "upload_hash_mismatch");
-            throw new Error("Upload integrity check failed.");
-          }
-          await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true);
-          this.requireCurrentOperation();
-          try {
-            if (item.overwrite) await rename(item.temp, item.target);
-            else {
-              await this.linkNoReplace(item.temp, item.target);
-              await unlink(item.temp);
-            }
-          } catch {
-            await this.fail(item, "destination_conflict");
-            throw new Error("Destination exists or atomic no-replace commit is unavailable.");
-          }
-          await this.untrackOwnedUpload(item.temp);
-          item.state = "complete";
-          this.rememberTerminal(item);
-          await this.audit(nodeOperationContract(request.operation).auditEvent, {
-            transferId: item.id,
-            direction: item.direction,
-            sessionId: item.sessionId,
-            size: item.size,
-            sha256: item.sha256,
-          });
-          return { resolved_path: await realpath(item.target), root_id: item.rootId, path_base: "root", size: item.size, sha256: item.sha256 };
+          return this.completeUpload(item);
         });
       case "file_transfer_status":
         return this.transferLock.run(async () => {
@@ -1517,6 +1498,37 @@ export class RemoteDesktopService {
     return item;
   }
   private rememberTerminal(item: Transfer): void { this.terminalTransfers.push(item.id); while (this.terminalTransfers.length > MAX_TERMINAL_TRANSFERS) { const old = this.terminalTransfers.shift(); if (old) this.transfers.delete(old); } }
+  private async completeDownload(item: Transfer): Promise<void> {
+    if (item.direction !== "download" || item.offset !== item.size) throw new Error("Download is incomplete.");
+    item.state = "complete";
+    await this.cleanup(item);
+    this.rememberTerminal(item);
+    await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 });
+  }
+  private async completeUpload(item: Transfer): Promise<{ resolved_path: string; root_id: string; path_base: "root"; size: number; sha256: string }> {
+    if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete.");
+    const pathInfo = await this.identityForPath(item.temp).catch(() => undefined);
+    if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); }
+    await item.tempHandle.sync();
+    await item.tempHandle.close();
+    item.tempHandle = undefined;
+    const bytes = await readFile(item.temp);
+    if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); }
+    await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true);
+    this.requireCurrentOperation();
+    try {
+      if (item.overwrite) await rename(item.temp, item.target);
+      else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); }
+    } catch {
+      await this.fail(item, "destination_conflict");
+      throw new Error("Destination exists or atomic no-replace commit is unavailable.");
+    }
+    await this.untrackOwnedUpload(item.temp);
+    item.state = "complete";
+    this.rememberTerminal(item);
+    await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 });
+    return { resolved_path: await realpath(item.target), root_id: item.rootId, path_base: "root", size: item.size, sha256: item.sha256 };
+  }
   private async cleanup(item: Transfer): Promise<void> {
     await item.tempHandle?.close().catch(() => undefined); item.tempHandle = undefined;
     if (item.snapshot) await rm(item.snapshot, { force: true }).catch(() => undefined);
@@ -1698,16 +1710,16 @@ export class RemoteDesktopService {
         expected_replacements,
       });
     }));
-    server.registerTool("file_transfer_download_begin", { description: "Begin a chunked download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Creates a private snapshot copy and returns the source resolved_path, root_id, path_base=root, size, and SHA-256; later changes to the source file do not change this copy. Read it with file_transfer_download_chunk using the returned transfer_id and sequential offsets.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => {
+    server.registerTool("file_transfer_download_begin", { description: "Begin a download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller active session_id and selected node_id. Creates a private snapshot copy and returns source path, root_id, size, and SHA-256. Set inline=true to return and complete the whole file in this call when it fits within one chunk; larger files remain active for file_transfer_download_chunk.", inputSchema: { ...fileInput, inline: z.boolean().optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, inline }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
       if (target.node_id !== this.cfg.nodeId) throw new Error("Remote download public transfer mapping is not implemented yet.");
-      return this.dispatchNodeOperation(user, session, target, "file_transfer_download_begin", { root_id, relative_path });
+      return this.dispatchNodeOperation(user, session, target, "file_transfer_download_begin", { root_id, relative_path, ...(inline === undefined ? {} : { inline }) });
     }));
     server.registerTool("file_transfer_download_chunk", { description: "Read the next chunk from the snapshot copy. A retry of the most recently returned offset replays the same chunk without advancing transfer state. The completed download is checked against its SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => {
       this.session(user, session_id);
       return this.executeLocalNodeOperation(user, session_id, "file_transfer_download_chunk", { transfer_id, offset });
     }));
-    server.registerTool("file_transfer_upload_begin", { description: "Begin a chunked upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Returns the destination resolved_path, root_id, and path_base=root before accepting chunks. Declare the total size (0–25 MiB), SHA-256, and whether an existing destination may be overwritten; then send sequential chunks with the returned transfer_id. The destination is changed only by file_transfer_upload_commit after full size and hash verification.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => {
+    server.registerTool("file_transfer_upload_begin", { description: "Begin an upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller active session_id and selected node_id. Declare total size, SHA-256, and overwrite policy. For files that fit within one chunk, pass base64 data to verify and commit in this call; omit data for the existing chunked flow.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean(), data: z.string().max(700_000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite, data }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
       if (target.node_id !== this.cfg.nodeId) throw new Error("Remote upload public transfer mapping is not implemented yet.");
       return this.dispatchNodeOperation(user, session, target, "file_transfer_upload_begin", {
@@ -1716,6 +1728,7 @@ export class RemoteDesktopService {
         size,
         sha256,
         overwrite,
+        ...(data === undefined ? {} : { data }),
       });
     }));
     server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => {

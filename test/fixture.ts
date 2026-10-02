@@ -9,7 +9,10 @@ import { protectPrivateDirectory } from "../src/private-storage.js";
 
 export type Fixture = { service: RemoteDesktopService; root: string; data: string; base: string; cleanup: () => Promise<void> };
 
-export async function fixture(overrides: Partial<RuntimeConfig> = {}): Promise<Fixture> {
+export async function fixture(
+  overrides: Partial<RuntimeConfig> = {},
+  prepare?: (paths: Pick<Fixture, "base" | "root" | "data">) => Partial<RuntimeConfig> | Promise<Partial<RuntimeConfig>>,
+): Promise<Fixture> {
   // Node 22 does not keep the test process alive for an in-memory MCP handshake.
   // This referenced timer belongs to the fixture and is always cleared by cleanup.
   const keepAlive = setInterval(() => undefined, 1_000);
@@ -25,6 +28,7 @@ export async function fixture(overrides: Partial<RuntimeConfig> = {}): Promise<F
   const data = path.join(base, "data");
   await Promise.all([mkdir(root), mkdir(data)]);
   await protectPrivateDirectory(data);
+  const prepared = prepare ? await prepare({ base, root, data }) : {};
   const cfg: RuntimeConfig = {
     baseUrl: "http://127.0.0.1",
     tokenSecret: "x".repeat(32),
@@ -35,6 +39,7 @@ export async function fixture(overrides: Partial<RuntimeConfig> = {}): Promise<F
     dcManagedConfig: true,
     allowedRedirectOrigins: new Set(["https://chatgpt.com"]),
     ...overrides,
+    ...prepared,
   };
   const service = new RemoteDesktopService(cfg);
   try { await service.initialize(); }

@@ -69,7 +69,7 @@ export const NODE_OPERATION_CONTRACTS = {
   },
   file_transfer_download_begin: {
     capability: "transfer",
-    args: z.object({ root_id: z.string().min(1), relative_path: z.string().min(1).max(500) }),
+    args: z.object({ root_id: z.string().min(1), relative_path: z.string().min(1).max(500), inline: z.boolean().optional() }),
     response: z.object({
       transfer_id: z.string().min(16),
       filename: z.string(),
@@ -79,6 +79,9 @@ export const NODE_OPERATION_CONTRACTS = {
       size: z.number().int().nonnegative(),
       sha256: z.string().regex(/^[a-f0-9]{64}$/),
       chunk_bytes: z.number().int().positive(),
+      data: z.string().optional(),
+      next_offset: z.number().int().nonnegative().optional(),
+      complete: z.boolean().optional(),
     }),
     auditEvent: "transfer.begin",
     requiresSession: true,
@@ -102,6 +105,7 @@ export const NODE_OPERATION_CONTRACTS = {
       size: z.number().int().nonnegative().max(25 * 1024 * 1024),
       sha256: z.string().regex(/^[a-f0-9]{64}$/),
       overwrite: z.boolean(),
+      data: z.string().max(700_000).optional(),
     }),
     response: z.object({
       transfer_id: z.string().min(16),
@@ -109,6 +113,9 @@ export const NODE_OPERATION_CONTRACTS = {
       root_id: z.string(),
       path_base: z.literal("root"),
       chunk_bytes: z.number().int().positive(),
+      complete: z.boolean().optional(),
+      size: z.number().int().nonnegative().optional(),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     }),
     auditEvent: "transfer.begin",
     requiresSession: true,

@@ -767,7 +767,26 @@ test("configuration rejects resolved overlap and traversal aliases", async () =>
 });
 
 test("Stage A inline download completes through the selected local node", async () => {
-  const f = await fixture();
+  const f = await fixture({}, async ({ base, data }) => {
+    const stub = path.join(base, "stage-a-desktop-commander-stub.mjs");
+    await writeFile(stub, `
+import { readFile } from "node:fs/promises";
+import readline from "node:readline";
+const names = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
+const configPath = ${JSON.stringify(configFile(data))};
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") reply(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "stage-a-stub", version: "1" } });
+  else if (request.method === "tools/list") reply(request.id, { tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
+  else if (request.method === "tools/call") {
+    const text = request.params.name === "get_config" ? await readFile(configPath, "utf8") : "{}";
+    reply(request.id, { content: [{ type: "text", text }] });
+  }
+}
+`);
+    return { dcCommand: process.execPath, dcArgs: [stub], dcManagedConfig: false };
+  });
   const api = await mcp(f.service);
   try {
     const session = await openSession(api);
@@ -783,6 +802,46 @@ test("Stage A inline download completes through the selected local node", async 
     assert.equal(downloaded.complete, true);
     assert.deepEqual(Buffer.from(downloaded.data as string, "base64"), bytes);
     assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: downloaded.transfer_id as string })).state, "complete");
+    const uploadBytes = Buffer.from("stage-a-inline-upload");
+    const uploaded = await api.call("file_transfer_upload_begin", {
+      session_id: session,
+      node_id: "local",
+      root_id: "files",
+      relative_path: "stage-a-inline-upload.bin",
+      size: uploadBytes.length,
+      sha256: sha256(uploadBytes),
+      overwrite: false,
+      data: uploadBytes.toString("base64"),
+    });
+    assert.equal(uploaded.complete, true);
+    assert.deepEqual(await readFile(path.join(f.root, "stage-a-inline-upload.bin")), uploadBytes);
+    assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: uploaded.transfer_id as string })).state, "complete");
+
+    const largeBytes = Buffer.alloc(1025, 0x5a);
+    await writeFile(path.join(f.root, "stage-a-chunked-fallback.bin"), largeBytes);
+    const largeDownload = await api.call("file_transfer_download_begin", { session_id: session, node_id: "local", root_id: "files", relative_path: "stage-a-chunked-fallback.bin", inline: true });
+    assert.equal(largeDownload.complete, false);
+    assert.equal(largeDownload.data, undefined);
+    const firstChunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: largeDownload.transfer_id as string, offset: 0 });
+    const secondChunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: largeDownload.transfer_id as string, offset: 1024 });
+    assert.equal(firstChunk.complete, false);
+    assert.equal(secondChunk.complete, true);
+    await assert.rejects(api.call("file_transfer_upload_begin", {
+      session_id: session,
+      node_id: "local",
+      root_id: "files",
+      relative_path: "stage-a-oversized-inline-upload.bin",
+      size: largeBytes.length,
+      sha256: sha256(largeBytes),
+      overwrite: false,
+      data: largeBytes.toString("base64"),
+    }));
+    const auditEvents = (await readFile(path.join(f.data, "audit.jsonl"), "utf8")).split(/\r?\n/).flatMap((line) => {
+      try { return [JSON.parse(line) as { event?: string; transferId?: string }]; } catch { return []; }
+    });
+    for (const transferId of [downloaded.transfer_id, uploaded.transfer_id]) {
+      assert.ok(auditEvents.some((entry) => entry.event === "transfer.complete" && entry.transferId === transferId));
+    }
   } finally {
     await api.close();
     await f.cleanup();
