@@ -130,11 +130,13 @@ test("plan digest and common plan validation bind every shard to the same source
 });
 
 test("common run metadata requires the exact public workflow identity and UTC creation time", () => {
-  const expected = { id: 7, repository: { full_name: "ssaattww/RemoteDesktopMCP" }, head_sha: "1".repeat(40), run_attempt: 2, created_at: "2026-10-02T12:00:00Z" };
-  assert.equal(validateRunMetadata(expected, { repository: "ssaattww/RemoteDesktopMCP", runId: 7, runAttempt: 2, sourceCommit: "1".repeat(40) }), "2026-10-02T12:00:00Z");
-  for (const bad of [{ ...expected, head_sha: "2".repeat(40) }, { ...expected, run_attempt: 1 }, { ...expected, created_at: "invalid" },
+  const expected = { id: 7, repository: { full_name: "ssaattww/RemoteDesktopMCP" }, head_sha: "2".repeat(40), run_attempt: 2, created_at: "2026-10-02T12:00:00Z" };
+  const identity = { repository: "ssaattww/RemoteDesktopMCP", runId: 7, runAttempt: 2, sourceCommit: "1".repeat(40), triggerHeadSha: "2".repeat(40) };
+  assert.equal(validateRunMetadata(expected, identity), "2026-10-02T12:00:00Z");
+  assert.throws(() => validateRunMetadata(expected, { ...identity, triggerHeadSha: "3".repeat(40) }), /head_sha/i);
+  for (const bad of [{ ...expected, head_sha: "3".repeat(40) }, { ...expected, run_attempt: 1 }, { ...expected, created_at: "invalid" },
     { ...expected, created_at: "2026-02-31T12:00:00Z" }]) {
-    assert.throws(() => validateRunMetadata(bad, { repository: "ssaattww/RemoteDesktopMCP", runId: 7, runAttempt: 2, sourceCommit: "1".repeat(40) }));
+    assert.throws(() => validateRunMetadata(bad, identity));
   }
 });
 
