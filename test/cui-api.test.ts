@@ -26,6 +26,20 @@ test("CUI API returns owner scoped session list through existing auth boundary",
       workingDirectory: "other-work",
       purpose: "Other test",
     });
+    await f.service.audit("session.open", {
+      user: "owner@example.test",
+      sessionId: "owner-session-2",
+      workingDirectory: "owner-work-2",
+      purpose: "Owner second test",
+    });
+    await f.service.audit("operation.received", {
+      user: "owner@example.test", sessionId: "owner-session", connectionId: "owner-session",
+      operationId: "owner-operation", tool: "node_list",
+    });
+    await f.service.audit("operation.received", {
+      user: "owner@example.test", sessionId: "owner-session-2", connectionId: "owner-session-2",
+      operationId: "owner-operation-2", tool: "node_list",
+    });
 
     const login = await fetch(`${base}/user/login`, {
       method: "POST",
@@ -48,9 +62,28 @@ test("CUI API returns owner scoped session list through existing auth boundary",
     assert.equal(response.status, 200);
 
     const body = await response.json() as { sessions: Array<{ session_id: string }> };
-    assert.deepEqual(body.sessions.map((session) => session.session_id), ["owner-session"]);
+    assert.deepEqual(body.sessions.map((session) => session.session_id).sort(), ["owner-session", "owner-session-2"]);
+
+    const selectedState = await fetch(`${base}/api/console-state?session_id=owner-session`, {
+      headers: { cookie: `rdmcp_user=${token}` },
+    });
+    assert.equal(selectedState.status, 200);
+    const selectedBody = await selectedState.json() as { sessions: Array<{ session_id: string }>; running: Array<{ operation_id: string }> };
+    assert.deepEqual(selectedBody.sessions.map((session) => session.session_id).sort(), ["owner-session", "owner-session-2"], "the state endpoint keeps the full owner session list; the panel must filter it by exact selected ID");
+    assert.deepEqual(selectedBody.running.map((operation) => operation.operation_id), ["owner-operation"], "running operations are server-filtered to the selected session");
+    assert.equal((await fetch(`${base}/api/console-state?session_id=other-session`, { headers: { cookie: `rdmcp_user=${token}` } })).status, 404);
+
+    const selectedLogs = await fetch(`${base}/api/logs?limit=200&session_id=owner-session`, {
+      headers: { cookie: `rdmcp_user=${token}` },
+    });
+    assert.equal(selectedLogs.status, 200);
+    const selectedLogBody = await selectedLogs.json() as { items: Array<{ event: { sessionId?: string } }> };
+    assert.ok(selectedLogBody.items.length > 0);
+    assert.ok(selectedLogBody.items.every((item) => item.event.sessionId === "owner-session"), "logs are server-filtered to the selected session");
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    server.closeAllConnections();
+    await closed;
     await f.cleanup();
   }
 });

@@ -39,6 +39,12 @@ function clientBootstrap(): void {
   const status = document.getElementById("log-status");
   const newButton = document.getElementById("log-new-button") as HTMLButtonElement | null;
   const olderButton = document.getElementById("log-older-button") as HTMLButtonElement | null;
+  const cuiPanel = document.getElementById("cui-json-panel");
+  const cuiOutput = document.getElementById("cui-json-output");
+  const cuiStatus = document.getElementById("cui-json-status");
+  const cuiRefresh = document.getElementById("cui-json-refresh") as HTMLButtonElement | null;
+  const cuiLogin = document.getElementById("cui-json-login") as HTMLAnchorElement | null;
+  const logoutForm = document.getElementById("user-logout");
   const eventSourceFactory = (url: string) => new EventSource(url);
   let appliedCursor = root.dataset.newestCursor ?? "";
   let oldestCursor = root.dataset.oldestCursor ?? "";
@@ -463,6 +469,89 @@ function clientBootstrap(): void {
       }
     } catch { /* Keep the last successful state visible. */ }
   };
+  const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
+  const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+  const isIsoDate = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
+  let cuiGeneration = 0;
+  let cuiController: AbortController | undefined;
+  let cuiBusy = false;
+  let cuiEnded = false;
+  const clearCuiPanel = (message: string, endSession = false, showLogin = false) => {
+    cuiGeneration += 1;
+    cuiController?.abort();
+    cuiController = undefined;
+    cuiBusy = false;
+    if (cuiOutput) cuiOutput.textContent = "";
+    if (cuiStatus) cuiStatus.textContent = message;
+    cuiEnded = endSession;
+    if (cuiRefresh) cuiRefresh.disabled = endSession;
+    if (cuiLogin) cuiLogin.hidden = !showLogin;
+  };
+  const sessionForPanel = () => cuiPanel?.dataset.sessionId ?? "";
+  const mapCuiResponse = (rawState: unknown, rawLogs: unknown, selectedSession: string) => {
+    if (!isRecord(rawState) || !Array.isArray(rawState.sessions) || !Array.isArray(rawState.running) || !isRecord(rawLogs) || !Array.isArray(rawLogs.items)) throw new Error("invalid response");
+    const sessions = rawState.sessions.map((raw): Record<string, unknown> => {
+      if (!isRecord(raw) || !isNonEmptyString(raw.session_id) || !(raw.purpose === null || raw.purpose === undefined || typeof raw.purpose === "string") || !(raw.working_directory === null || raw.working_directory === undefined || typeof raw.working_directory === "string") || !isIsoDate(raw.created_at) || !isIsoDate(raw.last_used_at) || typeof raw.active !== "boolean" || !["active", "closed", "expired", "unavailable"].includes(String(raw.state)) || (raw.active ? raw.state !== "active" : raw.state === "active")) throw new Error("invalid session");
+      return { sessionId: raw.session_id, purpose: raw.purpose ?? null, workingDirectory: raw.working_directory ?? null, createdAt: raw.created_at, lastAccessAt: raw.last_used_at, state: raw.state };
+    }).filter((session) => !selectedSession || session.sessionId === selectedSession);
+    const operations = rawState.running.map((raw): Record<string, unknown> => {
+      if (!isRecord(raw) || !isNonEmptyString(raw.operation_id) || !isNonEmptyString(raw.connection_id) || (raw.status !== "running" && raw.status !== "terminating")) throw new Error("invalid operation");
+      return { operationId: raw.operation_id, connectionId: raw.connection_id, status: raw.status, startedAt: null, endedAt: null };
+    });
+    const logs = rawLogs.items.map((raw): Record<string, unknown> => {
+      if (!isRecord(raw) || !isNonEmptyString(raw.id) || !isRecord(raw.event) || !isIsoDate(raw.event.at) || !isNonEmptyString(raw.event.event)) throw new Error("invalid log");
+      return { logId: raw.id, timestamp: raw.event.at, type: raw.event.event };
+    });
+    const truncated = sessions.length > 200 || operations.length > 200 || logs.length > 200;
+    return { model: { sessions: sessions.slice(0, 200), operations: operations.slice(0, 200), logs: logs.slice(0, 200) }, truncated };
+  };
+  const fetchCuiJson = async () => {
+    if (!cuiPanel || !cuiOutput || !cuiStatus || !cuiRefresh || cuiBusy || cuiEnded) return;
+    const selectedSession = sessionForPanel();
+    if (selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
+    const currentGeneration = ++cuiGeneration;
+    const controller = new AbortController();
+    cuiController = controller;
+    cuiBusy = true;
+    cuiOutput.textContent = "";
+    cuiStatus.textContent = "読込中";
+    cuiRefresh.disabled = true;
+    if (cuiLogin) cuiLogin.hidden = true;
+    const stateQuery = new URLSearchParams();
+    const logQuery = new URLSearchParams({ limit: "200" });
+    if (selectedSession) { stateQuery.set("session_id", selectedSession); logQuery.set("session_id", selectedSession); }
+    const stateUrl = "/api/console-state" + (stateQuery.size ? "?" + stateQuery.toString() : "");
+    try {
+      const [stateResponse, logsResponse] = await Promise.all([
+        fetch(stateUrl, { credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal }),
+        fetch("/api/logs?" + logQuery.toString(), { credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal }),
+      ]);
+      if (currentGeneration !== cuiGeneration) return;
+      if (selectedSession !== sessionForPanel() || selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
+      if (stateResponse.status === 401 || logsResponse.status === 401) { clearCuiPanel("認証が切れました。再ログインしてください。", true, true); return; }
+      if (stateResponse.status === 404 || logsResponse.status === 404) { clearCuiPanel("対象が見つかりません。"); return; }
+      if (!stateResponse.ok || !logsResponse.ok) throw new Error("request failed");
+      const [rawState, rawLogs] = await Promise.all([stateResponse.json(), logsResponse.json()]);
+      if (currentGeneration !== cuiGeneration) return;
+      const result = mapCuiResponse(rawState, rawLogs, selectedSession);
+      cuiOutput.textContent = JSON.stringify(result.model, null, 2);
+      const count = result.model.sessions.length + result.model.operations.length + result.model.logs.length;
+      cuiStatus.textContent = result.truncated ? "一部のみ表示（各一覧200件まで）" : count === 0 ? "表示できる項目はありません。" : "取得しました。";
+    } catch {
+      if (currentGeneration !== cuiGeneration) return;
+      clearCuiPanel("JSONを取得できませんでした。再試行してください。");
+    } finally {
+      if (currentGeneration === cuiGeneration) {
+        cuiBusy = false;
+        cuiController = undefined;
+        if (cuiRefresh) { cuiRefresh.disabled = cuiEnded; cuiRefresh.textContent = "再取得"; }
+      }
+    }
+  };
+  cuiRefresh?.addEventListener("click", () => { void fetchCuiJson(); });
+  logoutForm?.addEventListener("submit", () => clearCuiPanel("ログアウトしました。", true));
+  window.addEventListener("pagehide", () => clearCuiPanel("画面遷移のため表示を消去しました。"));
+
   function restartEvents() {
     if (connection) connection.close();
     const currentGeneration = ++generation;
@@ -493,8 +582,8 @@ function clientBootstrap(): void {
       if (pendingCount || pendingOverflow) { updateLogState("pending"); showPending(); }
       else if (logState !== "refreshing") { updateLogState("current"); showPending(); }
     });
-    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); void resync(); });
-    source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); });
+    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); clearCuiPanel("ログの再同期が必要です。再取得してください。"); void resync(); });
+    source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); clearCuiPanel("認証が切れました。再ログインしてください。", true, true); });
     source.addEventListener("heartbeat", () => { if (generation === currentGeneration && source.readyState === EventSource.OPEN) { connectionState = "connected"; setStatus(); } });
   }
 
@@ -540,6 +629,7 @@ function clientBootstrap(): void {
     if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 120) void loadOlder();
   }, { passive: true });
   setStatus(); showPending();
+  if (cuiRefresh) cuiRefresh.textContent = "JSONを取得";
   void refreshState();
   restartEvents();
 }
