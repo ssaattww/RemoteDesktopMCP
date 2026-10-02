@@ -1,37 +1,100 @@
-# CI Test Runtime Reduction Design
+﻿# CI テスト実行時間短縮設計
 
-Status: D3/D3.1 design approved by independent review. Implementation and measurement are not completed.
+## 状態
+本書はPR42のPhase1実装前設計である。実装、workflow変更、CI測定は未実施。Phase1ではCIフィードバック時間を短縮するが、認証・認可、安全境界、MCP、filesystem、process、OS検証を削除しない。目標はCI wall time概ね3分程度で、達成は同一定義の実測で判定する。Phase2の重試験local分離は対象外。
 
-Findings resolved: F24-D1-001/002 High, F24-D1-003/004/005 Medium. Additional clarifications: F24-D1-001-b Medium, F24-D1-002-a Medium, F24-D1-004-a Low.
+## テスト集合とscheduler
+入力集合Uは発見された全test対象ファイル集合とする。empty Uは失敗とし、未検出を成功扱いしない。shardは正整数。shard側のemptyは許容するが、実行結果へ記録する。
 
-## Scheduler modes
+全shard集合について union=U、pairwise disjoint、exactly-once を保証する。
 
-optimized mode uses deterministic LPT file assignment. Files are ordered by duration descending and path ascending for ties. Assignment chooses the minimum accumulated cost shard and shard number for equal cost.
+実行時はschedulerが決定したファイルpathだけをargvへ渡す。node --test --test-shardは使用しない。
 
-baseline mode uses normalized tracked test paths sorted ascending and assigns index mod 3. Baseline is a safe fallback and is not claimed to match historical CI distribution.
+scheduler出力artifactはdispatch入力として固定する。schemaはversion、sourceCommit、shardCount、generatedAt、assignmentsを必須とする。assignmentsはshardId、files、estimatedDurationMsを持つ。dispatchはartifactのfilesのみをargvへ渡す。
 
-Both modes validate union=U, pairwise disjointness, and exactly-once assignment before execution. Both pass assigned files only as argv arguments to node --import tsx --test. --test-shard is not used.
+artifact生成時とdispatch入力時の両方でrepo相対path正規化、許可ディレクトリ・拡張子確認、重複確認、union=U確認を行う。検証失敗時は実行せず失敗終了とする。
 
-An empty U is a failure. An empty shard is accepted only after aggregate coverage validation and does not start automatic test discovery.
+optimized mode:
+- duration降順、path昇順で並べる。
+- 現在合計duration最小shardへ割当。
+- 同値はshard番号昇順。
 
-## Manifest and measurement
+baseline mode:
+- 正規化path昇順。
+- index mod shard数で固定割当。
 
-Malformed schema, duplicate entries, invalid paths, non-finite duration, and duration <= 0 are hard failures.
+## manifest
+manifestは最適化データ適用可否を判定する。sourceCommitは生成元情報であり、HEAD一致だけで判定しない。
 
-Missing manifest, file set mismatch, hash/environment mismatch, or 30-day stale optimization data makes optimization unavailable and selects baseline without skipping tests.
+fingerprint対象:
+test、fixture、product source、lockfile、workflow、runner設定、OS、Node、dependency version。
 
-sourceCommit is provenance. Applicability uses fingerprints from tests, fixture, product source, lockfile, runner measurement settings, OS, Node, and existing dependencies. Manifest files and docs-only changes are excluded to avoid self-reference.
+hard fail:
+- schema不正
+- duplicate
+- 許可されないpath
+- 非有限値または0以下duration
+- identity不足
+- 未来timestamp
 
-Dedicated approved measurement job measures one file at a time under fixed commit/environment. Each file requires three successful runs and median process wall time becomes candidate cost. Failed, timeout, or cancelled measurements never replace the manifest.
+safe fallback:
+- 30日超の古い測定
+- fingerprint不一致
+- manifest不足
 
-## Performance
+fallbackではtestを省略しない。path拒否時はargvへ渡さず理由を記録する。
 
-Queue, startup, checkout, install, fixture, test execution, critical path, cleanup and upload are measured separately. The three-minute CI target is a goal only and is not a correctness gate. File cost is an estimate and does not guarantee critical path.
+## measurement
+専用measurement jobのみで測定する。全Uを各3回成功させることを完了条件とする。
 
-## Fixture isolation
+measurement record artifactは1実行1レコードとする。必須項目:
+- status: success、failure、timeout、cancel
+- startedAt、finishedAt
+- monotonicDurationMs
+- commit
+- workflow run/job id
+- runner OS、Node、dependency version
+- scheduler artifact version
+- exit code
 
-Only immutable preparation may be shared. Service, filesystem, session, user, audit, transfer, process, timer and cleanup state remain isolated. Isolation behavior is verified before performance evaluation.
+環境差異がある場合は同一条件比較対象外として記録し、別環境の結果を混在させない。failure、timeout、cancelのrecordは保持するが、最適化manifest更新には使用しない。
 
-## Phase2
+3回値のmedianを候補durationとする。成功3回、同一環境情報、証跡artifact保存を満たした場合のみmanifest更新候補となる。
 
-Local separation is not included. OS boundary tests remain in CI.
+## fixture隔離とTDD
+fixture共有による並列実行影響を防止する。監査対象は以下とする。
+- test配下fixture生成処理
+- 一時ファイル生成先
+- 環境変数変更処理
+- process起動・終了管理
+- filesystem共有状態
+- global singletonまたはmodule state
+
+回帰caseとして、同一fixtureを利用するtestの並列実行、fixture cleanup失敗、process残存、環境変数汚染、生成ファイル競合を検証対象にする。実装時はfixture境界、mutable state不存在、並列時期待結果、union/disjoint/exactly-onceを検証する。
+
+## 固定finding履歴
+独立reviewで確認された指摘を対応履歴として固定する。
+
+|ID|Severity|対応節|検証|
+|-|-|-|-|
+|CI-REBUILD-001|Medium|テスト集合とscheduler|artifact schema、dispatch mapping、path validation|
+|CI-REBUILD-002|Medium|measurement|record status、artifact、環境差異、証跡|
+|CI-REBUILD-003|Low|fixture隔離とTDD|fixture監査範囲、回帰case|
+
+## Phase2 gate
+Phase2は別承認。CI必須検証を削除しない。移動対象、代替実行方法、失敗検知能力を記録し、Phase1測定結果と比較する。
+
+## 要件対応表
+|要件|対応|
+|-|-|
+|CI短縮|測定|
+|全test維持|集合検証|
+|empty契約|scheduler検証|
+|path安全|拒否検証|
+|manifest分類|hard fail/fallback検証|
+|証跡|artifact確認|
+|fixture隔離|TDD|
+|Phase2分離|review|
+
+## 未実施
+実装、workflow変更、CI実測、manifest生成、lint実行、性能達成確認は未実施。
