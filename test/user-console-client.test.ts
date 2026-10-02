@@ -655,4 +655,120 @@ test("hidden pages and pagehide invalidate delayed automatic responses", async (
   await settle(); await settle();
   assert.equal(ui.root.dataset.newestCursor, "c0", "a response arriving after navigation cannot mutate the page");
   assert.equal(ui.sources[0]!.closed, true);
+  assert.equal(clock.timers.size, 0, "pagehide must not queue another automatic request");
+  await clock.advance(10_000);
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 2, "a departed page cannot keep fetching");
+  ui.windowListeners.get("pageshow")?.({ persisted: true });
+  await settle(); await settle();
+  assert.equal(ui.sources.length, 2, "BFCache restoration creates a fresh EventSource");
+  assert.equal(ui.root.dataset.newestCursor, "c2", "restoration catches up from the retained cursor");
+});
+
+test("interrupted automatic state refresh remains pending and retries without an SSE notice", async () => {
+  const gate = deferred<ReturnType<typeof response>>();
+  const clock = new FakeClock();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const activeCount = new FakeElement();
+  let stateRequests = 0;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/logs") return response(200, { items: [item("state-interrupt")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false });
+    stateRequests += 1;
+    if (stateRequests === 1) return response(200, { ...emptyState, activeSessions: 1 });
+    if (stateRequests === 2) return gate.promise;
+    return response(200, { ...emptyState, activeSessions: 5 });
+  }, [], { "auto-refresh": toggle, "active-session-count": activeCount }, "", { clock });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  await settle(); await settle();
+  assert.equal(stateRequests, 2);
+  toggle.checked = false; toggle.click("change");
+  gate.resolve(response(200, { ...emptyState, activeSessions: 9 }));
+  await settle(); await settle();
+  assert.equal(activeCount.textContent, "1", "the interrupted snapshot must not be rendered late");
+  toggle.checked = true; toggle.click("change");
+  await clock.advance(2_000);
+  await settle(); await settle();
+  assert.equal(stateRequests, 3, "state work is retried even without another SSE notice");
+  assert.equal(activeCount.textContent, "5");
+});
+
+test("authentication failures stop automatic log, state, and resync retries", async () => {
+  for (const mode of ["logs", "state", "resync", "normal-resync"] as const) {
+    const clock = new FakeClock();
+    const toggle = new FakeElement("input"); toggle.checked = true;
+    const calls: URL[] = [];
+    let stateRequests = 0;
+    const ui = boot(async (url) => {
+      const request = new URL(url, "http://local.test"); calls.push(request);
+      if (request.pathname === "/api/logs") {
+        if (mode !== "state") return response(mode === "logs" ? 401 : 403, {});
+        return response(200, { items: [item("auth-state")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false });
+      }
+      stateRequests += 1;
+      return stateRequests === 1 ? response(200, emptyState) : response(403, {});
+    }, [], { "auto-refresh": toggle }, mode === "normal-resync" ? "individual-session" : "", { clock });
+    await settle();
+    if (mode === "resync" || mode === "normal-resync") ui.sources[0]!.dispatch("resync-required");
+    else ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+    await settle(); await settle();
+    const requestsAtFailure = calls.length;
+    await clock.advance(10_000);
+    await settle();
+    assert.equal(calls.length, requestsAtFailure, `${mode} auth failure must not be retried`);
+    assert.equal(toggle.disabled, true, `${mode} auth failure disables further automatic work`);
+    assert.equal(clock.timers.size, 0);
+  }
+});
+
+test("SSE auth-expired stops an in-flight automatic request and its retry timer", async () => {
+  const gate = deferred<ReturnType<typeof response>>();
+  const clock = new FakeClock();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  let logRequests = 0;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    logRequests += 1;
+    return gate.promise;
+  }, [], { "auto-refresh": toggle }, "", { clock });
+  await settle();
+  const source = ui.sources[0]!;
+  source.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  await settle();
+  source.dispatch("auth-expired");
+  gate.resolve(response(200, { items: [item("late-auth")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false }));
+  await settle(); await settle();
+  assert.equal(source.closed, true);
+  assert.equal(ui.root.dataset.newestCursor, "c0");
+  assert.equal(toggle.disabled, true);
+  ui.windowListeners.get("pageshow")?.({ persisted: true });
+  assert.equal(ui.sources.length, 1, "BFCache restoration after auth expiry must not reopen SSE");
+  await clock.advance(10_000);
+  assert.equal(logRequests, 1);
+  assert.equal(clock.timers.size, 0);
+});
+
+test("manual refresh completes across automatic toggle and visibility changes", async () => {
+  for (const change of ["toggle", "visibility"] as const) {
+    const gate = deferred<ReturnType<typeof response>>();
+    const toggle = new FakeElement("input"); toggle.checked = false;
+    const ui = boot(async (url) => {
+      const request = new URL(url, "http://local.test");
+      if (request.pathname === "/api/console-state") return response(200, emptyState);
+      return gate.promise;
+    }, [], { "auto-refresh": toggle });
+    await settle();
+    ui.newest.click();
+    if (change === "toggle") {
+      toggle.checked = true; toggle.click("change");
+      toggle.checked = false; toggle.click("change");
+    } else {
+      ui.documentStub.hidden = true;
+      ui.documentListeners.get("visibilitychange")?.();
+    }
+    gate.resolve(response(200, { items: [item("manual-survives")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false }));
+    await settle(); await settle();
+    assert.equal(ui.root.dataset.newestCursor, "c1", `automatic ${change} cancellation must not invalidate a manual request`);
+  }
 });
