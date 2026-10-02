@@ -765,3 +765,26 @@ test("configuration rejects resolved overlap and traversal aliases", async () =>
     await assert.rejects(new RemoteDesktopService(configFromEnv(env)).initialize(), /must not overlap/);
   } finally { await f.cleanup(); }
 });
+
+test("Stage A inline download completes through the selected local node", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+    const bytes = Buffer.from("stage-a-inline-node-contract");
+    await writeFile(path.join(f.root, "stage-a-inline-node.bin"), bytes);
+    const downloaded = await api.call("file_transfer_download_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "stage-a-inline-node.bin",
+      node_id: "local",
+      inline: true,
+    });
+    assert.equal(downloaded.complete, true);
+    assert.deepEqual(Buffer.from(downloaded.data as string, "base64"), bytes);
+    assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: downloaded.transfer_id as string })).state, "complete");
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
