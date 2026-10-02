@@ -772,3 +772,87 @@ test("manual refresh completes across automatic toggle and visibility changes", 
     assert.equal(ui.root.dataset.newestCursor, "c1", `automatic ${change} cancellation must not invalidate a manual request`);
   }
 });
+
+test("authentication end invalidates delayed state and older-page reads and blocks new reads", async () => {
+  const stateGate = deferred<unknown>();
+  const olderGate = deferred<unknown>();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const activeCount = new FakeElement();
+  const calls: URL[] = [];
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return { status: 200, ok: true, json: () => stateGate.promise };
+    if (request.searchParams.has("before")) return { status: 200, ok: true, json: () => olderGate.promise };
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: true, hasMoreNewer: false });
+  }, [item("base")], { "auto-refresh": toggle, "active-session-count": activeCount });
+  await settle();
+  ui.older.click();
+  await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/console-state").length, 1);
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1);
+  ui.sources[0]!.dispatch("auth-expired");
+  stateGate.resolve({ ...emptyState, activeSessions: 9 });
+  olderGate.resolve({ items: [item("late-older")], newestCursor: "c0", oldestCursor: "c-1", hasMoreOlder: false, hasMoreNewer: false });
+  await settle(); await settle();
+  assert.equal(activeCount.textContent, "", "a state response received after authentication ends must not render");
+  assert.equal(ui.root.dataset.oldestCursor, "cursor-base", "an older-page response received after authentication ends must not commit");
+  ui.older.click();
+  await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1, "expired authentication must block new older-page reads");
+});
+
+test("manual refresh queued during automatic work runs once even after switching off", async () => {
+  const automaticGate = deferred<ReturnType<typeof response>>();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const calls: URL[] = [];
+  let activeLogRequests = 0;
+  let maximumActiveLogRequests = 0;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    activeLogRequests += 1;
+    maximumActiveLogRequests = Math.max(maximumActiveLogRequests, activeLogRequests);
+    if (calls.filter((call) => call.pathname === "/api/logs").length === 1) {
+      const result = await automaticGate.promise;
+      activeLogRequests -= 1;
+      return result;
+    }
+    activeLogRequests -= 1;
+    return response(200, { items: [item("manual-queued")], newestCursor: "c2", oldestCursor: "c2", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "auto-refresh": toggle });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1);
+  ui.newest.click();
+  ui.newest.click();
+  toggle.checked = false; toggle.click("change");
+  automaticGate.resolve(response(200, { items: [item("automatic-late")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false }));
+  await settle(); await settle(); await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 2, "duplicate queued clicks collapse to one manual log request");
+  assert.equal(maximumActiveLogRequests, 1, "the queued manual request starts after the automatic request ends");
+  assert.equal(ui.root.dataset.newestCursor, "c2", "the queued manual request runs after automatic refresh is switched off");
+});
+
+test("queued manual refresh is discarded after page departure or authentication end", async () => {
+  for (const ending of ["pagehide", "auth-expired"] as const) {
+    const automaticGate = deferred<ReturnType<typeof response>>();
+    const toggle = new FakeElement("input"); toggle.checked = true;
+    const calls: URL[] = [];
+    const ui = boot(async (url) => {
+      const request = new URL(url, "http://local.test"); calls.push(request);
+      if (request.pathname === "/api/console-state") return response(200, emptyState);
+      return automaticGate.promise;
+    }, [], { "auto-refresh": toggle });
+    await settle();
+    ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+    await settle();
+    ui.newest.click();
+    if (ending === "pagehide") ui.windowListeners.get("pagehide")?.();
+    else ui.sources[0]!.dispatch("auth-expired");
+    automaticGate.resolve(response(200, { items: [item("late-auto")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false }));
+    await settle(); await settle(); await settle();
+    assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1, `${ending} discards queued manual work`);
+    assert.equal(ui.root.dataset.newestCursor, "c0");
+  }
+});

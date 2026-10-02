@@ -78,6 +78,7 @@ function clientBootstrap(): void {
   let autoTimer: ReturnType<typeof setTimeout> | undefined;
   let autoBusy = false;
   let autoPending = false;
+  let manualPending = false;
   let noticeGeneration = 0;
   let statePending = false;
   let resyncPending = false;
@@ -85,18 +86,22 @@ function clientBootstrap(): void {
   let autoController: AbortController | undefined;
   let lastAutomaticCycleAt = Number.NEGATIVE_INFINITY;
   const autoEnabled = () => Boolean(listPage && autoRefresh?.checked && !pageHidden && !pageLeft && !authenticationEnded);
+  const readsAllowed = () => !authenticationEnded && !pageLeft;
   const cancelAutomatic = () => { autoGeneration += 1; if (autoTimer !== undefined) clearTimeout(autoTimer); autoTimer = undefined; autoController?.abort(); };
   function stopAuthentication() {
     if (authenticationEnded) return;
     authenticationEnded = true;
     cancelAutomatic();
+    manualPending = false;
     manualGeneration += 1;
     manualController?.abort();
     generation += 1;
+    pageGeneration += 1;
     if (connection) connection.close();
     connectionState = "disconnected";
     if (autoRefresh) autoRefresh.disabled = true;
     if (newButton) newButton.disabled = true;
+    if (olderButton) olderButton.disabled = true;
     if (status) status.textContent = "認証またはアクセス権を確認してください。再読み込み後に再認証できます。";
   }
   const isAuthenticationFailure = (response: Response) => {
@@ -372,14 +377,18 @@ function clientBootstrap(): void {
     showPending();
   };
   const fetchPage = async (params: URLSearchParams): Promise<{ response: Response; page?: LogPage }> => {
+    if (!readsAllowed()) throw new Error("read stopped");
     if (sessionId) params.set("session_id", sessionId);
     const response = await fetch("/api/logs?" + params.toString(), { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!readsAllowed()) throw new Error("read stopped");
     if (isAuthenticationFailure(response)) return { response };
     if (!response.ok) return { response };
-    return { response, page: await response.json() as LogPage };
+    const page = await response.json() as LogPage;
+    if (!readsAllowed()) throw new Error("read stopped");
+    return { response, page };
   };
   const applyNewLogs = async () => {
-    if (logState === "refreshing") return;
+    if (!readsAllowed() || logState === "refreshing") return;
     const startCursor = displayNewestCursor || appliedCursor;
     updateLogState("refreshing");
     const fetched: LogItem[] = [];
@@ -392,7 +401,7 @@ function clientBootstrap(): void {
         const params = new URLSearchParams({ limit: String(pageLimit) });
         if (cursor) params.set("after", cursor);
         const result = await fetchPage(params);
-        if (operationGeneration !== storeGeneration || pageLeft || screenGeneration !== pageGeneration) return;
+        if (!readsAllowed() || operationGeneration !== storeGeneration || screenGeneration !== pageGeneration) return;
         if (result.response.status === 409) { await resync(); return; }
         if (!result.response.ok || !result.page) throw new Error("logs request failed");
         const page = result.page;
@@ -403,7 +412,7 @@ function clientBootstrap(): void {
         if (!page.hasMoreNewer || !page.items.length || page.newestCursor === cursor) break;
         cursor = page.newestCursor;
       }
-      if (pageLeft || screenGeneration !== pageGeneration) return;
+      if (!readsAllowed() || screenGeneration !== pageGeneration) return;
       commitItems(fetched, "newer");
       appliedCursor = newest;
       root.dataset.newestCursor = newest;
@@ -485,16 +494,23 @@ function clientBootstrap(): void {
       if (autoController === controller) autoController = undefined;
       if (manualController === controller) manualController = undefined;
       autoBusy = false;
-      if (!pageLeft && !authenticationEnded) scheduleAutomatic();
+      if (!readsAllowed()) manualPending = false;
+      else if (manualPending) {
+        manualPending = false;
+        autoPending = true;
+        statePending = true;
+        void automaticCycle(true);
+      } else scheduleAutomatic();
     }
   }
   async function resync() {
+    if (!readsAllowed()) return;
     const screenGeneration = pageGeneration;
     updateLogState("resync-required");
     const params = new URLSearchParams({ limit: String(pageLimit) });
     try {
       const result = await fetchPage(params);
-      if (pageLeft || screenGeneration !== pageGeneration) return;
+      if (!readsAllowed() || screenGeneration !== pageGeneration) return;
       if (!result.response.ok || !result.page) throw new Error("resync failed");
       commitItems(chronological(result.page.items), "replace");
       appliedCursor = result.page.newestCursor;
@@ -516,14 +532,14 @@ function clientBootstrap(): void {
   }
   const chronological = (pageItems: LogItem[]) => [...pageItems].reverse();
   const loadOlder = async () => {
-    if (!hasMoreOlder || !oldestCursor || olderButton?.disabled) return;
+    if (!readsAllowed() || !hasMoreOlder || !oldestCursor || olderButton?.disabled) return;
     if (olderButton) { olderButton.disabled = true; olderButton.textContent = "取得中…"; }
     const before = oldestCursor;
     const operationGeneration = storeGeneration;
     try {
       const params = new URLSearchParams({ limit: String(pageLimit), before });
       const result = await fetchPage(params);
-      if (operationGeneration !== storeGeneration || pageLeft) return;
+      if (!readsAllowed() || operationGeneration !== storeGeneration) return;
       if (result.response.status === 409) { await resync(); return; }
       if (!result.response.ok || !result.page) throw new Error("older logs request failed");
       commitItems(chronological(result.page.items), "older");
@@ -533,7 +549,7 @@ function clientBootstrap(): void {
       root.dataset.hasMoreOlder = String(hasMoreOlder);
       if (olderButton) olderButton.hidden = !hasMoreOlder;
     } catch { if (!authenticationEnded && status) status.textContent = "過去のログを取得できませんでした。再試行してください。"; }
-    finally { if (olderButton) { olderButton.disabled = false; olderButton.textContent = "過去のログを読み込む"; } }
+    finally { if (olderButton) { olderButton.disabled = authenticationEnded; olderButton.textContent = "過去のログを読み込む"; } }
   };
   const refreshStateFrom = async (state: {
         stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
@@ -605,13 +621,14 @@ function clientBootstrap(): void {
       }
   };
   const refreshState = async () => {
+    if (!readsAllowed()) return;
     const screenGeneration = pageGeneration;
     try {
       const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (isAuthenticationFailure(response)) return;
-      if (!response.ok || pageLeft || screenGeneration !== pageGeneration) return;
+      if (!response.ok || !readsAllowed() || screenGeneration !== pageGeneration) return;
       const state = await response.json();
-      if (pageLeft || screenGeneration !== pageGeneration) return;
+      if (!readsAllowed() || screenGeneration !== pageGeneration) return;
       await refreshStateFrom(state);
     } catch { /* Keep the last successful state visible. */ }
   };
@@ -653,8 +670,14 @@ function clientBootstrap(): void {
   newButton?.addEventListener("click", () => {
     if (authenticationEnded || pageLeft) return;
     if (!listPage) { void applyNewLogs(); return; }
+    if (autoBusy) {
+      if (manualController) return;
+      manualPending = true;
+      autoPending = true;
+      statePending = true;
+      return;
+    }
     autoPending = true; statePending = true;
-    if (autoBusy) return;
     void automaticCycle(true);
   });
   autoRefresh?.addEventListener("change", () => {
@@ -671,6 +694,7 @@ function clientBootstrap(): void {
     pageLeft = true;
     pageGeneration += 1;
     cancelAutomatic();
+    manualPending = false;
     manualGeneration += 1;
     manualController?.abort();
     generation += 1;
