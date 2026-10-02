@@ -119,8 +119,12 @@ jobs:
     name: Prepare test assignment (Windows)
     runs-on: windows-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     env:
       CI_RUNNER_LABEL: windows-latest
+      CI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

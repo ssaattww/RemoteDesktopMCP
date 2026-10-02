@@ -280,13 +280,15 @@ async function getRunMetadata() {
   const runId = Number(process.env.GITHUB_RUN_ID);
   const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT);
   const sourceCommit = process.env.GITHUB_SHA;
+  const token = process.env.CI_GITHUB_TOKEN;
   if (!repository || !Number.isSafeInteger(runId) || !Number.isSafeInteger(runAttempt) || !COMMIT.test(sourceCommit ?? "")) throw new Error("GitHub workflow run identity is incomplete.");
+  if (!token) throw new Error("CI_GITHUB_TOKEN is required to read workflow run metadata.");
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required to validate the triggering commit.");
   const event = JSON.parse(await readFile(eventPath, "utf8"));
   const triggerHeadSha = event.pull_request?.head?.sha ?? event.after;
   if (!COMMIT.test(triggerHeadSha ?? "")) throw new Error("Workflow event does not contain a valid triggering commit SHA.");
-  const response = await fetch(`https://api.github.com/repos/${repository}/actions/runs/${runId}`, { headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } });
+  const response = await fetch(`https://api.github.com/repos/${repository}/actions/runs/${runId}`, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" } });
   if (!response.ok) throw new Error(`Workflow run metadata request failed with HTTP ${response.status}.`);
   const metadata = await response.json();
   const createdAt = validateRunMetadata(metadata, { repository, runId, runAttempt, sourceCommit, triggerHeadSha });
