@@ -1,0 +1,52 @@
+name: test-runtime-measurement
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-runtime-measurement-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: Measure individual Windows tests
+    runs-on: windows-latest
+    timeout-minutes: 360
+    env:
+      CI_RUNNER_LABEL: windows-latest
+      CI_JOB_NAME: Measure individual Windows tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Measure each tracked test file
+        shell: pwsh
+        run: |
+          $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
+          & node scripts/ci-test-measurement.mjs
+          exit $LASTEXITCODE
+
+      - name: Upload measurement evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runtime-measurement-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: |
+            ci-artifacts/test-measurement-records
+            ci-artifacts/test-duration-manifest.candidate.json
+          if-no-files-found: warn
+          retention-days: 14

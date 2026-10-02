@@ -57,6 +57,14 @@ Verified against current design revision after CI-REBUILD-001/002/003 fix update
 - Status: fixed
 - Evidence: \`doc/design/ci-test-runtime-reduction-design.md\` defines fixture audit scope: fixture generation, temporary file locations, environment variable mutation, process lifecycle, filesystem shared state, and global/module state. Regression cases cover parallel fixture use, cleanup failure, process residue, environment contamination, and generated file conflicts.
 
+## Follow-up contract decisions
+
+Correction to the CI-REBUILD-001 evidence: the scheduler artifact's literal schema field is `schemaVersion`; the earlier evidence used `version` as shorthand and did not quote the actual key.
+
+The implementation contract now names the measured environment values explicitly. `nodeVersion` is the exact Node version, `npmVersion` is the exact npm version, and `packageLockSha256` is the SHA-256 of the raw bytes of the tracked `package-lock.json`. `schedulerArtifactVersion` is a positive integer beginning at 1 and references the scheduler artifact's `schemaVersion`; measurement records retain their own `schemaVersion`.
+
+One Windows preparation job creates the assignment artifact once. All Windows shards download and validate that same artifact; a shard does not calculate a replacement plan. With an optimized assignment, a shard whose current fingerprint differs fails before running tests. Missing, stale, or fingerprint-mismatched manifests select baseline only during preparation. These decisions are contract clarifications, not independent runtime or CI verification.
+
 ## Verification coverage
 
 - Read: current design path and previous review report.
