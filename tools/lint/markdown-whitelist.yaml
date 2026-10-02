@@ -29,10 +29,6 @@ entries:
     description: 動作方式。
   - term: ブラウザ
     description: Web閲覧アプリ。
-  - term: キーボード
-    description: 文字入力や画面操作に使うキー入力装置。
-  - term: マウス
-    description: 画面上の項目を指し、選択する入力装置。
   - term: RemoteDesktopMCP
     description: 本製品名。
   - term: MCP
