@@ -290,3 +290,156 @@ entries:
     description: 本実装で使用するプログラミング言語。
   - term: lint
     description: 静的な規約や構文の検査を表す一般的な開発用語。
+  - term: absolute
+    description: 認証済み期間を延長操作で変更しない固定上限。
+  - term: ACL
+    description: ファイルやディレクトリのアクセス制御リスト。
+  - term: address
+    description: ネットワーク上の接続先を示す値。
+  - term: allowlist
+    description: 許可する主体や値を列挙した一覧。
+  - term: authentication
+    description: 利用者や接続元の認証処理。
+  - term: authorization
+    description: 認証後に許される操作の判定。
+  - term: bearer
+    description: 所持者によって利用できる資格情報。
+  - term: body
+    description: HTTP要求または応答に含まれる本文。
+  - term: browser
+    description: Webページを閲覧するアプリケーション。
+  - term: callback
+    description: 外部認証から戻る処理。
+  - term: capture
+    description: テストで出力や応答を記録すること。
+  - term: constant-time
+    description: 値の長さ以外で比較時間が変わらない性質。
+  - term: cookie
+    description: ブラウザーとサーバー間で送受信する状態情報。
+  - term: credential
+    description: 認証に用いる資格情報。
+  - term: CSP
+    description: ブラウザー内で許可する資源を制限する方針。
+  - term: CSRF
+    description: 別サイトから利用者の意図しない要求を送る攻撃。
+  - term: CUI
+    description: 文字と入力操作を中心とする利用者画面。
+  - term: cursor
+    description: ページ位置を示す不透明な識別値。
+  - term: deadline
+    description: 処理や認証が有効である最終時刻。
+  - term: diagnostic
+    description: 原因特定のために取得する情報。
+  - term: email
+    description: 電子メールアドレスまたはメール情報。
+  - term: encryption
+    description: 暗号化による情報保護。
+  - term: endpoint
+    description: HTTP要求を受け付ける接続先。
+  - term: entry
+    description: Mapなどに保持する一つの記録。
+  - term: EventSource
+    description: ブラウザーでSSEを利用する標準API。
+  - term: expiry
+    description: 有効期限が到来して利用できなくなること。
+  - term: failure
+    description: 処理または認証の失敗。
+  - term: generic
+    description: 個別の内部理由を示さない一般的な応答。
+  - term: global
+    description: プロセス全体や共有範囲に属するもの。
+  - term: hash
+    description: 入力値から計算する固定長の要約値。
+  - term: header
+    description: HTTP要求や応答に付随する項目。
+  - term: heartbeat
+    description: 接続が生きていることを示す定期通知。
+  - term: identity
+    description: 認証された主体を表す識別情報。
+  - term: idle
+    description: 利用操作がない状態。
+  - term: instance
+    description: 実行中の一つのサービスまたはオブジェクト。
+  - term: Issue
+    description: GitHubで管理する課題。
+  - term: key
+    description: 認証や暗号処理で用いる鍵または識別項目。
+  - term: keyboard
+    description: 利用者が入力操作を行う装置。
+  - term: lifetime
+    description: 値や認証状態が有効である期間。
+  - term: login
+    description: 利用者が認証を開始する処理。
+  - term: logout
+    description: 利用者の認証状態を明示的に終了する処理。
+  - term: map
+    description: キーを使って値を保持するメモリー上の構造。
+  - term: middleware
+    description: 要求処理の前段で共通処理を行う層。
+  - term: no-store
+    description: 応答をキャッシュへ保存しない指定。
+  - term: Origin
+    description: HTTP要求の発信元を示すヘッダー。
+  - term: package
+    description: アプリケーションが利用する配布単位。
+  - term: password
+    description: 利用者本人の確認に使う秘密文字列。
+  - term: path
+    description: URLやファイル位置を示す階層文字列。
+  - term: pointer
+    description: マウスやタッチによる指示操作。
+  - term: policy
+    description: 認証や利用を判断する規則。
+  - term: PR
+    description: GitHub上で変更をレビューするpull request。
+  - term: redirect
+    description: ブラウザーを別のURLへ移動させる応答。
+  - term: refresh
+    description: 期限や状態を更新する処理。
+  - term: restart
+    description: サービスプロセスを停止後に起動すること。
+  - term: retry
+    description: 失敗または切断後に再試行する処理。
+  - term: scope
+    description: OAuth認証で認められる権限範囲。
+  - term: session
+    description: 認証後の利用状態または操作状態。
+  - term: signing
+    description: データの真正性確認用署名の生成。
+  - term: sink
+    description: 診断情報を受け取る記録先。
+  - term: SSE
+    description: HTTP接続を使ってサーバーから通知する方式。
+  - term: tab
+    description: ブラウザー内の一つのページ表示枠。
+  - term: timeout
+    description: 所定時間の経過で状態を終了する制限。
+  - term: token
+    description: 認証や要求に用いる識別用の値。
+  - term: touch
+    description: タッチ画面で利用者が行う接触操作。
+  - term: user
+    description: システムを利用する主体。
+  - term: カテゴリ
+    description: 同じ性質の項目をまとめる分類。
+  - term: コンソール
+    description: RDMCPの状態を閲覧する利用者画面。
+  - term: コンソールログイン
+    description: 使用者コンソールに入るための認証。
+  - term: パスワードログイン
+    description: パスワードを使うコンソール認証。
+  - term: ブラウザー
+    aliases: [ブラウザー]
+    description: Webページを閲覧するアプリケーション。
+  - term: ベース
+    description: 作業や比較の基準となる状態。
+  - term: ランダム
+    description: 予測しにくい方法で生成された値。
+  - term: レビュー
+    description: 変更内容を確認して判断する作業。
+  - term: ログアウト
+    description: 利用者の認証状態を明示的に終了する処理。
+  - term: ・ログ
+    description: 箇条書きとログを連ねて記述する語。
+  - term: ソース
+    description: コードや情報の根拠となる元資料。
