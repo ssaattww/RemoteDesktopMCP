@@ -147,6 +147,15 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("Issue 13: upload description identifies the single-call path", async () => {
+  const f = await fixture({}, prepareAuditTestCommander);
+  const api = await mcp(f.service);
+  try {
+    const tools = new Map((await api.listTools()).tools.map((tool) => [tool.name, tool.description ?? ""]));
+    assert.match(tools.get("file_transfer_upload_begin") ?? "", /single call/i);
+  } finally { await api.close(); await f.cleanup(); }
+});
+
 test("Issue 20: root-scoped file operations expose their canonical path when the session CWD differs", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   try {
