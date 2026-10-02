@@ -13,6 +13,7 @@
     "dev": "tsx watch src/bootstrap.ts",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
+    "benchmark:transfer": "tsx scripts/benchmark-file-transfer.ts",
     "user:hash": "tsx src/hash-password.ts",
     "remote-auth": "tsx src/remote-auth-cli.ts",
     "node-config": "tsx src/node-config-cli.ts",
@@ -21,7 +22,7 @@
     "lint:md": "node scripts/lint-markdown.mjs",
     "lint:md:terms:candidates": "node scripts/check-markdown-whitelist.mjs --list-unknown",
     "lint:md:terms": "node scripts/check-markdown-whitelist.mjs",
-    "lint:md:terms:design": "node scripts/check-markdown-whitelist.mjs --files doc/design/functional-requirements.md doc/design/tailscale-funnel-architecture.md doc/design/multi-pc-architecture.md"
+    "lint:md:terms:design": "node scripts/check-markdown-whitelist.mjs --files doc/design/functional-requirements.md doc/design/tailscale-funnel-architecture.md doc/design/multi-pc-architecture.md doc/design/tool-operation-detail-logging.md"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -282,6 +282,8 @@ entries:
     description: 公開版の提供単位。
   - term: HKDF
     description: ノード間通信のセッション鍵生成に使用する鍵導出方式の名称。
+  - term: HTML
+    description: 文書構造を表すマークアップ形式の略称。
   - term: MagicDNS
     description: Tailscale が提供する tailnet 内の名前解決機能名。
   - term: MiB
@@ -290,6 +292,14 @@ entries:
     description: ノード間 TCP 通信を実装する JavaScript 実行環境名。
   - term: TCP
     description: ノード間の持続接続に使用する通信規約の略称。
+  - term: TypeScript
+    description: 本実装で使用するプログラミング言語。
+  - term: diff
+    description: 変更前後の差分表記を示す一般的な技術用語。
+  - term: hex
+    description: バイト列の16進表記を示す一般的な技術用語。
+  - term: lint
+    description: 静的な規約や構文の検査を表す一般的な開発用語。
   - term: ビッグエンディアン
     description: 長さ付きフレームの整数値を上位バイトから並べる表現方式。
   - term: ファイルルート

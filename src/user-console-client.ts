@@ -116,6 +116,42 @@ function clientBootstrap(): void {
     });
     return state;
   };
+  const captureOperationDetailStates = () => {
+    const state = new Map<string, boolean>();
+    operationRows?.querySelectorAll<HTMLTableRowElement>("tr[data-event-json]").forEach((row) => {
+      const operationId = row.dataset.operationId ?? "";
+      const detail = row.querySelector("details");
+      if (operationId && detail) state.set(operationId, detail.open);
+    });
+    return state;
+  };
+  const addOperationDetailCell = (row: HTMLTableRowElement, event: Record<string, unknown>, open: boolean | undefined) => {
+    const cell = row.insertCell();
+    if (!event.detail || typeof event.detail !== "object" || Array.isArray(event.detail)) { cell.textContent = "—"; return; }
+    const detail = event.detail as { summary?: unknown; entries?: unknown };
+    if (!Array.isArray(detail.entries)) { cell.textContent = "—"; return; }
+    const entries = detail.entries.flatMap((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+      const item = raw as { label?: unknown; value?: unknown; format?: unknown; truncated?: unknown };
+      return typeof item.label === "string" && typeof item.value === "string" ? [{ label: item.label, value: item.value, format: item.format, truncated: item.truncated }] : [];
+    });
+    if (!entries.length) { cell.textContent = "—"; return; }
+    const details = document.createElement("details");
+    details.open = open ?? false;
+    const summary = document.createElement("summary"); summary.textContent = "詳細"; details.append(summary);
+    if (typeof detail.summary === "string") {
+      const description = document.createElement("p"); const strong = document.createElement("strong");
+      strong.textContent = detail.summary; description.append(strong); details.append(description);
+    }
+    for (const item of entries) {
+      const block = document.createElement("div"); block.className = "operation-detail-entry";
+      const label = document.createElement("strong"); label.textContent = item.label + (item.truncated === true ? "（省略あり）" : "");
+      const pre = document.createElement("pre"); pre.textContent = item.value;
+      if (item.format === "diff") pre.className = "operation-detail-diff";
+      block.append(label); block.append(pre); details.append(block);
+    }
+    cell.append(details);
+  };
   const timeText = (value: unknown) => {
     if (typeof value !== "string" || value === "—") return "—";
     const date = new Date(value);
@@ -131,6 +167,7 @@ function clientBootstrap(): void {
   const renderOperations = () => {
     if (!operationRows) return;
     ensureInitialSnapshot();
+    const openedDetails = captureOperationDetailStates();
     const byKey = new Map<string, Record<string, unknown>>();
     if (!baselineCleared) {
       const visibleOperationIds = new Set(items.map((item) => String(item.event.operationId ?? "")).filter(Boolean));
@@ -163,6 +200,7 @@ function clientBootstrap(): void {
       addCell(row, timeText(event.startAt));
       addCell(row, timeText(event.endedAt));
       addCell(row, event.durationMs === undefined ? "—" : String(event.durationMs) + " ms");
+      addOperationDetailCell(row, event, openedDetails.get(String(event.operationId ?? key)));
     }
   };
   const processKey = (session: string, process: string) => session + ":" + process;

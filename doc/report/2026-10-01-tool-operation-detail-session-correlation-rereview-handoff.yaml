@@ -1,0 +1,145 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+  generated_at: 2026-10-01T15:54:33+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #26 / PR #33"
+task_id: tool-operation-detail-session-correlation-rereview
+branch: feat/tool-operation-detail-logs
+base_ref: main
+
+target:
+  reviewed_product_head: 3ba7a7ce64203421f342d8f3e04f9caa1bab4338
+  technical_implementation_head: b7bcb1b29db9188f39b660755f835425d454d794
+  previous_fix_verification_product_head: 4fcb89a5a753490fb63a6e202843cc2ae1a40797
+  report_commit: 4a9efabd07149a69c56d62c72c9ee163bcf006dc
+  publication_head: to_be_recorded_in_pr_comment_after_handoff_commit
+
+execution_environment:
+  kind: connected_computer
+  primary_tool: RemoteDesktopMCP
+  review_session_id: 3HSpUXhpjA6DKphElC-yuqoT1PHntgfAza50sLy6LiE
+  review_session_purpose: PR #33 / Issue #26 rereview isolated from implementation
+  implementation_session_reused_for_review: false
+  rdmcp_process_start_state: unavailable_during_late_review
+  rdmcp_file_read_state: available
+  rdc_fallback_state: offline
+  github_connector_used_for:
+    - exact-head workflow read
+    - report publication because process_start/push path was unavailable
+
+review:
+  mode: fix_verification
+  verdict: fail
+  previous_pass_with_held_superseded: true
+  reason: Direct sibling session-correlation case for RDMCP-PR33-REV-001 remained unverified and fails in the real log composition path.
+
+findings:
+  - id: RDMCP-PR33-REV-001
+    severity: medium
+    source_severity: medium
+    reclassification: none
+    status: open
+    origin: pre_existing_correlation_pattern_reused_by_change
+    location:
+      - src/index.ts:1074-1084
+      - src/admin.ts:83-109
+      - src/user-console.ts:226,241
+    description: Input-validation rejection uses the submitted projected session_id as audit correlation before proving that the session exists and belongs to the current principal.
+    impact:
+      - A foreign valid session_id causes the caller's rejected operation to be attached to the foreign session object and disappear from the caller's user console.
+      - A nonexistent syntactically valid session_id creates a phantom unavailable session row.
+      - Audit visibility and session-correlation integrity do not satisfy the rejected-operation tracking requirement.
+    evidence:
+      foreign_session_probe:
+        rejected_session_id: foreign_session_id
+        owner_session_rows: 0
+        foreign_session_user: other@example.test
+        foreign_contains_owner_rejected: true
+      nonexistent_session_probe:
+        phantom_session: true
+        user: owner@example.test
+        state: unavailable
+        contains_rejected: true
+    required_action:
+      - Accept submitted session_id for audit correlation only after proving it is an existing session owned by the current principal.
+      - Otherwise correlate the rejected operation under request:<operationId> and keep any bounded submitted identifier only as request detail if needed.
+      - Add a foreign-session schema-rejection composition test proving caller visibility and no foreign-session contamination.
+      - Add a nonexistent-session schema-rejection composition test proving no phantom session row is created.
+      - Check whether the same correlation boundary should be shared with the normal tool wrapper; if deferred, record that pre-existing sibling explicitly.
+  - id: RDMCP-PR33-REV-002
+    severity: medium
+    status: resolved
+  - id: RDMCP-PR33-REV-003
+    severity: medium
+    status: resolved
+  - id: RDMCP-PR33-REV-004
+    severity: low
+    status: resolved
+
+verification:
+  focused_on_4fcb89a5:
+    schema_validation_rejection_tests:
+      pass: 3
+      fail: 0
+      skipped: 0
+    lint: pass
+    check: pass
+    build: pass
+    diff_check: pass
+  product_delta_4fcb89a5_to_3ba7a7ce:
+    product_or_test_changes: false
+    changed_files:
+      - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification.md
+      - doc/report/2026-10-01-tool-operation-detail-rejected-arguments-fix-verification-handoff.yaml
+  exact_head_ci_for_3ba7a7ce:
+    run_id: 36825275397
+    workflow: lint
+    conclusion: success
+    jobs:
+      ubuntu: success
+      windows_1_of_3: success
+      windows_2_of_3: success
+      windows_3_of_3: success
+    diagnostic_artifacts: 4
+    artifacts_expired: false
+    note: CI does not include the newly discovered foreign/nonexistent session correlation fixtures.
+
+design_evidence:
+  - Failed/rejected operations must retain safe request information and an error.
+  - User-visible operation history must display failed operations.
+  - Other users' operation details must not cross the existing identity boundary.
+
+report:
+  report_type: verification_report
+  path: doc/report/2026-10-01-tool-operation-detail-session-correlation-rereview.md
+  commit: 4a9efabd07149a69c56d62c72c9ee163bcf006dc
+  handoff_path: doc/report/2026-10-01-tool-operation-detail-session-correlation-rereview-handoff.yaml
+
+held:
+  - item: Existing normal tool wrapper uses the submitted session_id for early operation audit correlation before handler ownership validation.
+    origin: pre_existing
+    relationship: same correlation pattern
+    disposition: must be assessed for shared fix or explicitly retained as pre-existing held
+
+unexplored: []
+blocked_items: []
+
+next_action:
+  type: implementation
+  target_skill: chat-implementation-worker
+  mode: review_fix
+  summary: Keep RDMCP-PR33-REV-001 Medium/open and fix rejected-operation session correlation with TDD in the implementation session, not the review session.
+  instructions:
+    - Add foreign and nonexistent session-id Red composition tests first.
+    - Implement principal-owned session correlation or request-scoped fallback.
+    - Reuse a shared correlation helper if the normal wrapper is fixed in the same scope.
+    - Push a new technical HEAD and validate only exact-head CI.
+    - Return to a separate review-only RDMCP session for verification.
+
+transport:
+  method: repository_file
+  packet_path: doc/report/2026-10-01-tool-operation-detail-session-correlation-rereview-handoff.yaml
+  transport_note: Do not merge. Previous pass_with_held is superseded; REV-001 remains Medium/open.
