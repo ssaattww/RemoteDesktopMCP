@@ -136,6 +136,7 @@ test("user console lists each active connection's working directory and purpose 
     assert.ok(token);
     const html = await (await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(html, new RegExp(String(own.session_id)));
+    assert.match(html, /id="auto-refresh"/);
     assert.match(html, /Build &lt;safe&gt; feature/);
     assert.match(html, /作業ディレクトリ/);
     assert.match(html, /セッション一覧/);
@@ -152,6 +153,7 @@ test("user console lists each active connection's working directory and purpose 
     assert.doesNotMatch(html, /first-only\.txt|first-command|first-output|second-only\.txt/);
     const detail = await (await fetch(`${base}/user/sessions/${encodeURIComponent(String(own.session_id))}`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(detail, /セッションの内容/);
+    assert.doesNotMatch(detail, /id="auto-refresh"/);
     assert.match(detail, /<details><summary>操作履歴<\/summary>/);
     assert.doesNotMatch(detail, /http-equiv="refresh"/);
     assert.match(detail, /作成日時: .*最終アクセス日時:/);

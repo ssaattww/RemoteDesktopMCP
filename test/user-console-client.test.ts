@@ -26,14 +26,15 @@ class FakeElement {
   href = "";
   colSpan = 1;
   children: FakeElement[] = [];
-  listeners = new Map<string, () => void>();
+  listeners = new Map<string, (event?: unknown) => void>();
   queries = new Map<string, FakeElement>();
   closestNodes = new Map<string, FakeElement>();
   rect = { top: 0, bottom: 100, left: 0, right: 100 };
   classList = { toggle: (name: string, force?: boolean) => Boolean(name && force !== false) };
   constructor(tagName = "div") { this.tagName = tagName.toLowerCase(); }
-  addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
-  click(name = "click") { this.listeners.get(name)?.(); }
+  checked = false;
+  addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
+  click(name = "click") { this.listeners.get(name)?.({ target: this }); }
   replaceChildren(...children: FakeElement[]) { this.children = children; }
   append(child: FakeElement) { this.children.push(child); }
   insertRow() { const row = new FakeElement("tr"); this.children.push(row); return row; }
@@ -73,13 +74,37 @@ class FakeEventSource {
   close() { this.closed = true; this.readyState = 2; }
 }
 
+class FakeClock {
+  now = 10_000;
+  nextId = 0;
+  timers = new Map<number, { due: number; callback: () => void }>();
+  setTimeout = (callback: () => void, delay = 0) => {
+    const id = ++this.nextId;
+    this.timers.set(id, { due: this.now + Math.max(0, delay), callback });
+    return id;
+  };
+  clearTimeout = (id: number | undefined) => { if (id !== undefined) this.timers.delete(id); };
+  async advance(milliseconds: number) {
+    const target = this.now + milliseconds;
+    while (true) {
+      const next = [...this.timers.entries()].sort((a, b) => a[1].due - b[1].due)[0];
+      if (!next || next[1].due > target) break;
+      this.now = next[1].due;
+      this.timers.delete(next[0]);
+      next[1].callback();
+      await settle();
+    }
+    this.now = target;
+  }
+}
+
 function response(status: number, body: unknown) {
   return { status, ok: status >= 200 && status < 300, json: async () => body };
 }
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
-function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "") {
+function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean } = {}) {
   FakeEventSource.instances = [];
   const root = new FakeElement(); root.dataset = { sessionId, newestCursor: initialItems[0]?.cursor ?? "c0", oldestCursor: initialItems.at(-1)?.cursor ?? "c-older", hasMoreOlder: String(initialItems.length > 0), initialItems: JSON.stringify(initialItems) };
   const status = new FakeElement();
@@ -87,10 +112,14 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
   const older = new FakeElement(); older.hidden = true;
   const elements = new Map<string, FakeElement>([["log-console", root], ["log-status", status], ["log-new-button", newest], ["log-older-button", older], ...Object.entries(extras)]);
   const scrollY = 0; let scrollCalls = 0;
-  const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: () => undefined, scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }) };
-  const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), documentElement: { scrollHeight: 1200 } };
-  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement });
-  return { root, status, newest, older, windowStub, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
+  const windowListeners = new Map<string, (event?: unknown) => void>();
+  const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: (name: string, listener: (event?: unknown) => void) => windowListeners.set(name, listener), scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }) };
+  const documentListeners = new Map<string, (event?: unknown) => void>();
+  const documentStub = { hidden: options.hidden ?? false, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
+  const clock = options.clock;
+  const ClockDate = clock ? class extends Date { constructor(value?: string | number) { super(value ?? clock.now); } static now() { return clock.now; } } : Date;
+  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock ? clock.setTimeout : setTimeout, clearTimeout: clock ? clock.clearTimeout : clearTimeout });
+  return { root, status, newest, older, windowStub, documentStub, documentListeners, windowListeners, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {
@@ -444,4 +473,186 @@ test("an empty process detail keeps its update button after a zero-count refresh
   assert.equal(processDetails.hidden, false);
   assert.ok(processDetails.children.includes(ui.root), "the update control remains in the otherwise empty process section");
   assert.ok(processDetails.children.includes(heading));
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+const emptyState = { stopped: false, activeSessions: 0, runningProcesses: 0, updatedAt: "2026-09-28T00:00:00Z", sessions: [], running: [] };
+
+test("list auto update consumes SSE notices while detail pages remain manual", async () => {
+  const calls: URL[] = [];
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    if (request.pathname === "/api/logs") return response(200, { items: [item("auto-1")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false });
+    throw new Error("unexpected request " + request.href);
+  }, [], { "auto-refresh": toggle }, "", { clock: new FakeClock() });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  await settle(); await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1);
+  assert.equal(calls.filter((url) => url.pathname === "/api/console-state").length, 2);
+  assert.equal(ui.root.dataset.newestCursor, "c1");
+
+  const detailToggle = new FakeElement("input"); detailToggle.checked = true;
+  const detailCalls: URL[] = [];
+  const detail = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); detailCalls.push(request);
+    return request.pathname === "/api/console-state" ? response(200, emptyState) : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "auto-refresh": detailToggle }, "individual-session-id");
+  await settle();
+  detail.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  await settle();
+  assert.equal(detailCalls.filter((url) => url.pathname === "/api/logs").length, 0, "individual details do not add auto fetching");
+});
+
+test("turning automatic refresh off ignores a late response without moving the cursor", async () => {
+  const gate = deferred<ReturnType<typeof response>>();
+  const calls: URL[] = [];
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const clock = new FakeClock();
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    return gate.promise;
+  }, [], { "auto-refresh": toggle }, "", { clock });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1);
+  toggle.checked = false; toggle.click("change");
+  gate.resolve(response(200, { items: [item("stale")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false }));
+  await settle(); await settle();
+  assert.equal(ui.root.dataset.newestCursor, "c0");
+  assert.equal(calls.filter((url) => url.pathname === "/api/console-state").length, 1);
+  assert.equal(ui.newest.hidden, false, "the unapplied notice remains visible");
+  assert.equal(clock.timers.size, 0, "disabled auto refresh leaves no retry timer");
+});
+
+test("failure on log request two keeps request one's cursor and resumes from it", async () => {
+  const clock = new FakeClock();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const calls: URL[] = [];
+  let failSecond = true;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    const after = request.searchParams.get("after");
+    if (after === "c0") return response(200, { items: [item("first")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: true });
+    if (after === "c1" && failSecond) { failSecond = false; return response(503, {}); }
+    if (after === "c1") return response(200, { items: [item("second")], newestCursor: "c2", oldestCursor: "c2", hasMoreOlder: false, hasMoreNewer: false });
+    throw new Error("unexpected cursor " + after);
+  }, [], { "auto-refresh": toggle }, "", { clock });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 2, latestCursor: "c2" }));
+  await settle(); await settle();
+  assert.equal(ui.root.dataset.newestCursor, "c1", "only the reflected first page advances the cursor");
+  assert.equal(ui.newest.hidden, false, "unread work remains pending after the second request fails");
+  await clock.advance(2_000);
+  await settle(); await settle();
+  assert.equal(ui.root.dataset.newestCursor, "c2");
+  assert.deepEqual(calls.filter((url) => url.pathname === "/api/logs").map((url) => url.searchParams.get("after")), ["c0", "c1", "c1"]);
+});
+
+test("state-only failure retries state without waiting for another SSE notice", async () => {
+  const clock = new FakeClock();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const calls: URL[] = [];
+  let failRefreshState = true;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/logs") return response(200, { items: [item("state-retry")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false });
+    if (failRefreshState && calls.filter((call) => call.pathname === "/api/console-state").length === 2) { failRefreshState = false; return response(503, {}); }
+    return response(200, emptyState);
+  }, [], { "auto-refresh": toggle }, "", { clock });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  await settle(); await settle();
+  assert.equal(ui.root.dataset.newestCursor, "c1", "the successful log cursor remains committed");
+  assert.equal(calls.filter((url) => url.pathname === "/api/console-state").length, 2);
+  await clock.advance(2_000);
+  await settle(); await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/console-state").length, 3, "state retry runs with no further SSE notice");
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1, "state retry does not reread committed log pages");
+});
+
+test("one automatic cycle stops after five pages and queues a bounded catch-up", async () => {
+  const clock = new FakeClock();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const calls: URL[] = [];
+  let sequence = 0;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    const start = sequence;
+    sequence += 1;
+    return response(200, { items: [item(String(start))], newestCursor: "c" + (start + 1), oldestCursor: "c" + (start + 1), hasMoreOlder: false, hasMoreNewer: start < 5 });
+  }, [], { "auto-refresh": toggle }, "", { clock });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 10_000, latestCursor: "c10000" }));
+  await settle(); await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 5);
+  assert.equal(ui.root.dataset.newestCursor, "c5");
+  assert.equal(ui.newest.hidden, false, "the capped cycle keeps pending work visible");
+  await clock.advance(1_999);
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 5, "no catch-up starts before two seconds");
+  await clock.advance(1);
+  await settle(); await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 6);
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs")[5]?.searchParams.get("after"), "c5");
+});
+
+test("resync-required while disabled waits for manual refresh", async () => {
+  const calls: URL[] = [];
+  const toggle = new FakeElement("input"); toggle.checked = false;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    return response(200, { items: [item("resynced")], newestCursor: "c9", oldestCursor: "c9", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "auto-refresh": toggle }, "", { clock: new FakeClock() });
+  await settle();
+  ui.sources[0]!.dispatch("resync-required");
+  await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 0);
+  assert.equal(ui.root.dataset.newestCursor, "c0");
+  ui.newest.click();
+  await settle(); await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1, "manual action performs the deferred resync");
+  assert.equal(ui.root.dataset.newestCursor, "c9");
+});
+
+test("hidden pages and pagehide invalidate delayed automatic responses", async () => {
+  const hiddenGate = deferred<ReturnType<typeof response>>();
+  const departureGate = deferred<ReturnType<typeof response>>();
+  const clock = new FakeClock();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const calls: URL[] = [];
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, emptyState);
+    return calls.filter((call) => call.pathname === "/api/logs").length === 1 ? hiddenGate.promise : departureGate.promise;
+  }, [], { "auto-refresh": toggle }, "", { clock });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  ui.documentStub.hidden = true;
+  ui.documentListeners.get("visibilitychange")?.();
+  hiddenGate.resolve(response(200, { items: [item("hidden")], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false }));
+  await settle(); await settle();
+  assert.equal(ui.root.dataset.newestCursor, "c0");
+  assert.equal(clock.timers.size, 0);
+
+  ui.documentStub.hidden = false;
+  ui.documentListeners.get("visibilitychange")?.();
+  await clock.advance(2_000);
+  await settle();
+  assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 2);
+  ui.windowListeners.get("pagehide")?.();
+  departureGate.resolve(response(200, { items: [item("departed")], newestCursor: "c2", oldestCursor: "c2", hasMoreOlder: false, hasMoreNewer: false }));
+  await settle(); await settle();
+  assert.equal(ui.root.dataset.newestCursor, "c0", "a response arriving after navigation cannot mutate the page");
+  assert.equal(ui.sources[0]!.closed, true);
 });

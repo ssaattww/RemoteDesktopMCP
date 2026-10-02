@@ -39,6 +39,8 @@ function clientBootstrap(): void {
   const status = document.getElementById("log-status");
   const newButton = document.getElementById("log-new-button") as HTMLButtonElement | null;
   const olderButton = document.getElementById("log-older-button") as HTMLButtonElement | null;
+  const autoRefresh = document.getElementById("auto-refresh") as HTMLInputElement | null;
+  const listPage = !sessionId && Boolean(autoRefresh);
   const eventSourceFactory = (url: string) => new EventSource(url);
   let appliedCursor = root.dataset.newestCursor ?? "";
   let oldestCursor = root.dataset.oldestCursor ?? "";
@@ -59,6 +61,8 @@ function clientBootstrap(): void {
   const baselineOperations = new Map<string, Record<string, unknown>>();
   const baselineProcesses = new Map<string, { session: string; process: string; start?: Record<string, unknown> }>();
   let connection: EventSource | undefined;
+  let pageLeft = false;
+  let pageGeneration = 0;
   let generation = 0;
   let storeGeneration = 0;
   let connectionState: ConnectionState = "connecting";
@@ -67,6 +71,25 @@ function clientBootstrap(): void {
   let pendingOverflow = false;
   let gapCount = 0;
   const pageLimit = 200;
+  let autoGeneration = 0;
+  let autoTimer: ReturnType<typeof setTimeout> | undefined;
+  let autoBusy = false;
+  let autoPending = false;
+  let noticeGeneration = 0;
+  let statePending = false;
+  let resyncPending = false;
+  let pageHidden = document.hidden;
+  let autoController: AbortController | undefined;
+  let lastAutomaticCycleAt = Number.NEGATIVE_INFINITY;
+  const autoEnabled = () => Boolean(listPage && autoRefresh?.checked && !pageHidden);
+  const cancelAutomatic = () => { autoGeneration += 1; if (autoTimer !== undefined) clearTimeout(autoTimer); autoTimer = undefined; autoController?.abort(); };
+  const scheduleAutomatic = () => {
+    if (!autoEnabled() || autoBusy || autoTimer !== undefined || !(autoPending || statePending || resyncPending)) return;
+    const generationAtSchedule = autoGeneration;
+    const wait = Math.max(0, 2000 - (Date.now() - lastAutomaticCycleAt));
+    if (wait === 0) { void automaticCycle(); return; }
+    autoTimer = setTimeout(() => { autoTimer = undefined; if (generationAtSchedule === autoGeneration) void automaticCycle(); }, wait);
+  };
 
   const query = (name: string, value: string) => name + "=" + encodeURIComponent(value);
   const apiPath = (path: string) => path + (sessionId ? "?" + query("session_id", sessionId) : "");
@@ -341,12 +364,13 @@ function clientBootstrap(): void {
     let cursor = startCursor;
     let newest = startCursor;
     const operationGeneration = storeGeneration;
+    const screenGeneration = pageGeneration;
     try {
       while (true) {
         const params = new URLSearchParams({ limit: String(pageLimit) });
         if (cursor) params.set("after", cursor);
         const result = await fetchPage(params);
-        if (operationGeneration !== storeGeneration) return;
+        if (operationGeneration !== storeGeneration || pageLeft || screenGeneration !== pageGeneration) return;
         if (result.response.status === 409) { await resync(); return; }
         if (!result.response.ok || !result.page) throw new Error("logs request failed");
         const page = result.page;
@@ -357,6 +381,7 @@ function clientBootstrap(): void {
         if (!page.hasMoreNewer || !page.items.length || page.newestCursor === cursor) break;
         cursor = page.newestCursor;
       }
+      if (pageLeft || screenGeneration !== pageGeneration) return;
       commitItems(fetched, "newer");
       appliedCursor = newest;
       root.dataset.newestCursor = newest;
@@ -369,11 +394,78 @@ function clientBootstrap(): void {
       void refreshState();
     }
   };
+  async function automaticCycle(manual = false) {
+    if ((!manual && !autoEnabled()) || autoBusy) return;
+    const expected = autoGeneration;
+    lastAutomaticCycleAt = Date.now();
+    const noticesAtStart = noticeGeneration;
+    const controller = new AbortController(); autoController = controller; autoBusy = true;
+    const current = () => expected === autoGeneration && !pageLeft && (manual || autoEnabled()) && !controller.signal.aborted;
+    let needsState = statePending;
+    try {
+      if (resyncPending) {
+        const response = await fetch("/api/logs?limit=" + pageLimit, { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
+        if (!current()) return;
+        if (!response.ok) throw new Error("resync failed");
+        const page = await response.json() as LogPage;
+        if (!current()) return;
+        commitItems(chronological(page.items), "replace");
+        if (!current()) return;
+        appliedCursor = page.newestCursor; oldestCursor = page.oldestCursor; hasMoreOlder = page.hasMoreOlder;
+        root.dataset.newestCursor = appliedCursor; root.dataset.oldestCursor = oldestCursor; root.dataset.hasMoreOlder = String(hasMoreOlder);
+        pendingCount = 0; pendingOverflow = false; resyncPending = false;
+        autoPending = noticeGeneration !== noticesAtStart;
+        if (!autoPending) showPending();
+        needsState = true;
+        restartEvents();
+      } else if (autoPending) {
+        let cursor = appliedCursor;
+        let completed = false;
+        for (let pageNumber = 0; pageNumber < 5; pageNumber += 1) {
+          const params = new URLSearchParams({ limit: String(pageLimit), after: cursor });
+          const response = await fetch("/api/logs?" + params, { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
+          if (!current()) return;
+          if (response.status === 409) { resyncPending = true; break; }
+          if (!response.ok) throw new Error("logs request failed");
+          const page = await response.json() as LogPage;
+          if (!current()) return;
+          if (!Array.isArray(page.items)) throw new Error("invalid logs response");
+          commitItems(chronological(page.items), "newer");
+          if (!current()) return;
+          cursor = page.newestCursor || cursor;
+          appliedCursor = cursor; root.dataset.newestCursor = cursor;
+          needsState = true;
+          if (!page.hasMoreNewer || !page.items.length || cursor === params.get("after")) { completed = true; break; }
+        }
+        if (completed && noticeGeneration === noticesAtStart) { autoPending = false; pendingCount = 0; pendingOverflow = false; showPending(); }
+        else if (completed) autoPending = true;
+      }
+      if (needsState) {
+        const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
+        if (!current()) return;
+        if (!response.ok) throw new Error("state request failed");
+        const state = await response.json();
+        if (!current()) return;
+        statePending = false;
+        await refreshStateFrom(state);
+        if (!current()) return;
+      }
+      updateLogState(autoPending || resyncPending || statePending ? "pending" : "current");
+    } catch {
+      if (current()) { autoPending = autoPending || pendingCount > 0 || pendingOverflow; statePending = needsState || statePending; updateLogState("pending"); }
+    } finally {
+      if (autoController === controller) autoController = undefined;
+      autoBusy = false;
+      scheduleAutomatic();
+    }
+  }
   async function resync() {
+    const screenGeneration = pageGeneration;
     updateLogState("resync-required");
     const params = new URLSearchParams({ limit: String(pageLimit) });
     try {
       const result = await fetchPage(params);
+      if (pageLeft || screenGeneration !== pageGeneration) return;
       if (!result.response.ok || !result.page) throw new Error("resync failed");
       commitItems(chronological(result.page.items), "replace");
       appliedCursor = result.page.newestCursor;
@@ -398,7 +490,7 @@ function clientBootstrap(): void {
     try {
       const params = new URLSearchParams({ limit: String(pageLimit), before });
       const result = await fetchPage(params);
-      if (operationGeneration !== storeGeneration) return;
+      if (operationGeneration !== storeGeneration || pageLeft) return;
       if (result.response.status === 409) { await resync(); return; }
       if (!result.response.ok || !result.page) throw new Error("older logs request failed");
       commitItems(chronological(result.page.items), "older");
@@ -410,15 +502,12 @@ function clientBootstrap(): void {
     } catch { if (status) status.textContent = "過去のログを取得できませんでした。再試行してください。"; }
     finally { if (olderButton) { olderButton.disabled = false; olderButton.textContent = "過去のログを読み込む"; } }
   };
-  const refreshState = async () => {
-    try {
-      const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
-      if (!response.ok) return;
-      const state = await response.json() as {
+  const refreshStateFrom = async (state: {
         stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
         sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
         running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
-      };
+        unassignedOperations?: Array<{ id: string; at: string }>;
+      }) => {
       const stopped = document.getElementById("execution-state");
       const active = document.getElementById("active-session-count");
       const running = document.getElementById("running-count");
@@ -429,6 +518,9 @@ function clientBootstrap(): void {
       if (updated) updated.textContent = timeText(state.updatedAt);
       const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
       if (sessionRows && state.sessions) {
+        const focusedElement = document.activeElement as HTMLElement | null;
+        const focusedRow = focusedElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null;
+        const focusedSessionId = focusedRow?.dataset.sessionId;
         const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
         sessionRows.replaceChildren();
         if (!visibleSessions.length) {
@@ -436,6 +528,7 @@ function clientBootstrap(): void {
           cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
         } else for (const session of visibleSessions) {
           const row = sessionRows.insertRow();
+          row.dataset.sessionId = session.session_id;
           const linkCell = row.insertCell(); const link = document.createElement("a");
           link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
           addCell(row, timeText(session.created_at));
@@ -444,6 +537,10 @@ function clientBootstrap(): void {
           addCell(row, session.purpose ?? "—");
           addCell(row, session.session_id);
           addCell(row, session.working_directory ?? "—");
+        }
+        if (focusedSessionId) {
+          const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === focusedSessionId);
+          restoredRow?.querySelector("a")?.focus();
         }
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
@@ -461,6 +558,27 @@ function clientBootstrap(): void {
         if (table) table.hidden = state.running.length === 0;
         if (empty) empty.hidden = state.running.length !== 0;
       }
+      const unassignedRows = document.getElementById("unassigned-operation-rows");
+      const unassignedSection = document.getElementById("unassigned-operations-section");
+      if (unassignedRows && state.unassignedOperations) {
+        unassignedRows.replaceChildren();
+        for (const operation of state.unassignedOperations) {
+          const row = document.createElement("li");
+          row.append(document.createTextNode(timeText(operation.at) + " · "));
+          const link = document.createElement("a"); link.href = "/user/sessions/" + encodeURIComponent(operation.id); link.textContent = operation.id; row.append(link);
+          unassignedRows.append(row);
+        }
+        if (unassignedSection) unassignedSection.hidden = state.unassignedOperations.length === 0;
+      }
+  };
+  const refreshState = async () => {
+    const screenGeneration = pageGeneration;
+    try {
+      const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (!response.ok || pageLeft || screenGeneration !== pageGeneration) return;
+      const state = await response.json();
+      if (pageLeft || screenGeneration !== pageGeneration) return;
+      await refreshStateFrom(state);
     } catch { /* Keep the last successful state visible. */ }
   };
   function restartEvents() {
@@ -490,15 +608,31 @@ function clientBootstrap(): void {
       pendingCount = firstNotice ? amount : Math.min(1000, pendingCount + amount);
       firstNotice = false;
       pendingOverflow = Boolean(data.overflow) || pendingCount >= 1000;
-      if (pendingCount || pendingOverflow) { updateLogState("pending"); showPending(); }
+      if (pendingCount || pendingOverflow) { noticeGeneration += 1; updateLogState("pending"); showPending(); if (autoEnabled()) { autoPending = true; scheduleAutomatic(); } }
       else if (logState !== "refreshing") { updateLogState("current"); showPending(); }
     });
-    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); void resync(); });
+    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); if (listPage) { resyncPending = true; autoPending = true; if (autoEnabled()) scheduleAutomatic(); else updateLogState("resync-required"); } else void resync(); });
     source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); });
     source.addEventListener("heartbeat", () => { if (generation === currentGeneration && source.readyState === EventSource.OPEN) { connectionState = "connected"; setStatus(); } });
   }
 
-  newButton?.addEventListener("click", () => { void applyNewLogs(); });
+  newButton?.addEventListener("click", () => {
+    if (!listPage) { void applyNewLogs(); return; }
+    autoPending = true; statePending = true;
+    if (autoBusy) return;
+    void automaticCycle(true);
+  });
+  autoRefresh?.addEventListener("change", () => {
+    if (!autoRefresh.checked) { cancelAutomatic(); return; }
+    if (pendingCount || pendingOverflow || resyncPending) autoPending = true;
+    scheduleAutomatic();
+  });
+  document.addEventListener("visibilitychange", () => {
+    pageHidden = document.hidden;
+    if (pageHidden) cancelAutomatic();
+    else { if (pendingCount || pendingOverflow || resyncPending) autoPending = true; scheduleAutomatic(); }
+  });
+  window.addEventListener("pagehide", () => { pageLeft = true; pageGeneration += 1; cancelAutomatic(); generation += 1; if (connection) connection.close(); });
   olderButton?.addEventListener("click", () => { void loadOlder(); });
   if (processDetails) {
     const hint = document.getElementById("log-pull-hint");
