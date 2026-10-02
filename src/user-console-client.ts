@@ -491,7 +491,7 @@ function clientBootstrap(): void {
   const mapCuiResponse = (rawState: unknown, rawLogs: unknown, selectedSession: string) => {
     if (!isRecord(rawState) || !Array.isArray(rawState.sessions) || !Array.isArray(rawState.running) || !isRecord(rawLogs) || !Array.isArray(rawLogs.items)) throw new Error("invalid response");
     const sessions = rawState.sessions.map((raw): Record<string, unknown> => {
-      if (!isRecord(raw) || !isNonEmptyString(raw.session_id) || !(raw.purpose === null || raw.purpose === undefined || typeof raw.purpose === "string") || !(raw.working_directory === null || raw.working_directory === undefined || typeof raw.working_directory === "string") || !isIsoDate(raw.created_at) || !isIsoDate(raw.last_used_at) || typeof raw.active !== "boolean" || !["active", "closed", "expired", "unavailable"].includes(String(raw.state)) || (raw.active ? raw.state !== "active" : raw.state === "active")) throw new Error("invalid session");
+      if (!isRecord(raw) || !isNonEmptyString(raw.session_id) || !(raw.purpose === null || raw.purpose === undefined || typeof raw.purpose === "string") || !(raw.working_directory === null || raw.working_directory === undefined || typeof raw.working_directory === "string") || !isIsoDate(raw.created_at) || !isIsoDate(raw.last_used_at) || typeof raw.active !== "boolean" || typeof raw.state !== "string" || !["active", "closed", "expired", "unavailable"].includes(raw.state) || (raw.active ? raw.state !== "active" : raw.state === "active")) throw new Error("invalid session");
       return { sessionId: raw.session_id, purpose: raw.purpose ?? null, workingDirectory: raw.working_directory ?? null, createdAt: raw.created_at, lastAccessAt: raw.last_used_at, state: raw.state };
     }).filter((session) => !selectedSession || session.sessionId === selectedSession);
     const operations = rawState.running.map((raw): Record<string, unknown> => {
@@ -532,8 +532,11 @@ function clientBootstrap(): void {
       if (stateResponse.status === 404 || logsResponse.status === 404) { clearCuiPanel("対象が見つかりません。"); return; }
       if (!stateResponse.ok || !logsResponse.ok) throw new Error("request failed");
       const [rawState, rawLogs] = await Promise.all([stateResponse.json(), logsResponse.json()]);
-      if (currentGeneration !== cuiGeneration) return;
+      if (currentGeneration !== cuiGeneration || controller.signal.aborted || cuiEnded) return;
+      if (selectedSession !== sessionForPanel() || selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
       const result = mapCuiResponse(rawState, rawLogs, selectedSession);
+      if (currentGeneration !== cuiGeneration || controller.signal.aborted || cuiEnded) return;
+      if (selectedSession !== sessionForPanel() || selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
       cuiOutput.textContent = JSON.stringify(result.model, null, 2);
       const count = result.model.sessions.length + result.model.operations.length + result.model.logs.length;
       cuiStatus.textContent = result.truncated ? "一部のみ表示（各一覧200件まで）" : count === 0 ? "表示できる項目はありません。" : "取得しました。";

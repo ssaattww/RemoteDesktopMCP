@@ -251,3 +251,41 @@ test("invalid enum response clears panel content instead of rendering partial da
   assert.equal(output.textContent, "");
   assert.match(ui.elements.get("cui-json-status")!.textContent, /取得できません/);
 });
+
+test("session state must be a string from the fixed enum", async () => {
+  for (const invalidState of [["closed"], 42, { value: "closed" }]) {
+    const invalid = { ...baseState, sessions: [{ ...baseState.sessions[0], state: invalidState, active: false }] };
+    const ui = createPanel(async (url) => url.pathname === "/api/console-state" ? httpResponse(200, invalid) : httpResponse(200, logPage));
+    await settle();
+    ui.elements.get("cui-json-refresh")!.click(); await settle(); await settle();
+    assert.equal(ui.elements.get("cui-json-output")!.textContent, "", `invalid state ${JSON.stringify(invalidState)} must reject the whole response`);
+    assert.match(ui.elements.get("cui-json-status")!.textContent, /取得できません/);
+  }
+});
+
+test("selected session change while response bodies are pending invalidates the old view", async () => {
+  let resolveStateBody!: (value: unknown) => void;
+  let resolveLogsBody!: (value: unknown) => void;
+  const stateBody = new Promise<unknown>((resolve) => { resolveStateBody = resolve; });
+  const logsBody = new Promise<unknown>((resolve) => { resolveLogsBody = resolve; });
+  const ui = createPanel(async (url) => {
+    if (url.pathname === "/api/console-state" && url.searchParams.has("session_id")) {
+      return { status: 200, ok: true, json: () => stateBody };
+    }
+    if (url.pathname === "/api/logs" && url.searchParams.get("limit") === "200") {
+      return { status: 200, ok: true, json: () => logsBody };
+    }
+    return url.pathname === "/api/console-state" ? httpResponse(200, baseState) : httpResponse(200, logPage);
+  });
+  await settle();
+  ui.elements.get("cui-json-refresh")!.click();
+  await settle();
+  ui.elements.get("log-console")!.dataset.sessionId = "next-session";
+  ui.elements.get("cui-json-panel")!.dataset.sessionId = "next-session";
+  resolveStateBody(baseState);
+  resolveLogsBody(logPage);
+  await settle(); await settle();
+  assert.equal(ui.elements.get("cui-json-output")!.textContent, "", "body completion for the old scope must not render after the selected session changes");
+  assert.match(ui.elements.get("cui-json-status")!.textContent, /セッション選択が変わりました/);
+  assert.equal(ui.elements.get("cui-json-refresh")!.disabled, false);
+});
