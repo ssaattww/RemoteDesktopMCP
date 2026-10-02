@@ -312,11 +312,12 @@ async function loadManifest(root) {
   }
 }
 
-function parseArgs(args) {
+export function parseArgs(args) {
   const result = {};
   for (let i = 0; i < args.length; i += 2) {
     if (!args[i]?.startsWith("--") || i + 1 >= args.length) throw new Error(`Invalid command argument: ${args[i]}`);
-    result[args[i].slice(2)] = args[i + 1];
+    const name = args[i].slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    result[name] = args[i + 1];
   }
   return result;
 }

@@ -14,6 +14,7 @@ import {
   validateRuntimeFingerprint,
   validatePartition,
   validatePlan,
+  parseArgs,
   validateRunMetadata,
 } from "../scripts/ci-test-scheduler.mjs";
 import { buildManifestCandidate, createMeasurementRecord } from "../scripts/ci-test-measurement.mjs";
@@ -141,6 +142,7 @@ test("common run metadata requires the exact public workflow identity and UTC cr
 });
 
 test("scheduler CLI executes its entry point and rejects unknown commands", () => {
+  assert.deepEqual(parseArgs(["--shard-id", "2", "--shard-count", "3"]), { shardId: "2", shardCount: "3" });
   const script = fileURLToPath(new URL("../scripts/ci-test-scheduler.mjs", import.meta.url));
   const result = spawnSync(process.execPath, [script, "unknown"], { cwd: process.cwd(), encoding: "utf8" });
   assert.equal(result.status, 1);
