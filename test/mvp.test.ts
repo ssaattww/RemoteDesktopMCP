@@ -49,7 +49,7 @@ test("configuration fails before Desktop Commander for protected root overlap", 
   try {
     await mkdir(data); await protectPrivateDirectory(data);
     const env = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]), FILE_ROOTS_JSON: JSON.stringify([{ id: "r", path: data }]), DATA_DIR: data };
-    const cfg = configFromEnv(env); const service = new RemoteDesktopService(cfg);
+    const cfg = configFromEnv(env); assert.equal(cfg.chunkBytes, 512 * 1024); const service = new RemoteDesktopService(cfg);
     await assert.rejects(service.initialize(), /must not overlap/);
   } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }
 });

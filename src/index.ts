@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+﻿import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -30,10 +30,12 @@ type Session = { id: string; user: string; workingDirectory: string; purpose: st
 type FileIdentity = { dev: string; ino: string };
 type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type ProtectedConfigIdentity = FileIdentity & { pin: string };
-type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
+type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; committedPreview?: OperationDetailEntry };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
 type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; sessionAccessAt?: string };
+type OperationDetailEntry = { label: string; value: string; format: "text" | "diff"; truncated?: boolean };
+type OperationDetail = { version: 1; summary: string; entries: OperationDetailEntry[] };
 export type AuditLogItem = { id: string; cursor: string; event: Record<string, unknown> & { event: string; at: string } };
 type AuditLogEntry = { sequence: number; event: Record<string, unknown> & { event: string; at: string } };
 
@@ -78,7 +80,7 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   if (authMode === "password" && (users.length !== 1 || !users[0]?.email || !users[0]?.passwordHash)) throw new Error("AUTHORIZED_USERS_JSON must contain exactly one complete local-development user.");
   if (!roots.length || roots.some((root) => !root.id || !root.path) || new Set(roots.map((root) => root.id)).size !== roots.length) throw new Error("FILE_ROOTS_JSON must contain unique complete roots.");
   if (env.REMOTE_NODES_JSON || env.NODE_ROLE && env.NODE_ROLE !== "local") throw new Error("This MVP supports one local node only; remote roles are rejected.");
-  const chunkBytes = Number(env.TRANSFER_CHUNK_BYTES ?? 128 * 1024);
+  const chunkBytes = Number(env.TRANSFER_CHUNK_BYTES ?? 512 * 1024);
   if (!Number.isInteger(chunkBytes) || chunkBytes < 1024 || chunkBytes > 512 * 1024) throw new Error("TRANSFER_CHUNK_BYTES must be between 1024 and 524288.");
   const bundled = fileURLToPath(new URL("../node_modules/@wonderwhy-er/desktop-commander/dist/index.js", import.meta.url));
   const allowedRedirectOrigins = new Set((env.ALLOWED_REDIRECT_ORIGINS ?? "https://chatgpt.com").split(",").map((value) => value.trim()).filter(Boolean));
@@ -341,8 +343,12 @@ export class RemoteDesktopService {
   userCanViewAuditEvent(user: string, sessionId: string | undefined, event: Record<string, unknown>): boolean {
     return typeof event.event === "string" && typeof event.at === "string" && this.ownsAuditEvent(event as AuditLogEntry["event"], user, sessionId);
   }
+  userOwnsActiveSession(user: string, sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
+  }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
-    if (this.sessions.get(sessionId)?.user === user) return true;
+    if (this.userOwnsActiveSession(user, sessionId)) return true;
     if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
     const operationId = sessionId.startsWith("request:") ? sessionId.slice("request:".length) : "";
     return Boolean(operationId && this.auditEntries.some((entry) => entry.event.user === user && entry.event.sessionId === undefined && entry.event.operationId === operationId));
@@ -752,6 +758,30 @@ export class RemoteDesktopService {
     await this.untrackOwnedUpload(item.temp);
   }
   private async fail(item: Transfer, reason: string): Promise<void> { item.state = reason === "expired" || reason === "session_expired" ? "expired" : "failed"; await this.cleanup(item); this.rememberTerminal(item); await this.audit("transfer.failed", { transferId: item.id, direction: item.direction, reason }); }
+  private async completeDownload(item: Transfer): Promise<void> {
+    if (item.direction !== "download" || item.offset !== item.size) throw new Error("Download is incomplete.");
+    item.state = "complete";
+    await this.cleanup(item);
+    this.rememberTerminal(item);
+    await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 });
+  }
+  private async completeUpload(item: Transfer): Promise<{ resolved_path: string; root_id: string; path_base: "root"; size: number; sha256: string }> {
+    if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete.");
+    const pathInfo = await this.identityForPath(item.temp).catch(() => undefined);
+    if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); }
+    await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined;
+    const bytes = await readFile(item.temp);
+    if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); }
+    item.committedPreview = this.previewBytes(bytes.subarray(0, Math.min(bytes.length, 4096)), bytes.length > 4096);
+    await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true);
+    this.requireCurrentOperation();
+    try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } }
+    catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); }
+    await this.untrackOwnedUpload(item.temp);
+    item.state = "complete"; this.rememberTerminal(item);
+    await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 });
+    return { resolved_path: await realpath(item.target), root_id: item.rootId, path_base: "root", size: item.size, sha256: item.sha256 };
+  }
   private async privateSnapshot(source: string, destination: string) { await copyFile(source, destination); await protectPrivateFile(destination); const bytes = await readFile(destination); return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") }; }
   private async verifyNoReplaceCapability(directory: string): Promise<void> {
     const token = makeId();
@@ -810,6 +840,190 @@ export class RemoteDesktopService {
       return pages.join("\n");
     } finally { await this.dc.call("stop_search", { sessionId: session }, undefined, { allowStoppedOperation: true }).catch(() => undefined); }
   }
+  private redactAuditText(value: string): { value: string; truncated: boolean } {
+    const secrets = [this.cfg.tokenSecret, this.cfg.publicAuth?.googleClientSecret ?? "", ...this.cfg.users.map((configured) => configured.passwordHash)].filter(Boolean);
+    const redacted = secrets.reduce((current, secret) => current.split(secret).join("[redacted]"), value)
+      .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+      .replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]");
+    return { value: redacted.slice(0, 4000), truncated: value.length > 4000 || redacted.length > 4000 };
+  }
+
+  private operationDetailEntry(label: string, value: unknown, format: "text" | "diff" = "text", truncated = false): OperationDetailEntry {
+    const protectedValue = this.redactAuditText(String(value ?? ""));
+    return { label, value: protectedValue.value, format, ...(truncated || protectedValue.truncated ? { truncated: true } : {}) };
+  }
+
+  private previewBytes(bytes: Buffer, truncated = false): OperationDetailEntry {
+    let textBytes = bytes;
+    if (truncated && bytes.length > 0) {
+      let sequenceStart = bytes.length - 1;
+      while (sequenceStart >= 0 && (bytes[sequenceStart]! & 0xc0) === 0x80) sequenceStart -= 1;
+      if (sequenceStart >= 0) {
+        const lead = bytes[sequenceStart]!;
+        const expectedLength = lead <= 0x7f ? 1
+          : lead >= 0xc2 && lead <= 0xdf ? 2
+          : lead >= 0xe0 && lead <= 0xef ? 3
+          : lead >= 0xf0 && lead <= 0xf4 ? 4
+          : 0;
+        const availableLength = bytes.length - sequenceStart;
+        if (expectedLength > availableLength && expectedLength > 1) textBytes = bytes.subarray(0, sequenceStart);
+      }
+    }
+    const text = textBytes.toString("utf8");
+    const hasControlCharacters = [...text].some((character) => { const code = character.charCodeAt(0); return code === 127 || code < 32 && ![9, 10, 13].includes(code); });
+    const validText = Buffer.from(text, "utf8").equals(textBytes) && !hasControlCharacters;
+    if (validText) return this.operationDetailEntry("内容見本", text, "text", truncated || textBytes.length < bytes.length);
+    const sample = bytes.subarray(0, 64).toString("hex").replace(/(..)(?=.)/g, "$1 ");
+    return this.operationDetailEntry("内容見本", `hex: ${sample}`, "text", truncated || bytes.length > 64);
+  }
+
+  private async previewFile(filePath: string, size?: number): Promise<OperationDetailEntry | undefined> {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(filePath, "r");
+      const limit = Math.min(size ?? 4096, 4096);
+      const bytes = Buffer.alloc(limit);
+      const read = limit ? await handle.read(bytes, 0, limit, 0) : { bytesRead: 0 };
+      return this.previewBytes(bytes.subarray(0, read.bytesRead), typeof size === "number" && size > read.bytesRead);
+    } catch {
+      return undefined;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  private transferTarget(item: Transfer | undefined): string | undefined {
+    if (!item) return undefined;
+    const root = this.cfg.roots.find((candidate) => candidate.id === item.rootId);
+    if (!root) return undefined;
+    const relative = path.relative(root.path, item.target).replaceAll(path.sep, "/");
+    return `${item.rootId}/${relative}`;
+  }
+
+  private rejectedArgumentProjection(tool: string, raw: Record<string, unknown>): Record<string, unknown> {
+    const projected: Record<string, unknown> = {};
+    const text = (name: string, limit: number) => {
+      const value = raw[name];
+      if (typeof value === "string") projected[name] = value.slice(0, limit);
+    };
+    const number = (name: string) => { if (typeof raw[name] === "number") projected[name] = raw[name]; };
+    const boolean = (name: string) => { if (typeof raw[name] === "boolean") projected[name] = raw[name]; };
+    const session = () => { text("session_id", 128); text("node_id", 128); };
+    const file = () => { session(); text("root_id", 500); text("relative_path", 500); };
+    const transfer = () => { session(); text("transfer_id", 128); };
+
+    text("comment", 500);
+    switch (tool) {
+      case "session_open": text("working_directory", 4096); text("purpose", 200); break;
+      case "session_close": case "node_list": session(); break;
+      case "file_search": case "content_search": session(); text("root_id", 500); text("query", 120); break;
+      case "file_read": file(); number("offset"); number("length"); break;
+      case "file_patch": file(); text("old_string", 4000); text("new_string", 4000); number("expected_replacements"); break;
+      case "file_transfer_download_begin": file(); break;
+      case "file_transfer_download_chunk": transfer(); number("offset"); break;
+      case "file_transfer_upload_begin": file(); number("size"); text("sha256", 64); boolean("overwrite"); break;
+      case "file_transfer_upload_chunk": transfer(); number("offset"); text("data", 4096); break;
+      case "file_transfer_upload_commit": case "file_transfer_status": case "file_transfer_cancel": transfer(); break;
+      case "process_start": session(); text("command", 4000); number("timeout_ms"); break;
+      case "process_output": case "process_status": case "process_kill": session(); text("process_id", 128); break;
+    }
+    return projected;
+  }
+
+  private async operationDetail(tool: string, args: Record<string, unknown>, body?: unknown, error?: string): Promise<OperationDetail | undefined> {
+    const output = isRecord(body) ? body : {};
+    const entry = (label: string, value: unknown, format: "text" | "diff" = "text") => this.operationDetailEntry(label, value, format);
+    const rootId = typeof args.root_id === "string" ? args.root_id : undefined;
+    const relativePath = typeof args.relative_path === "string" ? args.relative_path : undefined;
+    const directTarget = rootId && relativePath ? `${rootId}/${relativePath.replaceAll("\\", "/")}` : undefined;
+    const transferId = typeof args.transfer_id === "string" ? args.transfer_id : typeof output.transfer_id === "string" ? output.transfer_id : undefined;
+    const transfer = transferId ? this.transfers.get(transferId) : undefined;
+    const target = directTarget ?? this.transferTarget(transfer);
+    const finish = (summary: string, entries: OperationDetailEntry[]) => {
+      if (error) entries.push(entry("エラー", error));
+      return { version: 1 as const, summary, entries };
+    };
+    const transferEntries = (): OperationDetailEntry[] => {
+      const entries: OperationDetailEntry[] = [];
+      if (target) entries.push(entry("対象", target));
+      if (transfer?.direction) entries.push(entry("方向", transfer.direction));
+      if (transferId) entries.push(entry("転送 ID", transferId));
+      if (transfer) {
+        entries.push(entry("サイズ", transfer.size));
+        entries.push(entry("ハッシュ", transfer.sha256));
+      }
+      return entries;
+    };
+
+    if (tool === "file_search" || tool === "content_search") {
+      const entries = [entry("検索条件", `root_id=${rootId ?? "—"}\nquery=${String(args.query ?? "—")}`)];
+      if (typeof output.output === "string") entries.push(entry("検索結果", output.output));
+      return finish(tool === "file_search" ? "ファイル検索" : "内容検索", entries);
+    }
+    if (tool === "file_read") {
+      const entries = [
+        entry("対象", directTarget ?? "—"),
+        entry("読取範囲", `offset=${args.offset ?? "省略"} length=${args.length ?? "省略"}`),
+      ];
+      if (typeof output.output === "string") entries.push(entry("本文", output.output));
+      return finish("ファイル読取", entries);
+    }
+    if (tool === "file_patch") {
+      const oldText = String(args.old_string ?? "");
+      const newText = String(args.new_string ?? "");
+      const removed = oldText.split("\n").map((line) => `-${line}`).join("\n");
+      const added = newText.split("\n").map((line) => `+${line}`).join("\n");
+      const entries = [
+        entry("対象", directTarget ?? "—"),
+        entry("期待置換数", args.expected_replacements ?? 1),
+        entry("差分", `--- before\n+++ after\n${removed}\n${added}`, "diff"),
+      ];
+      if (typeof output.output === "string") entries.push(entry("結果", output.output));
+      return finish("ファイル部分変更", entries);
+    }
+    if (tool === "file_transfer_download_begin" || tool === "file_transfer_upload_begin") {
+      const entries = transferEntries();
+      if (!entries.some((candidate) => candidate.label === "対象") && directTarget) entries.unshift(entry("対象", directTarget));
+      const direction = tool.includes("_download_") ? "download" : "upload";
+      if (!entries.some((candidate) => candidate.label === "方向")) entries.push(entry("方向", direction));
+      if (!entries.some((candidate) => candidate.label === "サイズ") && args.size !== undefined) entries.push(entry("サイズ", args.size));
+      if (!entries.some((candidate) => candidate.label === "ハッシュ") && args.sha256 !== undefined) entries.push(entry("ハッシュ", args.sha256));
+      if (tool === "file_transfer_download_begin" && transfer?.snapshot) {
+        const preview = await this.previewFile(transfer.snapshot, transfer.size);
+        if (preview) entries.push(preview);
+      }
+      return finish(direction === "download" ? "ダウンロード開始" : "アップロード開始", entries);
+    }
+    if (tool === "file_transfer_download_chunk" || tool === "file_transfer_upload_chunk") {
+      const entries = transferEntries();
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const nextOffset = typeof output.next_offset === "number" ? output.next_offset : transfer?.offset;
+      if (offset !== undefined || nextOffset !== undefined) entries.push(entry("位置", `offset=${offset ?? "—"} next_offset=${nextOffset ?? "—"}`));
+      if (offset !== undefined && typeof nextOffset === "number") entries.push(entry("処理バイト数", Math.max(0, nextOffset - offset)));
+      if (output.complete !== undefined) entries.push(entry("完了", output.complete));
+      const encoded = tool === "file_transfer_download_chunk" ? output.data : args.data;
+      if (typeof encoded === "string" && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && encoded.length % 4 === 0) {
+        const bytes = Buffer.from(encoded, "base64");
+        if (bytes.length) entries.push(this.previewBytes(bytes));
+      }
+      return finish(tool === "file_transfer_download_chunk" ? "ダウンロードデータ" : "アップロードデータ", entries);
+    }
+    if (tool === "file_transfer_upload_commit") {
+      const entries = transferEntries();
+      if (transfer?.committedPreview && typeof output.resolved_path === "string") entries.push(transfer.committedPreview);
+      return finish("アップロード確定", entries);
+    }
+    if (tool === "file_transfer_status" || tool === "file_transfer_cancel") {
+      const entries = transferEntries();
+      if (output.state !== undefined) entries.push(entry("状態", output.state));
+      else if (transfer?.state) entries.push(entry("状態", transfer.state));
+      if (output.next_offset !== undefined) entries.push(entry("位置", output.next_offset));
+      else if (transfer?.offset !== undefined) entries.push(entry("位置", transfer.offset));
+      return finish(tool === "file_transfer_status" ? "転送状態" : "転送取消し", entries);
+    }
+    return undefined;
+  }
+
   private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>, operationId: string) => Promise<unknown>) {
     let toolName = "unknown";
     const handler = async (args: z.infer<z.ZodObject<T>>) => {
@@ -817,7 +1031,7 @@ export class RemoteDesktopService {
     const receivedAt = new Date().toISOString();
     const record = args as Record<string, unknown>;
     const comment = typeof record.comment === "string" ? record.comment.trim() : "";
-    const connectionId = typeof record.session_id === "string" ? record.session_id : `request:${operationId}`;
+    const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
     const entryState = this.userExecutionState(user);
     const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
       : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
@@ -835,23 +1049,26 @@ export class RemoteDesktopService {
       const startAt = new Date().toISOString();
       await this.audit("operation.started", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, startAt });
       const body = await this.operationContext.run(executionOperation, () => { this.requireCurrentOperation(); return fn(args, operationId); });
+      const detail = await this.operationDetail(toolName, record, body).catch(() => undefined);
       // A stop can arrive while an unavoidable in-flight I/O operation is
       // completing. Do not present that operation as permission to continue.
       this.requireCurrentOperation();
       const openedConnection = isRecord(body) && typeof body.connection_id === "string" ? body.connection_id : isRecord(body) && typeof body.session_id === "string" ? body.session_id : undefined;
       const terminalConnection = openedConnection ?? connectionId;
-      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...sessionAccess() });
+      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...(detail ? { detail } : {}), ...sessionAccess() });
       return result(body);
     } catch (error) {
       if (error instanceof UserStopRequested) {
         const status = started ? "cancelled" : "rejected";
-        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...sessionAccess() }).catch(() => undefined);
+        const detail = await this.operationDetail(toolName, record, undefined, "USER_STOP_REQUESTED").catch(() => undefined);
+        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
         return stoppedFailure(error.state);
       }
       const message = error instanceof Error ? error.message : "Operation failed.";
       const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
-      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...sessionAccess() });
       const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory)/.test(message) ? message : "Operation failed.";
+      const detail = await this.operationDetail(toolName, record, undefined, publicMessage).catch(() => undefined);
+      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...(detail ? { detail } : {}), ...sessionAccess() });
       return failure(publicMessage);
     }
     };
@@ -869,7 +1086,32 @@ export class RemoteDesktopService {
       const listed = await handler(...args) as { tools?: Array<Record<string, unknown>> };
       if (!Array.isArray(listed.tools)) return listed;
       return { ...listed, tools: listed.tools.map((tool) => ({ ...tool, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })) };
-    } : handler);
+    } : async (...args: unknown[]) => {
+      const receivedAt = new Date().toISOString();
+      const response = await handler(...args);
+      const request = isRecord(args[0]) ? args[0] : {};
+      const params = isRecord(request.params) ? request.params : {};
+      const rawRecord = isRecord(params.arguments) ? params.arguments : {};
+      const errorText = isRecord(response) && response.isError === true && Array.isArray(response.content)
+        ? response.content.map((item) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? item.text : undefined)
+          .find((value) => value?.includes("Input validation error:"))
+        : undefined;
+      if (!errorText) return response;
+      const operationId = makeId();
+      const toolName = typeof params.name === "string" ? params.name : "unknown";
+      const record = this.rejectedArgumentProjection(toolName, rawRecord);
+      const comment = typeof record.comment === "string" ? record.comment.trim() : "";
+      const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
+      const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
+        : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
+        : typeof record.transfer_id === "string" ? `transfer:${record.transfer_id.slice(0, 128)}`
+        : typeof record.command === "string" ? "command execution"
+        : "—";
+      const detail = await this.operationDetail(toolName, record, undefined, errorText).catch(() => undefined);
+      await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt }).catch(() => undefined);
+      await this.audit("operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "rejected", reason: "input_validation", ...(detail ? { detail } : {}) }).catch(() => undefined);
+      return response;
+    });
     const intercept = server as unknown as { registerTool: (name: string, config: { description?: string; inputSchema?: Record<string, z.ZodTypeAny>; _meta?: Record<string, unknown> }, handler: unknown) => unknown };
     const originalRegisterTool = intercept.registerTool.bind(server);
     intercept.registerTool = (name, config, handler) => {
@@ -887,11 +1129,11 @@ export class RemoteDesktopService {
     const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500).describe("Path relative to root_id, never the session working_directory.") };
     server.registerTool("file_read", { description: "Read text from a configured file root using root_id and a root-relative relative_path. Requires the caller's active session_id and permits path checks to reject protected service files and escapes from that root. Optional offset is nonnegative; length is 1–1000.", inputSchema: { ...fileInput, offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().max(1000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, offset, length }) => { this.session(user, session_id); const node = this.node(node_id); const filePath = await this.safePath(root_id, relative_path); this.requireCurrentOperation(); const output = await this.dc.call("read_file", { path: filePath, offset, length }); await this.audit("file.read", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
     server.registerTool("file_patch", { description: "Replace matching text in a configured file root using root_id and a root-relative relative_path. Requires the caller's active session_id; old_string must match and expected_replacements (1–100, default 1) controls the expected match count. This is a text replacement, not a general file upload.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const filePath = await this.safePath(root_id, relative_path); this.requireCurrentOperation(); const output = await this.dc.call("edit_block", { file_path: filePath, old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
-    server.registerTool("file_transfer_download_begin", { description: "Begin a chunked download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Creates a private snapshot copy and returns the source resolved_path, root_id, path_base=root, size, and SHA-256; later changes to the source file do not change this copy. Read it with file_transfer_download_chunk using the returned transfer_id and sequential offsets.", inputSchema: fileInput }, this.tool(user, async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); this.requireCurrentOperation(); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { this.requireCurrentOperation(); const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), resolved_path: await realpath(source), root_id, path_base: "root", size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
-    server.registerTool("file_transfer_download_chunk", { description: "Read the next chunk from the snapshot copy. The completed download is checked against its SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); let handle: FileHandle | undefined; try { handle = await open(item.snapshot, "r"); const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed."); if (complete) { item.state = "complete"; await this.cleanup(item); this.rememberTerminal(item); } return { data: data.toString("base64"), next_offset: item.offset, complete }; } catch (error) { await this.fail(item, "snapshot_read_failed"); throw error; } finally { await handle?.close().catch(() => undefined); } })));
-    server.registerTool("file_transfer_upload_begin", { description: "Begin a chunked upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Returns the destination resolved_path, root_id, and path_base=root before accepting chunks. Declare the total size (0–25 MiB), SHA-256, and whether an existing destination may be overwritten; then send sequential chunks with the returned transfer_id. The destination is changed only by file_transfer_upload_commit after full size and hash verification.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); const resolvedTarget = path.join(await realpath(path.dirname(target)), path.basename(target)); this.requireCurrentOperation(); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { this.requireCurrentOperation(); handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, resolved_path: resolvedTarget, root_id, path_base: "root", chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_download_begin", { description: "Begin a download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Creates a private snapshot copy and returns the source resolved_path, root_id, path_base=root, size, SHA-256, and chunk size. Set inline=true to return and complete the whole file in this call when it fits within one chunk; larger files remain active for file_transfer_download_chunk.", inputSchema: { ...fileInput, inline: z.boolean().optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, inline }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); this.requireCurrentOperation(); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { this.requireCurrentOperation(); const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); const base = { transfer_id: item.id, filename: path.basename(source), resolved_path: await realpath(source), root_id, path_base: "root" as const, size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; if (!inline || item.size > this.cfg.chunkBytes) return { ...base, complete: false }; const data = await readFile(snapshot); item.sent?.update(data); item.offset = data.length; if (item.sent?.digest("hex") !== item.sha256) { await this.fail(item, "snapshot_read_failed"); throw new Error("Snapshot integrity check failed."); } await this.completeDownload(item); return { ...base, data: data.toString("base64"), next_offset: item.offset, complete: true }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_download_chunk", { description: "Read the next chunk from the snapshot copy. The completed download is checked against its SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); let handle: FileHandle | undefined; try { handle = await open(item.snapshot, "r"); const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed."); if (complete) await this.completeDownload(item); return { data: data.toString("base64"), next_offset: item.offset, complete }; } catch (error) { await this.fail(item, "snapshot_read_failed"); throw error; } finally { await handle?.close().catch(() => undefined); } })));
+    server.registerTool("file_transfer_upload_begin", { description: "Begin an upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Declare the total size (0–25 MiB), SHA-256, and overwrite policy. When the whole file fits within one chunk, pass its base64 data in data to verify and atomically commit it in this single call; omit data for the existing chunked upload flow.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean(), data: z.string().max(700_000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); let inlineBytes: Buffer | undefined; if (data !== undefined) { if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Inline upload must be valid base64."); inlineBytes = Buffer.from(data, "base64"); if (inlineBytes.length > this.cfg.chunkBytes) throw new Error("Inline upload exceeds the configured chunk size."); if (inlineBytes.length !== size || createHash("sha256").update(inlineBytes).digest("hex") !== sha256) throw new Error("Inline upload size or SHA-256 does not match the declaration."); } if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); const resolvedTarget = path.join(await realpath(path.dirname(target)), path.basename(target)); this.requireCurrentOperation(); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { this.requireCurrentOperation(); handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); const base = { transfer_id: item.id, resolved_path: resolvedTarget, root_id, path_base: "root" as const, chunk_bytes: this.cfg.chunkBytes }; if (inlineBytes === undefined) return { ...base, complete: false }; this.requireCurrentOperation(); if (inlineBytes.length) await handle.write(inlineBytes, 0, inlineBytes.length, 0); item.offset = inlineBytes.length; const completed = await this.completeUpload(item); return { ...base, ...completed, complete: true }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
     server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); this.requireCurrentOperation(); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
-    server.registerTool("file_transfer_upload_commit", { description: "Finish the upload identified by transfer_id for the caller's active session_id. Requires all declared bytes; verifies the exact size and SHA-256 before moving the temporary file into the root-relative destination. The destination replacement is atomic when overwrite=true; when false, commit atomically fails if a destination already exists. Returns the committed resolved_path, root_id, path_base=root, size, and SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); this.requireCurrentOperation(); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { resolved_path: await realpath(item.target), root_id: item.rootId, path_base: "root", size: item.size, sha256: item.sha256 }; })));
+    server.registerTool("file_transfer_upload_commit", { description: "Finish the upload identified by transfer_id for the caller's active session_id. Requires all declared bytes; verifies the exact size and SHA-256 before moving the temporary file into the root-relative destination. The destination replacement is atomic when overwrite=true; when false, commit atomically fails if a destination already exists. Returns the committed resolved_path, root_id, path_base=root, size, and SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); return this.completeUpload(item); })));
     server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
       await this.sweepExpiredLocked();
       this.session(user, session_id);

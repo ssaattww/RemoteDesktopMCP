@@ -8,6 +8,20 @@ import { userConsoleClientScript } from "./user-console-client.js";
 
 const id = () => randomBytes(32).toString("base64url");
 const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
+const operationDetailHtml = (value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "—";
+  const detail = value as { summary?: unknown; entries?: unknown };
+  if (!Array.isArray(detail.entries)) return "—";
+  const entries = detail.entries.flatMap((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const item = raw as { label?: unknown; value?: unknown; truncated?: unknown };
+    if (typeof item.label !== "string" || typeof item.value !== "string") return [];
+    return [`<div class="operation-detail-entry"><strong>${escape(item.label)}${item.truncated === true ? "（省略あり）" : ""}</strong><pre>${escape(item.value)}</pre></div>`];
+  });
+  if (!entries.length) return "—";
+  const summary = typeof detail.summary === "string" ? `<p><strong>${escape(detail.summary)}</strong></p>` : "";
+  return `<details><summary>詳細</summary>${summary}${entries.join("")}</details>`;
+};
 const cookieName = "rdmcp_user";
 const cookie = (header: string | undefined, name = cookieName) => header?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
 const principalFor = (identity: GoogleIdentity) => `google:${identity.iss}:${identity.sub}`;
@@ -262,7 +276,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const target = typeof event.target === "string" ? event.target : "—";
       const operationId = String(event.operationId ?? "—");
       const connectionId = String(event.connectionId ?? session.id ?? "—");
-      return `<tr data-operation-id="${escape(operationId)}" data-connection-id="${escape(connectionId)}" data-event-json="${escape(JSON.stringify(event))}"><td>${jst(receivedAt)}</td><td style="overflow-wrap:anywhere">${escape(connectionId)}</td><td style="overflow-wrap:anywhere">${escape(operationId)}</td><td>${escape(tool)}</td><td>${escape(status)}</td><td>${escape(target)}</td><td>${jst(started)}</td><td>${jst(ended)}</td><td>${event.durationMs === undefined ? "—" : `${escape(event.durationMs)} ms`}</td></tr>`;
+      return `<tr data-operation-id="${escape(operationId)}" data-connection-id="${escape(connectionId)}" data-event-json="${escape(JSON.stringify(event))}"><td>${jst(receivedAt)}</td><td style="overflow-wrap:anywhere">${escape(connectionId)}</td><td style="overflow-wrap:anywhere">${escape(operationId)}</td><td>${escape(tool)}</td><td>${escape(status)}</td><td>${escape(target)}</td><td>${jst(started)}</td><td>${jst(ended)}</td><td>${event.durationMs === undefined ? "—" : `${escape(event.durationMs)} ms`}</td><td>${operationDetailHtml(event.detail)}</td></tr>`;
     }).join("");
     const ownedProcessIds = new Set(visibleSessions.flatMap((session) => session.events.filter((event) => event.event === "process.start" && event.user === principal).map((event) => String(event.processId ?? ""))));
     const processGroups = new Map<string, { session: typeof own[number]; events: Array<Record<string, unknown> & { event: string; at: string }> }>();
@@ -273,7 +287,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       processGroups.set(key, { session, events: [...(previous?.events ?? []), event] });
     }
     const processDetails = [...processGroups.values()].sort((left, right) => Date.parse(right.events.at(-1)!.at) - Date.parse(left.events.at(-1)!.at)).slice(0, 100);
-    body += `<section><details><summary>操作履歴</summary><div class="scroll"><table><thead><tr><th>受信時刻</th><th>Connection ID</th><th>Operation ID</th><th>Tool</th><th>状態</th><th>対象</th><th>開始</th><th>終了</th><th>実行時間</th></tr></thead><tbody id="operation-rows">${opRows}</tbody></table></div><p><small>この画面には現在ログインしている使用者自身の記録だけを表示します。</small></p></details></section>`;
+    body += `<section><details><summary>操作履歴</summary><div class="scroll"><table><thead><tr><th>受信時刻</th><th>Connection ID</th><th>Operation ID</th><th>Tool</th><th>状態</th><th>対象</th><th>開始</th><th>終了</th><th>実行時間</th><th>詳細</th></tr></thead><tbody id="operation-rows">${opRows}</tbody></table></div><p><small>この画面には現在ログインしている使用者自身の記録だけを表示します。</small></p></details></section>`;
     body += `<section id="process-details"><h2>コマンドと出力の詳細</h2>${logControls}${processDetails.map(({ session, events }) => {
       const start = events.find((event) => event.event === "process.start");
       const latest = events.at(-1)!;
