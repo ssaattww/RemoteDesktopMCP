@@ -377,6 +377,7 @@ test("session timestamp disclosure, relative value, open state, and focus surviv
 test("session-link-updated refreshes owner state without fetching log pages and renders title text safely", async () => {
   const sessionRows = new FakeElement();
   const calls: string[] = [];
+  const toggle = new FakeElement("input"); toggle.checked = true;
   const ui = boot(async (url) => {
     calls.push(url);
     if (url.startsWith("/api/console-state")) return response(200, {
@@ -385,7 +386,7 @@ test("session-link-updated refreshes owner state without fetching log pages and 
       running: [],
     });
     return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
-  }, [], { "session-rows": sessionRows });
+  }, [], { "session-rows": sessionRows, "auto-refresh": toggle });
   await settle();
   const initialCalls = calls.length;
   ui.sources[0]!.dispatch("session-link-updated", JSON.stringify({ session_id: "active-link", link_revision: 0 }));
@@ -399,6 +400,27 @@ test("session-link-updated refreshes owner state without fetching log pages and 
   assert.equal(anchor.target, "_blank");
   assert.equal(anchor.rel, "noopener noreferrer");
   assert.equal(anchor.referrerPolicy, "no-referrer");
+});
+
+test("session-link-updated does not bypass the paused auto-refresh setting", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const toggle = new FakeElement("input"); toggle.checked = false;
+  const calls: string[] = [];
+  const ui = boot(async (url) => {
+    calls.push(url);
+    return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z",
+      sessions: [{ session_id: "paused-link", created_at: "2026-10-03T00:00:00Z", state: "active", active: true, external_url: "https://example.com/old", external_title: "Old title" }],
+      running: [],
+    });
+  }, [], { "session-rows": sessionRows, "auto-refresh": toggle });
+  await settle();
+  const initialStateCalls = calls.filter((url) => url.startsWith("/api/console-state")).length;
+  ui.sources[0]!.dispatch("session-link-updated", JSON.stringify({ session_id: "paused-link", link_revision: 1 }));
+  await settle();
+  assert.equal(calls.filter((url) => url.startsWith("/api/console-state")).length, initialStateCalls);
+  assert.equal(calls.some((url) => url.startsWith("/api/logs")), false);
+  assert.equal(sessionRows.children[0]?.children[7]?.children[0]?.textContent, "Old title");
 });
 
 test("state refresh renders a title without a URL as inert text", async () => {

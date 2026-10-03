@@ -33,4 +33,8 @@ This covers the concrete UI cases available in the headless browser. It is not a
 
 ## Remaining workflow
 
-The latest integrated implementation has not yet been pushed; matching PR CI is therefore pending. Reconfirm the branch is mergeable with current `main` before freeze, then run fresh normal review/fix verification, return the same independent reviewer to the reopened closure lifecycle, push without force, and verify CI on the exact pushed PR head. Keep PR #52 Draft.
+## Normal-review finding and TDD fix
+
+Fresh normal review on pushed HEAD `d9fc3b3bf8c9f057f02678e728468b3552648c99` found `ISSUE45-NR-001` (Medium): `session-link-updated` refreshed state while the user's auto-refresh control was off. The existing enabled-state test now explicitly provides the checked control. Added a disabled-control regression first; Red was observed as one extra `/api/console-state` call (`2 !== 1`). Gated the event refresh by `autoEnabled()`; both enabled and paused cases now pass (`npx tsx --test --test-name-pattern='session-link-updated' test/user-console-client.test.ts`, 2/2). `npm run check` passes.
+
+A full local verification run after the fix reports `npm test`: 158 total, 147 passed, 0 failed, 11 platform-specific skips; `npm run check`, `npm run lint` (106 markdown files, 0 issues), and `npm run build` pass. The product fix and regression are currently local and unpushed, awaiting the same normal reviewer's fix-verification. The exact-head GitHub run on the earlier pushed `d9fc3b3` is stale for this fix; don't treat it as final CI. Before final freeze, commit and normally push the fix, check mergeability against current `main`, complete the same independent reviewer closure, and verify CI on the exact pushed SHA. PR #52 remains Draft.

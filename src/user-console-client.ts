@@ -933,7 +933,7 @@ function clientBootstrap(): void {
       else if (logState !== "refreshing") { updateLogState("current"); showPending(); }
     });
     source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); if (listPage) { resyncPending = true; autoPending = true; if (autoEnabled()) scheduleAutomatic(); else updateLogState("resync-required"); } else void resync(); });
-    source.addEventListener("session-link-updated", () => { if (generation === currentGeneration) void refreshState(); });
+    source.addEventListener("session-link-updated", () => { if (generation === currentGeneration && autoEnabled()) void refreshState(); });
     source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; stopAuthentication(); });
     source.addEventListener("heartbeat", () => { if (generation === currentGeneration && source.readyState === EventSource.OPEN) { connectionState = "connected"; setStatus(); } });
   }
