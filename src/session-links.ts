@@ -280,6 +280,49 @@ function decodeCodePoint(value: number): string {
   return String.fromCodePoint(value);
 }
 
+function isUtf8HtmlContentType(value: string | undefined): boolean {
+  if (!value || !/^text\/html(?:\s*;|\s*$)/iu.test(value)) return false;
+  const separator = value.indexOf(";");
+  if (separator < 0) return true;
+  const parameters: string[] = [];
+  let start = separator + 1;
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+    } else if (character === '"') quoted = true;
+    else if (character === ";") {
+      parameters.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (quoted || escaped) return false;
+  parameters.push(value.slice(start));
+  let charsetSeen = false;
+  for (const parameter of parameters) {
+    const equals = parameter.indexOf("=");
+    const name = (equals < 0 ? parameter : parameter.slice(0, equals)).trim().toLowerCase();
+    if (name !== "charset") continue;
+    if (equals < 0 || charsetSeen) return false;
+    const rawValue = parameter.slice(equals + 1).trim();
+    let charset: string;
+    if (rawValue.startsWith('"')) {
+      if (!/^"[^"]*"$/u.test(rawValue)) return false;
+      charset = rawValue.slice(1, -1);
+    } else {
+      if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(rawValue)) return false;
+      charset = rawValue;
+    }
+    if (charset.toLowerCase() !== "utf-8") return false;
+    charsetSeen = true;
+  }
+  return true;
+}
+
 export async function fetchSessionLinkTitle(rawUrl: string, options: { transport?: SessionLinkTransport; deadlineMs?: number } = {}): Promise<string> {
   const safeUrl = normalizedUrl(rawUrl);
   if (!safeUrl) throw new Error("URL is not eligible for external title retrieval.");
@@ -326,7 +369,7 @@ export async function fetchSessionLinkTitle(rawUrl: string, options: { transport
       }
       if (response.status !== 200) throw new Error("External title response was not successful.");
       if (response.contentLength !== undefined && (!/^\d+$/u.test(response.contentLength) || Number(response.contentLength) > MAX_BODY_BYTES)) throw new Error("Response body exceeds the supported size.");
-      if (!response.contentType || !/^text\/html(?:\s*;|\s*$)/iu.test(response.contentType) || /charset\s*=\s*(?!utf-8(?:\s*;|\s*$))/iu.test(response.contentType)) throw new Error("Response is not UTF-8 HTML.");
+      if (!isUtf8HtmlContentType(response.contentType)) throw new Error("Response is not UTF-8 HTML.");
       return decodeTitle(response.body);
     }
   } finally {
