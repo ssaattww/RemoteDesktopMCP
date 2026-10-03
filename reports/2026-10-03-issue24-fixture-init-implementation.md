@@ -39,6 +39,6 @@
 ## Current lifecycle state
 
 - Implementation and focused local validation: complete.
-- Normal review: pending.
+- Normal review: `pass_with_held`, no required findings; report `reports/2026-10-03-issue24-fixture-init-normal-review.md`. Held: Windows/Node 22 CI and the new Windows measurement are outstanding.
 - Full local equivalence gate, commit, push, Windows CI, new measurement run, and Issue #24 follow-up update: pending.
 - No PR merge, manifest update, or independent-final reservation/freeze was performed.

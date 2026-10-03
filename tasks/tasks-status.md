@@ -43,7 +43,7 @@
 | ID | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- | --- | --- |
 | R24-01 | P5 | PR #42 測定gate修正と実測証跡 | なし | M | 同じPR/head/attemptの成功測定stepと有効artifactだけを既測定扱いし、通常reviewと実測結果をIssue #24へ記録 | 済み。通常review `pass_with_held`、run `37131069186` 成功、16ファイル各3回の中央値をIssue #24へ記録。fixture追加不足はheld |
-| R24-02 | P5 | 計測に基づく不要なfixture初期化の削減 | R24-01 | S | DR002/NR009の既存assertion・実Commander・ACL・隔離tempを保ったまま重複初期化を省き、対象試験・必要検証・通常reviewが成功。測定変更後は新しいfile集合fingerprintで再計測する | 2ケースの重複fixture初期化を除去。変更前・変更後のfixture-runtime/regressions全32件はLinuxで各pass、fail/skip 0。通常review、Node22/Windows CI、変更後fingerprintの再計測待ち |
+| R24-02 | P5 | 計測に基づく不要なfixture初期化の削減 | R24-01 | S | DR002/NR009の既存assertion・実Commander・ACL・隔離tempを保ったまま重複初期化を省き、対象試験・必要検証・通常reviewが成功。測定変更後は新しいfile集合fingerprintで再計測する | 2ケースの重複fixture初期化を除去。変更前・変更後のfixture-runtime/regressions全32件はLinuxで各pass、fail/skip 0。通常review `pass_with_held`（必須指摘なし）。全体local gate、Node22/Windows CI、変更後fingerprintの再計測待ち |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。

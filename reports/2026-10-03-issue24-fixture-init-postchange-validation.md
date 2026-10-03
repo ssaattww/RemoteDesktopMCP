@@ -69,6 +69,9 @@
 - lint rerun: parentが上記PR42 reportのtable separator paddingとblank lineを修正した後、`npm run lint:md` のみ再実行。branch `issue-24-runtime-reduction-followup`、HEAD `adb4e03cbd11bb47ef90d34a840e2ce6922dc572`。このrerun時のdiff fingerprint (`git diff --binary HEAD -- test/regressions.test.ts tasks/tasks-status.md tasks/phases-status.md | sha256sum`) は `a0bc70e0f27399d8c118a484321e5314f9e7f3c64fa39248a0f0744e651439e6`。
 - lint rerun exit code `0`。stdout: `remote-desktop-mcp@0.1.0 lint:md`; `node scripts/lint-markdown.mjs`; `markdownlint: 88 file(s), 0 issue(s)`。stderr: npm update notice (`11.9.0` → `12.2.0`) のみ。
 - rerun stdout/stderr capture paths: `/tmp/issue24-lint-md-rerun.stdout`, `/tmp/issue24-lint-md-rerun.stderr`。初回7件の診断は過去の実行結果として上記に保持。
+- pre-commit Markdown validation (after normal review updates): command `npm run lint:md`; branch `issue-24-runtime-reduction-followup`; HEAD `68ddc5f114e8a22f98108a0d05a688937f14d041`; requested diff hash (`git diff --binary HEAD -- test/regressions.test.ts tasks/tasks-status.md tasks/phases-status.md | sha256sum`) `61fe8716823f6eae2133ba4c92ff36e2d8403a08ba7ee2c592516fb88aed1bc1`.
+- Result: exit code `0`. stdout: `remote-desktop-mcp@0.1.0 lint:md`, `node scripts/lint-markdown.mjs`, `markdownlint: 89 file(s), 0 issue(s)`. stderr: npm update notice (`11.9.0` → `12.2.0`) only.
+- stdout/stderr capture paths: `/tmp/issue24-lint-md-final.stdout`, `/tmp/issue24-lint-md-final.stderr`.
 
 ## リスク
 
