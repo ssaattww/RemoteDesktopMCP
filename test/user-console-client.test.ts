@@ -16,6 +16,7 @@ test("client paging helpers preserve cursor order, deduplicate, and cap retained
 });
 
 class FakeElement {
+  static activeElement: FakeElement | null = null;
   dataset: Record<string, string> = {};
   hidden = false;
   disabled = false;
@@ -24,6 +25,15 @@ class FakeElement {
   className = "";
   tagName: string;
   href = "";
+  dateTime = "";
+  value = "";
+  name = "";
+  type = "";
+  required = false;
+  maxLength = 0;
+  innerHTML = "";
+  parent: FakeElement | null = null;
+  focusOptions?: { preventScroll?: boolean };
   colSpan = 1;
   children: FakeElement[] = [];
   listeners = new Map<string, () => void>();
@@ -34,27 +44,45 @@ class FakeElement {
   constructor(tagName = "div") { this.tagName = tagName.toLowerCase(); }
   addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
   click(name = "click") { this.listeners.get(name)?.(); }
-  replaceChildren(...children: FakeElement[]) { this.children = children; }
-  append(child: FakeElement) { this.children.push(child); }
-  insertRow() { const row = new FakeElement("tr"); this.children.push(row); return row; }
-  insertCell() { const cell = new FakeElement("td"); this.children.push(cell); return cell; }
+  replaceChildren(...children: FakeElement[]) { for (const child of this.children) child.parent = null; this.children = children; for (const child of children) { child.parent?.remove(child); child.parent = this; } }
+  append(child: FakeElement) { child.parent?.remove(child); child.parent = this; this.children.push(child); }
+  remove(child: FakeElement) { this.children = this.children.filter((candidate) => candidate !== child); child.parent = null; }
+  insertRow() { const row = new FakeElement("tr"); row.parent = this; this.children.push(row); return row; }
+  insertCell() { const cell = new FakeElement("td"); cell.parent = this; this.children.push(cell); return cell; }
+  focus(options?: { preventScroll?: boolean }) { FakeElement.activeElement = this; this.focusOptions = options; }
+  allDescendants(): FakeElement[] { return this.children.flatMap((child) => [child, ...child.allDescendants()]); }
   querySelectorAll<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return [override] as T[];
     if (selector.startsWith(".process-block")) return this.children.filter((child) => child.className === "process-block" && (!selector.includes("data-events-json") || child.dataset.eventsJson !== undefined)) as T[];
     if (selector.startsWith("tr[data-event-json]")) return this.children.filter((child) => child.tagName === "tr" && child.dataset.eventJson !== undefined) as T[];
+    const descendants = this.allDescendants();
+    if (selector === "form[data-session-edit]") return descendants.filter((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) as T[];
+    if (selector === "details[data-session-time]") return descendants.filter((child) => child.tagName === "details" && child.dataset.sessionTime !== undefined) as T[];
+    if (selector === "time[data-session-relative]") return descendants.filter((child) => child.tagName === "time" && child.dataset.sessionRelative !== undefined) as T[];
     return [] as T[];
   }
   querySelector<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return override as T;
-    if (selector === "form[data-session-edit]") return (this.children.flatMap((child) => [child, ...child.children]).find((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) ?? null) as T | null;
+    if (selector === "form[data-session-edit]") return (this.allDescendants().find((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) ?? null) as T | null;
     if (selector === "h2") return (this.children.find((child) => child.tagName === "h2") ?? null) as T | null;
+    if (selector === "summary") return (this.children.find((child) => child.tagName === "summary") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     if (selector === ".process-block") return (this.children.find((child) => child.className === "process-block") ?? null) as T | null;
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     return null;
   }
-  closest<T extends FakeElement>(selector: string) { return (this.closestNodes.get(selector) ?? null) as T | null; }
+  contains(element: FakeElement | null) { return element === this || this.allDescendants().includes(element as FakeElement); }
+  closest<T extends FakeElement>(selector: string) {
+    const override = this.closestNodes.get(selector);
+    if (override) return override as T;
+    let current: FakeElement | null = this;
+    while (current) {
+      if ((selector === "tr" && current.tagName === "tr") || (selector === "td" && current.tagName === "td") || (selector === "form[data-session-edit]" && current.tagName === "form" && current.dataset.sessionEdit !== undefined)) return current as T;
+      current = current.parent;
+    }
+    return null as T | null;
+  }
   getBoundingClientRect() { return this.rect; }
 }
 
@@ -80,18 +108,32 @@ function response(status: number, body: unknown) {
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
-function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "") {
+function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", initialNow = Date.now()) {
   FakeEventSource.instances = [];
+  FakeElement.activeElement = null;
+  let clockNow = initialNow;
+  class TestDate extends Date { static now() { return clockNow; } }
   const root = new FakeElement(); root.dataset = { sessionId, newestCursor: initialItems[0]?.cursor ?? "c0", oldestCursor: initialItems.at(-1)?.cursor ?? "c-older", hasMoreOlder: String(initialItems.length > 0), initialItems: JSON.stringify(initialItems) };
   const status = new FakeElement();
   const newest = new FakeElement(); newest.hidden = true;
   const older = new FakeElement(); older.hidden = true;
   const elements = new Map<string, FakeElement>([["log-console", root], ["log-status", status], ["log-new-button", newest], ["log-older-button", older], ...Object.entries(extras)]);
   const scrollY = 0; let scrollCalls = 0;
-  const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: () => undefined, scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }) };
-  const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, querySelectorAll: () => [], createElement: (tagName: string) => new FakeElement(tagName), documentElement: { scrollHeight: 1200 } };
-  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement });
-  return { root, status, newest, older, windowStub, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
+  const windowListeners = new Map<string, () => void>();
+  const intervals = new Map<number, { callback: () => void; delay: number }>(); let nextInterval = 0;
+  const timeouts = new Map<number, { callback: () => void; delay: number; dueAt: number }>(); let nextTimeout = 0;
+  const windowStub = {
+    scrollY, scrollX: 0, innerHeight: 600,
+    addEventListener: (name: string, listener: () => void) => { windowListeners.set(name, listener); },
+    setInterval: (callback: () => void, delay: number) => { const id = ++nextInterval; intervals.set(id, { callback, delay }); return id; },
+    clearInterval: (id: number) => { intervals.delete(id); },
+    setTimeout: (callback: () => void, delay: number) => { const id = ++nextTimeout; timeouts.set(id, { callback, delay, dueAt: clockNow + delay }); return id; },
+    clearTimeout: (id: number) => { timeouts.delete(id); },
+    scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }),
+  };
+  const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, querySelectorAll: (selector: string) => [...elements.values()].flatMap((element) => element.querySelectorAll(selector)), createElement: (tagName: string) => new FakeElement(tagName), get activeElement() { return FakeElement.activeElement; }, documentElement: { scrollHeight: 1200 } };
+  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: TestDate });
+  return { root, status, newest, older, windowStub, windowListeners, intervals, timeouts, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, advanceTime: (milliseconds: number) => { const target = clockNow + milliseconds; while (true) { const due = [...timeouts.entries()].filter(([, timer]) => timer.dueAt <= target).sort((a, b) => a[1].dueAt - b[1].dueAt)[0]; if (!due) break; clockNow = due[1].dueAt; timeouts.delete(due[0]); due[1].callback(); } clockNow = target; }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
 test("session metadata editor uses the authenticated PATCH contract and preserves input on a version conflict", async () => {
@@ -211,23 +253,77 @@ test("version conflicts load the latest values and require an explicit re-edit c
   assert.equal(purpose.value, "Latest purpose");
 });
 
-test("console state refresh does not replace an existing session editor", async () => {
-  const sessionForm = new FakeElement("form");
-  sessionForm.dataset = { sessionEdit: "session-1", version: "1" };
-  const sessionRow = new FakeElement("tr"); sessionRow.append(sessionForm);
-  const sessionRows = new FakeElement("tbody"); sessionRows.append(sessionRow);
+test("state refresh reconciles rows by session id while preserving live edit DOM, drafts, time disclosure, and focus", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const originalRow = new FakeElement("tr"); sessionRows.append(originalRow);
+  const linkCell = new FakeElement("td"); originalRow.append(linkCell);
+  const createdCell = new FakeElement("td"); originalRow.append(createdCell);
+  const createdTime = new FakeElement("details"); createdTime.dataset = { sessionId: "session-1", sessionTime: "created" }; createdTime.open = true;
+  const createdSummary = new FakeElement("summary"); createdTime.append(createdSummary); createdCell.append(createdTime);
+  const accessCell = new FakeElement("td"); originalRow.append(accessCell);
+  const accessTime = new FakeElement("details"); accessTime.dataset = { sessionId: "session-1", sessionTime: "last-access" };
+  const accessSummary = new FakeElement("summary"); accessTime.append(accessSummary); accessCell.append(accessTime);
+  originalRow.append(new FakeElement("td"));
+  const purposeCell = new FakeElement("td"); purposeCell.dataset.sessionPurpose = "true"; originalRow.append(purposeCell);
+  const idCell = new FakeElement("td"); idCell.textContent = "session-1"; originalRow.append(idCell);
+  const directoryCell = new FakeElement("td"); directoryCell.dataset.sessionDirectory = "true"; originalRow.append(directoryCell);
+  const editorCell = new FakeElement("td"); originalRow.append(editorCell);
+  const editorDisclosure = new FakeElement("details"); editorDisclosure.open = true; editorCell.append(editorDisclosure);
+  const sessionForm = new FakeElement("form"); sessionForm.dataset = { sessionEdit: "session-1", version: "1" }; editorDisclosure.append(sessionForm);
+  const directoryInput = new FakeElement("input"); directoryInput.value = "C:/draft";
+  const purposeInput = new FakeElement("input"); purposeInput.value = "Unsaved purpose";
+  const csrfInput = new FakeElement("input"); csrfInput.value = "csrf";
+  sessionForm.append(directoryInput); sessionForm.append(purposeInput); sessionForm.append(csrfInput);
+  Object.assign(sessionForm, { elements: { namedItem: (name: string) => name === "workingDirectory" ? directoryInput : name === "purpose" ? purposeInput : csrfInput } });
+
+  const stateA = { stopped: false, activeSessions: 2, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/server-value", purpose: "Server purpose", created_at: "2026-10-02T00:00:00Z", last_used_at: "2026-10-03T00:00:00Z", state: "active", active: true, version: 2 },
+    { session_id: "session-2", working_directory: "C:/added", purpose: "Added session", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, version: 1 },
+    { session_id: "session-3", working_directory: "C:/closed", purpose: "Closed session", created_at: "2026-09-30T00:00:00Z", state: "closed", active: false },
+  ] };
+  const stateB = { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:01:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/server-value-2", purpose: "Ended session", created_at: "2026-10-02T00:00:00Z", last_used_at: "2026-10-03T00:01:00Z", state: "closed", active: false },
+    { session_id: "session-2", working_directory: "C:/added-updated", purpose: "Still active", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, version: 2 },
+  ] };
   let refresh = 0;
   const ui = boot(async (url) => {
-    if (new URL(url, "http://local.test").pathname === "/api/console-state") {
-      refresh++;
-      return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [{ session_id: "session-1", working_directory: "C:/new", purpose: "new", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 2 }] });
-    }
-    throw new Error("unexpected request");
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") return response(200, refresh++ === 0 ? stateA : stateB);
+    if (request.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    throw new Error("unexpected request " + request.href);
   }, [], { "session-rows": sessionRows });
+  FakeElement.activeElement = purposeInput;
   await settle();
   assert.equal(refresh, 1);
-  assert.equal(sessionRows.children[0], sessionRow);
-  assert.equal(sessionRow.children[0], sessionForm);
+  assert.equal(sessionRows.children.length, 3, "new and closed sessions are reconciled into the all-sessions table");
+  const updatedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
+  assert.ok(updatedRow);
+  assert.equal(updatedRow.children[4]?.textContent, "Server purpose");
+  assert.equal(updatedRow.children[6]?.textContent, "C:/server-value");
+  assert.equal(updatedRow.querySelector("form[data-session-edit]"), sessionForm, "the same editor form is moved into the reconciled row");
+  assert.equal(directoryInput.value, "C:/draft");
+  assert.equal(purposeInput.value, "Unsaved purpose");
+  assert.equal(sessionForm.dataset.version, "1", "a refresh does not silently advance the draft's compare version");
+  assert.equal(FakeElement.activeElement, purposeInput);
+  assert.equal(purposeInput.focusOptions?.preventScroll, true);
+  assert.equal(updatedRow.children[1]?.children[0]?.open, true);
+  assert.equal(sessionRows.children[1]?.children[7]?.innerHTML.includes('data-session-edit="session-2"'), true, "new active sessions receive an editor");
+  const closedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-3")!;
+  assert.equal(closedRow.querySelector("form[data-session-edit]"), null, "closed sessions never retain an editor");
+
+  const currentCreatedSummary = updatedRow.children[1]?.children[0]?.children[0];
+  assert.equal(currentCreatedSummary?.tagName, "summary");
+  FakeElement.activeElement = currentCreatedSummary ?? null;
+  ui.newest.click();
+  await settle(); await settle();
+  assert.equal(refresh, 2);
+  const endedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
+  assert.equal(endedRow.children[3]?.textContent, "終了");
+  assert.equal(endedRow.querySelector("form[data-session-edit]"), null, "an editor is removed when its session ends");
+  assert.equal(sessionRows.children.some((row) => row.children[5]?.textContent === "session-3"), false, "sessions omitted from current state are removed");
+  assert.equal(FakeElement.activeElement?.tagName, "summary");
+  assert.equal(FakeElement.activeElement?.focusOptions?.preventScroll, true);
+  assert.equal(sessionRows.children.length, 2);
   ui.sources[0]?.close();
 });
 
@@ -443,6 +539,126 @@ test("state refresh updates only session and running rows with the selected filt
   assert.equal(runningTable.hidden, false);
   assert.equal(runningEmpty.hidden, true);
   assert.notEqual(updatedAt.textContent, "");
+});
+
+test("session timestamp cells expose relative and exact values as native disclosure elements", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const calls: URL[] = [];
+  const now = Date.parse("2026-10-02T02:00:00.000Z");
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-02T00:00:00Z",
+      sessions: [{ session_id: "stable-session", created_at: "2026-10-02T01:59:01Z", last_used_at: "2026-09-20T00:00:00Z", state: "active", active: true }],
+    });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": sessionRows }, "", now);
+  await settle();
+  let createdDetails = sessionRows.children[0]?.children[1]?.children[0];
+  const lastAccessDetails = sessionRows.children[0]?.children[2]?.children[0];
+  assert.equal(createdDetails?.tagName, "details");
+  assert.equal(lastAccessDetails?.tagName, "details");
+  assert.equal(createdDetails?.open, false);
+  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "59\u79d2\u524d");
+  assert.match(createdDetails?.children[1]?.textContent ?? "", /JST/);
+  assert.equal(createdDetails?.children[0]?.children[0]?.dateTime, "2026-10-02T01:59:01.000Z");
+  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000]);
+
+  const oldSummary = createdDetails?.children[0];
+  assert.ok(oldSummary);
+  createdDetails!.open = true;
+  oldSummary.focus();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1", overflow: false }));
+  ui.newest.click();
+  await settle();
+  await settle();
+  await settle();
+  createdDetails = sessionRows.children[0]?.children[1]?.children[0];
+  const restoredSummary = createdDetails?.children[0];
+  assert.notEqual(restoredSummary, oldSummary);
+  assert.equal(createdDetails?.open, true, "the open state survives the state refresh redraw");
+  assert.equal(FakeElement.activeElement, restoredSummary, "the active summary for the same session time receives focus again");
+  assert.equal(restoredSummary?.focusOptions?.preventScroll, true);
+
+  const exactValue = createdDetails?.children[1]?.textContent;
+  const relativeTime = restoredSummary?.children[0];
+  const redrawRow = sessionRows.children[0];
+  const requestCount = calls.length;
+  ui.setNow(now + 1_000);
+  ui.tickInterval(1_000);
+  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "1分前");
+  assert.equal(ui.intervals.size, 1, "the one-second timer releases itself when no timestamp uses seconds");
+  assert.equal(restoredSummary?.children[0], relativeTime, "the seconds callback changes only the existing time text");
+  assert.equal(createdDetails?.children[1]?.textContent, exactValue);
+  assert.equal(sessionRows.children[0], redrawRow);
+  assert.equal(calls.length, requestCount);
+  assert.equal(createdDetails?.open, true);
+  assert.equal(FakeElement.activeElement, restoredSummary);
+  ui.setNow(now + 60_000);
+  ui.tickIntervals();
+  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "1分前");
+  assert.equal(restoredSummary?.children[0], relativeTime, "the interval changes text without replacing the time element");
+  assert.equal(createdDetails?.children[1]?.textContent, exactValue);
+  assert.equal(sessionRows.children[0], redrawRow, "the interval changes text without replacing the row");
+  assert.equal(ui.intervals.size, 1);
+  assert.equal(calls.length, requestCount, "the interval does not issue a network request");
+  assert.equal(createdDetails?.open, true);
+  assert.equal(FakeElement.activeElement, restoredSummary);
+
+  ui.windowListeners.get("pagehide")?.();
+  assert.equal(ui.intervals.size, 0, "page departure releases the interval");
+  ui.windowListeners.get("pageshow")?.();
+  ui.windowListeners.get("pageshow")?.();
+  assert.equal(ui.intervals.size, 1, "restoration starts a single interval");
+  assert.equal(ui.sources.length, 2, "the applied log refresh restarts the event stream once");
+});
+
+test("future session times schedule their seconds boundary and release updates across page lifecycle", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const calls: URL[] = [];
+  const now = Date.parse("2026-10-02T02:00:00.000Z");
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test"); calls.push(request);
+    if (request.pathname === "/api/console-state") return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-02T00:00:00Z",
+      sessions: [{ session_id: "future-session", created_at: "2026-10-02T02:01:01Z", last_used_at: "2026-10-02T03:00:00Z", state: "active", active: true }],
+    });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": sessionRows }, "", now);
+  await settle();
+  const createdRelative = sessionRows.children[0]?.children[1]?.children[0]?.children[0]?.children[0];
+  const lastAccessRelative = sessionRows.children[0]?.children[2]?.children[0]?.children[0]?.children[0];
+  assert.equal(createdRelative?.textContent, "1\u5206\u5f8c");
+  assert.equal(lastAccessRelative?.textContent, "1\u6642\u9593\u5f8c");
+  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay), [60_000]);
+  assert.deepEqual([...ui.timeouts.values()].map((timeout) => timeout.delay), [1_001]);
+
+  const requestCount = calls.length;
+  ui.advanceTime(2_000);
+
+  assert.equal(createdRelative?.textContent, "59\u79d2\u5f8c", "the scheduled boundary fires during two seconds of elapsed time");
+  assert.equal(lastAccessRelative?.textContent, "59\u5206\u5f8c");
+  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000]);
+  assert.equal(ui.timeouts.size, 1, "the next future timestamp keeps one later boundary wakeup");
+
+  ui.windowListeners.get("pagehide")?.();
+  assert.equal(ui.intervals.size, 0, "page departure releases the active seconds and minute intervals");
+  assert.equal(ui.timeouts.size, 0, "page departure releases the future boundary wakeup");
+  ui.windowListeners.get("pageshow")?.();
+  ui.windowListeners.get("pageshow")?.();
+  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000], "repeated restoration creates one interval at each cadence");
+  assert.equal(ui.timeouts.size, 1, "repeated restoration creates only one future boundary wakeup");
+  ui.setNow(now + 3_000);
+  ui.tickInterval(1_000);
+  assert.equal(createdRelative?.textContent, "58\u79d2\u5f8c");
+  assert.equal(calls.length, requestCount, "relative-time updates do not issue requests");
+});
+
+test("pages without a session list do not create relative-time intervals", async () => {
+  const ui = boot(async () => response(200, { stopped: false, activeSessions: 0, runningProcesses: 0, updatedAt: "2026-10-02T00:00:00Z" }));
+  await settle();
+  assert.equal(ui.intervals.size, 0);
 });
 
 test("pull-down refresh only starts on the visible newest log block and ignores horizontal or canceled gestures", async () => {

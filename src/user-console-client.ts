@@ -1,3 +1,7 @@
+import { createSessionTimeFormatter } from "./session-time.js";
+
+const formatSessionTime = createSessionTimeFormatter();
+
 export type ConsoleLogItem = { id: string; cursor: string; event: Record<string, unknown> };
 
 export function chronologicalPage(items: ConsoleLogItem[]): ConsoleLogItem[] {
@@ -25,7 +29,7 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
 }
 
 function clientBootstrap(): void {
-  document.querySelectorAll<HTMLFormElement>("[data-session-edit]").forEach((form) => {
+  const initializeSessionEditor = (form: HTMLFormElement) => {
     const conflict = form.querySelector<HTMLElement>("[data-session-conflict]");
     const conflictSummary = form.querySelector<HTMLElement>("[data-session-conflict-summary]");
     const directory = form.elements.namedItem("workingDirectory") as HTMLInputElement | null;
@@ -104,7 +108,8 @@ function clientBootstrap(): void {
         if (button) button.disabled = false;
       }
     });
-  });
+  };
+  document.querySelectorAll<HTMLFormElement>("[data-session-edit]").forEach(initializeSessionEditor);
   const consoleRoot = document.getElementById("log-console");
   if (!consoleRoot) return;
   const root = consoleRoot;
@@ -114,6 +119,7 @@ function clientBootstrap(): void {
   type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
   type LogState = "current" | "pending" | "refreshing" | "resync-required";
   const sessionId = root.dataset.sessionId ?? "";
+  const sessionCsrf = root.dataset.csrf ?? "";
   const operationRows = document.getElementById("operation-rows") as HTMLTableSectionElement | null;
   const processDetails = document.getElementById("process-details");
   const status = document.getElementById("log-status");
@@ -238,9 +244,43 @@ function clientBootstrap(): void {
     if (Number.isNaN(date.getTime())) return "—";
     return new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "medium", hourCycle: "h23" }).format(date) + " JST";
   };
+  const appendSessionTimeCell = (row: HTMLTableRowElement, value: unknown, sessionId: string, kind: "created" | "last-access", open: boolean) => {
+    const cell = row.insertCell();
+    cell.className = "session-time-cell";
+    const display = formatSessionTime(value);
+    if (!display) { cell.textContent = "—"; return undefined; }
+    const details = document.createElement("details");
+    details.className = "session-time";
+    details.dataset.sessionId = sessionId;
+    details.dataset.sessionTime = kind;
+    details.open = open;
+    const summary = document.createElement("summary");
+    const relative = document.createElement("time");
+    relative.dateTime = display.iso;
+    relative.dataset.sessionRelative = "true";
+    relative.textContent = display.relative;
+    summary.append(relative);
+    const exact = document.createElement("time");
+    exact.dateTime = display.iso;
+    exact.textContent = display.exact;
+    details.append(summary);
+    details.append(exact);
+    cell.append(details);
+    return details;
+  };
   const addCell = (row: HTMLTableRowElement, value: unknown) => {
     const cell = row.insertCell();
     cell.textContent = String(value ?? "—");
+    return cell;
+  };
+  const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+  const appendSessionEditorCell = (row: HTMLTableRowElement, session: { session_id: string; working_directory?: string; purpose?: string; version?: number }, stopped: boolean) => {
+    const cell = row.insertCell();
+    if (stopped || !Number.isSafeInteger(session.version)) { cell.textContent = "—"; return cell; }
+    const sessionKey = escapeHtml(session.session_id);
+    cell.innerHTML = `<details><summary>編集</summary><form data-session-edit="${sessionKey}" data-version="${session.version}"><input type="hidden" name="csrf" value="${escapeHtml(sessionCsrf)}"><label>作業ディレクトリ <input name="workingDirectory" required maxlength="4096" value="${escapeHtml(session.working_directory)}"></label><label>用途 <input name="purpose" required maxlength="200" value="${escapeHtml(session.purpose)}"></label><button type="submit">保存</button><output aria-live="polite"></output><div data-session-conflict hidden><p data-session-conflict-summary></p><button type="button" data-session-conflict-action="keep-draft">自分の入力で再編集</button><button type="button" data-session-conflict-action="use-latest">最新値を取り込む</button></div></form><small>変更は保存後に開始するプロセスから適用されます。</small></details>`;
+    const form = cell.querySelector<HTMLFormElement>("form[data-session-edit]");
+    if (form) initializeSessionEditor(form);
     return cell;
   };
   const operationStatus = (event: Record<string, unknown>) => typeof event.status === "string" ? event.status : typeof event.event === "string" && event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(event.event) ? event.event.slice("operation.".length) : "running";
@@ -496,7 +536,7 @@ function clientBootstrap(): void {
       if (!response.ok) return;
       const state = await response.json() as {
         stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
-        sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
+        sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; version?: number; created_at: string; last_used_at?: string; state: string; active: boolean }>;
         running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
       };
       const stopped = document.getElementById("execution-state");
@@ -509,26 +549,58 @@ function clientBootstrap(): void {
       if (updated) updated.textContent = timeText(state.updatedAt);
       const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
       if (sessionRows && state.sessions) {
-        const hasServerRenderedEditor = sessionRows.querySelector("form[data-session-edit]") !== null;
-        if (state.stopped || !hasServerRenderedEditor) {
-          const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
-          sessionRows.replaceChildren();
-          if (!visibleSessions.length) {
-            const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 8;
-            cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
-          } else for (const session of visibleSessions) {
-            const row = sessionRows.insertRow();
-            const linkCell = row.insertCell(); const link = document.createElement("a");
-            link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
-            addCell(row, timeText(session.created_at));
-            addCell(row, timeText(session.last_used_at ?? session.created_at));
-            addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
-            addCell(row, session.purpose ?? "—");
-            addCell(row, session.session_id);
-            addCell(row, session.working_directory ?? "—");
-            addCell(row, "—");
+        const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
+        const savedOpenByKey = new Map<string, boolean>();
+        let focusedTimeKey: string | undefined;
+        const editorCells = new Map<string, HTMLTableCellElement>();
+        let focusedEditor: HTMLElement | undefined;
+        const activeElement = document.activeElement as HTMLElement | null;
+        for (const form of sessionRows.querySelectorAll<HTMLFormElement>("form[data-session-edit]")) {
+          const sessionKey = form.dataset.sessionEdit;
+          const editorCell = form.closest("td") as HTMLTableCellElement | null;
+          if (sessionKey && editorCell) {
+            editorCells.set(sessionKey, editorCell);
+            if (activeElement && editorCell.contains(activeElement)) focusedEditor = activeElement;
           }
         }
+        for (const details of sessionRows.querySelectorAll<HTMLDetailsElement>("details[data-session-time]")) {
+          const key = JSON.stringify([details.dataset.sessionId ?? "", details.dataset.sessionTime ?? ""]);
+          savedOpenByKey.set(key, details.open);
+          const summary = details.querySelector("summary");
+          if (summary && activeElement === summary) focusedTimeKey = key;
+        }
+        const restoredSummaries = new Map<string, HTMLElement>();
+        const restoredEditorIds = new Set<string>();
+        sessionRows.replaceChildren();
+        if (!visibleSessions.length) {
+          const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 8;
+          cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
+        } else for (const session of visibleSessions) {
+          const row = sessionRows.insertRow();
+          const linkCell = row.insertCell(); const link = document.createElement("a");
+          link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
+          const createdKey = JSON.stringify([session.session_id, "created"]);
+          const createdDetails = appendSessionTimeCell(row, session.created_at, session.session_id, "created", savedOpenByKey.get(createdKey) ?? false);
+          const createdSummary = createdDetails?.querySelector("summary") as HTMLElement | null;
+          if (createdSummary) restoredSummaries.set(createdKey, createdSummary);
+          const lastAccessKey = JSON.stringify([session.session_id, "last-access"]);
+          const lastAccessDetails = appendSessionTimeCell(row, session.last_used_at ?? session.created_at, session.session_id, "last-access", savedOpenByKey.get(lastAccessKey) ?? false);
+          const lastAccessSummary = lastAccessDetails?.querySelector("summary") as HTMLElement | null;
+          if (lastAccessSummary) restoredSummaries.set(lastAccessKey, lastAccessSummary);
+          const stateCell = addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
+          stateCell.dataset.sessionState = "true";
+          const purposeCell = addCell(row, session.purpose ?? "—"); purposeCell.dataset.sessionPurpose = "true";
+          addCell(row, session.session_id);
+          const directoryCell = addCell(row, session.working_directory ?? "—"); directoryCell.dataset.sessionDirectory = "true";
+          if (session.active && !state.stopped) {
+            const existingEditor = editorCells.get(session.session_id);
+            if (existingEditor) { row.append(existingEditor); restoredEditorIds.add(session.session_id); }
+            else appendSessionEditorCell(row, session, state.stopped);
+          } else addCell(row, "—");
+        }
+        if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
+        else if (focusedEditor && focusedEditor.closest("form[data-session-edit]") && restoredEditorIds.has((focusedEditor.closest("form[data-session-edit]") as HTMLFormElement).dataset.sessionEdit ?? "")) focusedEditor.focus({ preventScroll: true });
+        syncSessionTimeUpdates();
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
       if (runningRows && state.running) {
@@ -623,6 +695,85 @@ function clientBootstrap(): void {
     if (!hasMoreOlder || !oldestCursor || (olderButton && olderButton.disabled)) return;
     if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 120) void loadOlder();
   }, { passive: true });
+  const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
+  let relativeUpdateInterval: number | undefined;
+  let secondsUpdateInterval: number | undefined;
+  let futureBoundaryTimeout: number | undefined;
+  const isSecondDisplay = (value: string | null) => /^\d+秒(?:前|後)$/.test(value ?? "");
+  const sessionRelativeElements = () => sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? [];
+  const updateSessionRelativeTimes = () => {
+    for (const relative of sessionRelativeElements()) {
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+    }
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const updateSessionSecondTimes = () => {
+    let hasSecondDisplay = false;
+    for (const relative of sessionRelativeElements()) {
+      if (!isSecondDisplay(relative.textContent)) continue;
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+      if (isSecondDisplay(next)) hasSecondDisplay = true;
+    }
+    if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionSecondUpdates = () => {
+    const hasSecondDisplay = Array.from(sessionRelativeElements()).some((relative) => isSecondDisplay(relative.textContent));
+    if (hasSecondDisplay && secondsUpdateInterval === undefined) {
+      secondsUpdateInterval = window.setInterval(updateSessionSecondTimes, 1_000);
+    } else if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionFutureBoundary = () => {
+    if (futureBoundaryTimeout !== undefined) {
+      window.clearTimeout(futureBoundaryTimeout);
+      futureBoundaryTimeout = undefined;
+    }
+    const now = Date.now();
+    let nearestDelay: number | undefined;
+    for (const relative of sessionRelativeElements()) {
+      const timestamp = Date.parse(relative.dateTime);
+      const remaining = timestamp - now;
+      if (!Number.isFinite(timestamp) || remaining < 60_000) continue;
+      const delay = Math.min(remaining - 59_999, 2_147_483_647);
+      if (nearestDelay === undefined || delay < nearestDelay) nearestDelay = delay;
+    }
+    if (nearestDelay !== undefined) {
+      futureBoundaryTimeout = window.setTimeout(() => {
+        futureBoundaryTimeout = undefined;
+        updateSessionRelativeTimes();
+      }, nearestDelay);
+    }
+  };
+  const syncSessionTimeUpdates = () => {
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const stopSessionRelativeUpdates = () => {
+    if (relativeUpdateInterval !== undefined) window.clearInterval(relativeUpdateInterval);
+    if (secondsUpdateInterval !== undefined) window.clearInterval(secondsUpdateInterval);
+    if (futureBoundaryTimeout !== undefined) window.clearTimeout(futureBoundaryTimeout);
+    relativeUpdateInterval = undefined;
+    secondsUpdateInterval = undefined;
+    futureBoundaryTimeout = undefined;
+  };
+  const startSessionRelativeUpdates = () => {
+    if (!sessionRows || relativeUpdateInterval !== undefined) return;
+    updateSessionRelativeTimes();
+    relativeUpdateInterval = window.setInterval(updateSessionRelativeTimes, 60_000);
+  };
+  if (sessionRows) {
+    window.addEventListener("pagehide", stopSessionRelativeUpdates);
+    window.addEventListener("pageshow", startSessionRelativeUpdates);
+    startSessionRelativeUpdates();
+  }
   setStatus(); showPending();
   void refreshState();
   restartEvents();
@@ -630,4 +781,4 @@ function clientBootstrap(): void {
 
 // tsx/esbuild decorates function expressions with __name during tests. Define
 // the harmless helper in the emitted browser program as well as in tsc output.
-export const userConsoleClientScript = `const __name=(value)=>value;(${clientBootstrap.toString()})();`;
+export const userConsoleClientScript = `const __name=(value)=>value;const formatSessionTime=(${createSessionTimeFormatter.toString()})();(${clientBootstrap.toString()})();`;
