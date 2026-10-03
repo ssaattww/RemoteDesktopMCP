@@ -1,3 +1,7 @@
+import { createSessionTimeFormatter } from "./session-time.js";
+
+const formatSessionTime = createSessionTimeFormatter();
+
 export type ConsoleLogItem = { id: string; cursor: string; event: Record<string, unknown> };
 
 export function chronologicalPage(items: ConsoleLogItem[]): ConsoleLogItem[] {
@@ -57,7 +61,8 @@ function clientBootstrap(): void {
   let baselineCaptured = false;
   let baselineCleared = false;
   const baselineOperations = new Map<string, Record<string, unknown>>();
-  const baselineProcesses = new Map<string, { session: string; process: string; start?: Record<string, unknown> }>();
+  const baselineProcesses = new Map<string, { session: string; process: string; start?: Record<string, unknown>; events: Array<Record<string, unknown>> }>();
+  const liveProcesses = new Map<string, { purpose: string; command: string; status: string }>();
   let connection: EventSource | undefined;
   let generation = 0;
   let storeGeneration = 0;
@@ -101,7 +106,7 @@ function clientBootstrap(): void {
         const events = JSON.parse(block.dataset.eventsJson ?? "[]") as Array<Record<string, unknown>>;
         const start = events.find((event) => event.event === "process.start");
         if (process && start) baselineProcesses.set(processKey(session, process), {
-          session, process,
+          session, process, events,
           start: { event: "process.start", at: start.at, processId: start.processId ?? process, command: start.command, comment: start.comment },
         });
       } catch { /* A malformed snapshot is discarded. */ }
@@ -110,7 +115,7 @@ function clientBootstrap(): void {
   const captureOpenStates = () => {
     const state = new Map<string, boolean>();
     processDetails?.querySelectorAll<HTMLDetailsElement>(".process-block").forEach((block) => {
-      const key = (block.dataset.sessionId ?? "") + ":" + (block.dataset.processId ?? "");
+      const key = processKey(block.dataset.sessionId ?? "", block.dataset.processId ?? "");
       const output = block.querySelector("details");
       if (output) state.set(key, output.open);
     });
@@ -158,6 +163,30 @@ function clientBootstrap(): void {
     if (Number.isNaN(date.getTime())) return "—";
     return new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "medium", hourCycle: "h23" }).format(date) + " JST";
   };
+  const appendSessionTimeCell = (row: HTMLTableRowElement, value: unknown, sessionId: string, kind: "created" | "last-access", open: boolean) => {
+    const cell = row.insertCell();
+    cell.className = "session-time-cell";
+    const display = formatSessionTime(value);
+    if (!display) { cell.textContent = "—"; return undefined; }
+    const details = document.createElement("details");
+    details.className = "session-time";
+    details.dataset.sessionId = sessionId;
+    details.dataset.sessionTime = kind;
+    details.open = open;
+    const summary = document.createElement("summary");
+    const relative = document.createElement("time");
+    relative.dateTime = display.iso;
+    relative.dataset.sessionRelative = "true";
+    relative.textContent = display.relative;
+    summary.append(relative);
+    const exact = document.createElement("time");
+    exact.dateTime = display.iso;
+    exact.textContent = display.exact;
+    details.append(summary);
+    details.append(exact);
+    cell.append(details);
+    return details;
+  };
   const addCell = (row: HTMLTableRowElement, value: unknown) => {
     const cell = row.insertCell();
     cell.textContent = String(value ?? "—");
@@ -203,7 +232,7 @@ function clientBootstrap(): void {
       addOperationDetailCell(row, event, openedDetails.get(String(event.operationId ?? key)));
     }
   };
-  const processKey = (session: string, process: string) => session + ":" + process;
+  const processKey = (session: string, process: string) => JSON.stringify([session, process]);
   const renderProcesses = () => {
     if (!processDetails) return;
     ensureInitialSnapshot();
@@ -231,7 +260,16 @@ function clientBootstrap(): void {
       group.events.push(entry.event);
       groups.set(key, group);
     }
-    const all = [...groups.values()].sort((a, b) => Date.parse(String(b.events.at(-1)?.at ?? "")) - Date.parse(String(a.events.at(-1)?.at ?? "")));
+    for (const key of liveProcesses.keys()) if (!groups.has(key)) {
+      const baseline = baselineCleared ? undefined : baselineProcesses.get(key);
+      const identity = baseline ? [baseline.session, baseline.process] : JSON.parse(key) as [string, string];
+      groups.set(key, { session: identity[0], process: identity[1], events: [...(baseline?.events ?? [])] });
+    }
+    const all = [...groups.values()].sort((a, b) => {
+      const aLive = liveProcesses.has(processKey(a.session, a.process));
+      const bLive = liveProcesses.has(processKey(b.session, b.process));
+      return Number(bLive) - Number(aLive) || Date.parse(String(b.events.at(-1)?.at ?? "")) - Date.parse(String(a.events.at(-1)?.at ?? ""));
+    });
     const heading = processDetails.querySelector("h2");
     const toolbar = document.getElementById("log-console");
     processDetails.replaceChildren();
@@ -242,8 +280,9 @@ function clientBootstrap(): void {
       const start = events.find((event) => event.event === "process.start") ?? (baselineCleared ? undefined : baselineProcesses.get(processKey(group.session, group.process))?.start);
       const latest = events.at(-1) ?? {};
       const exit = events.filter((event) => event.event === "process.exit").at(-1);
-      const command = start?.command ?? events.filter((event) => event.command !== undefined).at(-1)?.command;
-      const comment = start?.comment ?? events.filter((event) => event.comment !== undefined).at(-1)?.comment;
+      const live = liveProcesses.get(processKey(group.session, group.process));
+      const command = start?.command ?? events.filter((event) => event.command !== undefined).at(-1)?.command ?? live?.command;
+      const comment = start?.comment ?? events.filter((event) => event.comment !== undefined).at(-1)?.comment ?? live?.purpose;
       const outputs = events.filter((event) => event.output !== undefined && event.event !== "process.exit");
       const earlierOutput = outputs.map((event) => String(event.output)).join("\n");
       if (exit?.output !== undefined && !earlierOutput.includes(String(exit.output))) {
@@ -256,15 +295,15 @@ function clientBootstrap(): void {
       article.dataset.sessionId = group.session;
       article.dataset.processId = group.process;
       article.dataset.eventsJson = JSON.stringify(events);
-      const heading = document.createElement("p");
-      heading.textContent = timeText(start?.at ?? events[0]?.at) + " · " + group.session + " · " + String(latest.processId ?? "—");
+      const heading = document.createElement("h3"); heading.tabIndex = -1; heading.id = "process-" + encodeURIComponent(group.session) + "-" + encodeURIComponent(group.process);
+      heading.textContent = timeText(start?.at ?? events[0]?.at) + " · " + group.session + " · " + String(latest.processId ?? group.process);
       article.append(heading);
       const addPre = (label: string, value: unknown) => {
         const title = document.createElement("h3"); title.textContent = label; article.append(title);
         const pre = document.createElement("pre"); pre.textContent = String(value ?? ""); article.append(pre);
       };
-      if (comment !== undefined) addPre("実行目的", comment);
-      if (command !== undefined) addPre("コマンド", command);
+      addPre("実行目的", typeof comment === "string" && comment ? comment : "未記録");
+      addPre("コマンド", typeof command === "string" && command ? command : "未記録");
       if (outputs.length) {
         const details = document.createElement("details");
         const summary = document.createElement("summary"); summary.textContent = "出力"; details.append(summary);
@@ -284,6 +323,23 @@ function clientBootstrap(): void {
     processDetails.hidden = false;
   };
   const renderEvents = () => {
+    let focused: { session: string; process: string; tag: string } | undefined;
+    let active = document.activeElement as HTMLElement | null;
+    while (active && active !== processDetails) {
+      if (active.className === "process-block") {
+        let target = document.activeElement as HTMLElement | null;
+        while (target && target !== active) {
+          const targetTag = target.tagName.toUpperCase();
+          if (targetTag === "SUMMARY" || targetTag === "H3") {
+            focused = { session: active.dataset.sessionId ?? "", process: active.dataset.processId ?? "", tag: targetTag };
+            break;
+          }
+          target = target.parentElement ?? (target as unknown as { parent?: HTMLElement }).parent ?? null;
+        }
+        break;
+      }
+      active = active.parentElement ?? (active as unknown as { parent?: HTMLElement }).parent ?? null;
+    }
     const visible = processDetails ? [...processDetails.querySelectorAll<HTMLElement>(".process-block")].find((block) => {
       const rect = block.getBoundingClientRect();
       return rect.bottom > 0 && rect.top < window.innerHeight;
@@ -295,6 +351,11 @@ function clientBootstrap(): void {
     const replacement = anchor ? [...(processDetails?.querySelectorAll<HTMLElement>(".process-block") ?? [])].find((block) => block.dataset.sessionId === anchor.session && block.dataset.processId === anchor.process) : undefined;
     const shift = replacement ? replacement.getBoundingClientRect().top - anchor!.top : 0;
     window.scrollTo(window.scrollX, scrollY + shift);
+    if (focused) {
+      const targetBlock = [...(processDetails?.querySelectorAll<HTMLElement>(".process-block") ?? [])].find((block) => block.dataset.sessionId === focused!.session && block.dataset.processId === focused!.process);
+      const target = targetBlock?.querySelector<HTMLElement>(focused.tag === "SUMMARY" ? "summary" : "h3");
+      if (target && target.tagName.toUpperCase() === focused.tag) target.focus({ preventScroll: true });
+    }
   };
   const commitItems = (incoming: LogItem[], direction: "newer" | "older" | "replace") => {
     if (direction === "replace") {
@@ -417,8 +478,13 @@ function clientBootstrap(): void {
       const state = await response.json() as {
         stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
         sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean; external_url?: string; external_title?: string }>;
-        running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
+        running?: Array<{ operation_id: string; connection_id: string; label: string; status: string; purpose?: string; command?: string }>;
       };
+      if (state.running) {
+        liveProcesses.clear();
+        for (const operation of state.running) if (operation.label === "process") liveProcesses.set(processKey(operation.connection_id, operation.operation_id), { purpose: operation.purpose ?? "", command: operation.command ?? "", status: operation.status });
+        if (processDetails) renderEvents();
+      }
       const stopped = document.getElementById("execution-state");
       const active = document.getElementById("active-session-count");
       const running = document.getElementById("running-count");
@@ -430,6 +496,15 @@ function clientBootstrap(): void {
       const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
       if (sessionRows && state.sessions) {
         const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
+        const savedOpenByKey = new Map<string, boolean>();
+        let focusedTimeKey: string | undefined;
+        for (const details of sessionRows.querySelectorAll<HTMLDetailsElement>("details[data-session-time]")) {
+          const key = JSON.stringify([details.dataset.sessionId ?? "", details.dataset.sessionTime ?? ""]);
+          savedOpenByKey.set(key, details.open);
+          const summary = details.querySelector("summary");
+          if (summary && document.activeElement === summary) focusedTimeKey = key;
+        }
+        const restoredSummaries = new Map<string, HTMLElement>();
         sessionRows.replaceChildren();
         if (!visibleSessions.length) {
           const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 8;
@@ -438,8 +513,14 @@ function clientBootstrap(): void {
           const row = sessionRows.insertRow();
           const linkCell = row.insertCell(); const link = document.createElement("a");
           link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
-          addCell(row, timeText(session.created_at));
-          addCell(row, timeText(session.last_used_at ?? session.created_at));
+          const createdKey = JSON.stringify([session.session_id, "created"]);
+          const createdDetails = appendSessionTimeCell(row, session.created_at, session.session_id, "created", savedOpenByKey.get(createdKey) ?? false);
+          const createdSummary = createdDetails?.querySelector("summary") as HTMLElement | null;
+          if (createdSummary) restoredSummaries.set(createdKey, createdSummary);
+          const lastAccessKey = JSON.stringify([session.session_id, "last-access"]);
+          const lastAccessDetails = appendSessionTimeCell(row, session.last_used_at ?? session.created_at, session.session_id, "last-access", savedOpenByKey.get(lastAccessKey) ?? false);
+          const lastAccessSummary = lastAccessDetails?.querySelector("summary") as HTMLElement | null;
+          if (lastAccessSummary) restoredSummaries.set(lastAccessKey, lastAccessSummary);
           addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
           addCell(row, session.purpose ?? "—");
           addCell(row, session.session_id);
@@ -457,6 +538,8 @@ function clientBootstrap(): void {
             const title = document.createElement("span"); title.className = "session-external-title"; title.textContent = session.external_title; externalCell.append(title);
           }
         }
+        if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
+        syncSessionTimeUpdates();
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
       if (runningRows && state.running) {
@@ -467,6 +550,14 @@ function clientBootstrap(): void {
           addCell(row, operation.connection_id);
           const stateCell = addCell(row, operation.label + " · " + operation.status);
           stateCell.className = "running";
+          if (operation.label === "process") {
+            addCell(row, operation.purpose || "未記録");
+            addCell(row, operation.command || "未記録");
+            const action = row.insertCell(); const link = document.createElement("a");
+            link.href = "#process-" + encodeURIComponent(operation.connection_id) + "-" + encodeURIComponent(operation.operation_id);
+            link.dataset.sessionId = operation.connection_id; link.dataset.processId = operation.operation_id;
+            link.textContent = "詳細へ"; action.append(link);
+          } else { addCell(row, "—"); addCell(row, "—"); addCell(row, "—"); }
         }
         const table = document.getElementById("running-table");
         const empty = document.getElementById("running-empty");
@@ -559,6 +650,85 @@ function clientBootstrap(): void {
     if (!hasMoreOlder || !oldestCursor || (olderButton && olderButton.disabled)) return;
     if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 120) void loadOlder();
   }, { passive: true });
+  const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
+  let relativeUpdateInterval: number | undefined;
+  let secondsUpdateInterval: number | undefined;
+  let futureBoundaryTimeout: number | undefined;
+  const isSecondDisplay = (value: string | null) => /^\d+秒(?:前|後)$/.test(value ?? "");
+  const sessionRelativeElements = () => sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? [];
+  const updateSessionRelativeTimes = () => {
+    for (const relative of sessionRelativeElements()) {
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+    }
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const updateSessionSecondTimes = () => {
+    let hasSecondDisplay = false;
+    for (const relative of sessionRelativeElements()) {
+      if (!isSecondDisplay(relative.textContent)) continue;
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+      if (isSecondDisplay(next)) hasSecondDisplay = true;
+    }
+    if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionSecondUpdates = () => {
+    const hasSecondDisplay = Array.from(sessionRelativeElements()).some((relative) => isSecondDisplay(relative.textContent));
+    if (hasSecondDisplay && secondsUpdateInterval === undefined) {
+      secondsUpdateInterval = window.setInterval(updateSessionSecondTimes, 1_000);
+    } else if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionFutureBoundary = () => {
+    if (futureBoundaryTimeout !== undefined) {
+      window.clearTimeout(futureBoundaryTimeout);
+      futureBoundaryTimeout = undefined;
+    }
+    const now = Date.now();
+    let nearestDelay: number | undefined;
+    for (const relative of sessionRelativeElements()) {
+      const timestamp = Date.parse(relative.dateTime);
+      const remaining = timestamp - now;
+      if (!Number.isFinite(timestamp) || remaining < 60_000) continue;
+      const delay = Math.min(remaining - 59_999, 2_147_483_647);
+      if (nearestDelay === undefined || delay < nearestDelay) nearestDelay = delay;
+    }
+    if (nearestDelay !== undefined) {
+      futureBoundaryTimeout = window.setTimeout(() => {
+        futureBoundaryTimeout = undefined;
+        updateSessionRelativeTimes();
+      }, nearestDelay);
+    }
+  };
+  const syncSessionTimeUpdates = () => {
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const stopSessionRelativeUpdates = () => {
+    if (relativeUpdateInterval !== undefined) window.clearInterval(relativeUpdateInterval);
+    if (secondsUpdateInterval !== undefined) window.clearInterval(secondsUpdateInterval);
+    if (futureBoundaryTimeout !== undefined) window.clearTimeout(futureBoundaryTimeout);
+    relativeUpdateInterval = undefined;
+    secondsUpdateInterval = undefined;
+    futureBoundaryTimeout = undefined;
+  };
+  const startSessionRelativeUpdates = () => {
+    if (!sessionRows || relativeUpdateInterval !== undefined) return;
+    updateSessionRelativeTimes();
+    relativeUpdateInterval = window.setInterval(updateSessionRelativeTimes, 60_000);
+  };
+  if (sessionRows) {
+    window.addEventListener("pagehide", stopSessionRelativeUpdates);
+    window.addEventListener("pageshow", startSessionRelativeUpdates);
+    startSessionRelativeUpdates();
+  }
   setStatus(); showPending();
   void refreshState();
   restartEvents();
@@ -566,4 +736,4 @@ function clientBootstrap(): void {
 
 // tsx/esbuild decorates function expressions with __name during tests. Define
 // the harmless helper in the emitted browser program as well as in tsc output.
-export const userConsoleClientScript = `const __name=(value)=>value;(${clientBootstrap.toString()})();`;
+export const userConsoleClientScript = `const __name=(value)=>value;const formatSessionTime=(${createSessionTimeFormatter.toString()})();(${clientBootstrap.toString()})();`;

@@ -8,6 +8,34 @@ import { fixture, mcp } from "./fixture.js";
 const body = (title: string) => new TextEncoder().encode(`<html><title>${title}</title></html>`);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+test("Issue 45 links and Issue 55 session-relative times coexist in the owner console", async () => {
+  const f = await fixture();
+  f.service.cfg.sessionLinkTransport = { resolve: async () => ["93.184.216.34"], request: async () => { throw new Error("manual titles do not fetch"); } };
+  const api = await mcp(f.service);
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    await api.call("session_open", { url: "https://example.com/task", title: "Review document" });
+    await api.call("session_open", { title: "<Unlinked title>" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    assert.equal(login.status, 303);
+    const token = /rdmcp_user=([^;,]+)/u.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
+    const page = await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } });
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.match(html, /<details class="session-time"/u, "timestamps retain the relative and exact disclosure");
+    assert.match(html, /<th[^>]*>リンク<\/th>/u, "the low-priority link column remains in the table");
+    assert.match(html, /<a class="session-external-link"[^>]*href="https:\/\/example\.com\/task"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>Review document<\/a>/u);
+    assert.match(html, /<span class="session-external-title">&lt;Unlinked title&gt;<\/span>/u, "title-only metadata is escaped and inert");
+  } finally {
+    await api.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await f.cleanup();
+  }
+});
+
 async function readLinkEvent(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
   let text = "";
   const deadline = Date.now() + 3_000;
