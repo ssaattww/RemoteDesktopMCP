@@ -116,7 +116,7 @@
 | Todoを監査故障から復旧する経路がある | 解消 | Todo更新は固定例外であり、pre-handler audit失敗でも実行継続可能。通常操作の許可監査が復旧するまで通常ツールを停止する一方、例外のwarning解消時も暗黙の再実行をしない（`:89-92`）。 |
 | 例外判定は固定allowlistで、呼出し引数や申告による拡張なし | 解消 | 設計 `:92` はサーバー側の固定allowlistを推奨し、任意のtool名、引数、呼出し元申告による拡張を明確に禁止。専用受付案でも認証・所有権・緊急停止確認の共通規則を共有するとしている。例外候補は直前の`:90-91`と既存文書の具体tool/route候補に束縛される。 |
 
-### 限定確認の結果
+### DREV-56-02 限定確認の結果
 
 - **DREV-56-01: closed in design at `72ea62933222d875db21857ff65221017d53e937`.** 初回 High の必要条件はすべて設計に反映され、今回確認した範囲で残件なし。severityの再分類は行っていない。初回レビューの履歴上の verdict `fail` は変更しない。設計差分の技術的な限定確認のみ解消とする。
 - 固定例外候補を“候補”と呼び、最終HTTP/MCP応答型と `audit_warning` schema をAPI設計に残すが、設計段階で必要な事前/事後の制御規則と再実行抑止はある。これら細部はIssue scope/default/graceの選択とは独立して後続API設計で確定できる。
@@ -164,3 +164,27 @@
 - DREV-56-01は前回の限定設計確認結果を維持し、このHEADの設計差分で後戻りはない。初回historical `fail` も維持。
 - scope=session、初期有効、ON切替から5分猶予を再選択/変更していない。
 - 未検証: 製品実装、テスト、CI、実audit故障、対象OSの時計休止semantics。指示に従い実行せず。Role/profile observabilityも実効profileも確認可能な証拠がなく、実効profileは主張しない。
+
+## DREV-56-02 限定確認
+
+- モード: 同一reviewerによるfinding限定確認。対象HEAD: `22c78eb613d505288703e3a4db0e7ff18b35adef`（branch `feature/issue-56-shared-todo`）。初回reviewed HEADは `b791e3e75f4f87cbbd51a229613a640dce4d8d7d`。対象はDREV-56-02修正差分と当該期限/異常規則に限る。
+- 証拠: `git status --short --branch; git rev-parse HEAD; git show --stat --oneline --no-renames 22c78eb613d505288703e3a4db0e7ff18b35adef`; `git diff b791e3e75f4f87cbbd51a229613a640dce4d8d7d 22c78eb613d505288703e3a4db0e7ff18b35adef -- doc/design/shared-todo-and-stale-update-gate.md tasks/tasks-status.md tasks/phases-status.md`; `nl -ba doc/design/shared-todo-and-stale-update-gate.md | sed -n '22,38p'`; `nl -ba doc/design/shared-todo-and-stale-update-gate.md | sed -n '56,64p'`。
+- 対象差分は設計とtrackingだけ。製品コード・テストなし。本結果は設計修正のレビューであり、実装経路/fixture/実行結果を検証したものではない。
+
+### DREV-56-02 必須条件ごとの確認
+
+| 必要条件 | 結果 | 証拠 |
+| --- | --- | --- |
+| 新規の空Todoはversion 0 / `lastTodoUpdatedMono: null`を正常状態として受け入れる | 解消 | `doc/design/shared-todo-and-stale-update-gate.md:27,34` が初回成功更新前のversion 0 + nullを明記し、欠落異常と区別する。 |
+| 初回Todo更新前は `enabledAtMono` が猶予基準となり、開始から5分後の境界で拒否する | 解消 | `:27` が `freshnessBaseMono = max(lastTodoUpdatedMono ?? enabledAtMono, enabledAtMono)` と `nowMonotonic - freshnessBaseMono >= 300_000` を明記。version 0/nullではfreshness baseがenabledAtMonoとなる。 `:61` は作成時から5分を与える。 |
+| version > 0 で更新単調時計値が欠落したらfail-closedする | 解消 | `:27` は成功更新済み（版番号1以上）で値が欠落した状態を破損・異常として監査し、Todo更新で基準再確立まで通常操作を拒否する。Todo管理と安全例外は継続可能。 |
+| 再有効化と成功Todo更新後の基準も同じmax式と整合する | 解消 | `:34` は初回更新前のnullも含め同じfreshnessBase式を示し、ONごと新たなenabledAtMonoを記録。成功更新後は更新時刻が新しい側となり、その時刻から通常の5分期限を数え直すと説明。 |
+| monotonic/wall-clock anomaly規則との整合 | 解消 | `:27` はnullを正常とする範囲をversion 0/未更新状態に限定し、単調時計読取失敗または壁時計差異常は別条件として引き続きfail-closedとする。版番号による欠損/破損の識別規則は初回findingを満たす。 |
+
+### 限定確認の結果
+
+- **DREV-56-02: closed in design at `22c78eb613d505288703e3a4db0e7ff18b35adef`.** 初期有効の空Todoは有効なversion 0/null状態としてenabledAtMonoから猶予を受け、更新済みなのに時刻を欠くケースはfail-closedになる。再有効化と更新後期限も同じ基準選択で矛盾しない。findingのSeverity/identityは変更しない。
+- `:25` は簡略形 `nowMonotonic - lastTodoUpdatedMono` を残す一方、`:27,34` は初期未更新状態を含む完全なfreshnessBase式と異常例外を明示する。具体状態ごとの動作は後続箇所で決まり、初期猶予や更新済み異常に重大な曖昧さは残らないと判断した。実装仕様をコード化する際は完全式を共通判定の定義として使う必要がある。
+- 追加の大きな矛盾は見つからない。Scope=session、初期有効、ON切替後5分猶予を維持し、選択変更の提案なし。
+- 初回レビューのhistorical `fail`、選択反映後レビューの `fail`、DREV-56-01の `closed in design`、DREV-56-02のfinding記録は保持する。今回の限定確認はDREV-56-02の設計上の解消だけを示す。
+- 未確認: 製品実装、focused/composition fixture、テスト/CI、runtime clock挙動。依頼に従い実装・テスト・外部操作を行わない。
