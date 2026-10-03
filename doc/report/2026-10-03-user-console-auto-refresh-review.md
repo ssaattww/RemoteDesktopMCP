@@ -16,10 +16,10 @@
 
 判定結果: fail
 
-必須修正 1 件、軽微な修正 1 件を検出した。
+必須修正 2 件、軽微な修正 2 件を検出した。
 
-- Medium: 1 件
-- Low: 1 件
+- Medium: 2 件
+- Low: 2 件
 - 保留条件: 1 件
 
 ## 指摘事項
@@ -73,11 +73,49 @@
   - OFF 時は自動反映せず `↻ 更新` で手動取得できることを toggle 周辺に説明する。
   - 一覧 HTML の回帰試験で説明文の存在を確認する。
 
+### RDMCP-PR51-REV-003: 古い `/api/console-state` 応答が新しい自動更新結果を上書きできる
+
+- severity: Medium
+- origin: review
+- location:
+  - `src/user-console-client.ts:480-487`
+  - `src/user-console-client.ts:623-632`
+  - `src/user-console-client.ts:754-755`
+- description:
+  - 起動時は `void refreshState()` で状態取得を開始した直後に `restartEvents()` で SSE 接続を開始する。
+  - 新着通知が先に届くと `automaticCycle()` が別の `/api/console-state` を取得し、その結果を先に `refreshStateFrom()` へ反映できる。
+  - 独立した `refreshState()` は `pageGeneration` だけを確認し、同一画面世代内の複数状態要求を順序付ける世代番号や latest-wins 判定を持たない。
+  - そのため、起動時の古い状態要求が遅れて完了すると、後から取得した新しい自動更新結果を古いスナップショットで再上書きできる。
+- impact:
+  - 自動更新で一度最新になったセッション一覧、接続数、実行中件数、停止状態が過去の値へ戻り、次の通知または手動更新まで誤表示が残り得る。
+- evidence:
+  - review scratch で「初期 state 要求を保留 → SSE 通知で新しい state を反映 → 初期要求を完了」を合成したところ、既存 25 件は pass し、追加した順序競合テストだけが fail した。
+  - 失敗時の値は `actual: '1'`, `expected: '5'` で、古い初期応答が新しい自動状態を実際に上書きした。
+  - scratch は製品 worktree 外に置き、PR source は変更していない。
+- required_action:
+  - 全ての `/api/console-state` 取得を単一の調整経路へ直列化するか、状態要求世代を導入して古い要求結果を反映しないようにする。
+  - 上記の逆順完了ケースを回帰試験として先に追加する。
+
+### RDMCP-PR51-REV-004: 設計文書の TDD 順序が同一文書内で矛盾している
+
+- severity: Low
+- origin: review
+- location:
+  - `doc/design/user-console-auto-refresh.md:84`
+  - `doc/design/user-console-auto-refresh.md:107`
+- description:
+  - `:84` は「試験を先に追加し、失敗を確認してから製品実装」と定めている。
+  - `:107` は完了条件として「試験計画の回帰試験を製品実装後に追加する」と記載しており、試験追加と製品実装の順序が逆になっている。
+- impact:
+  - 後続修正時にどちらが正式な実装順序か判断できず、リポジトリの TDD 方針と異なる作業順を許容する記述になる。
+- required_action:
+  - 試験追加は実装前、全試験成功の確認は実装後、という二つの時点を区別する表現へ修正する。
+
 ## 保留条件
 
 ### RDMCP-PR51-HOLD-001: PR #50 の日時 details との統合確認
 
-PR #50 `Issue #44 使用者日時を相対表示` は 2026-10-03 09:45 JST 時点で OPEN / draft、HEAD `4102253628d4d638c26fa5c3a986082a53fe9e59` であり、PR #51 の base には含まれていない。
+PR #50 `Issue #44 使用者日時を相対表示` は本レビュー追補時点で OPEN / draft、current HEAD `fd86a5ab468388d81692195d4d07c7ea27ff06c8` であり、PR #51 の base には含まれていない。
 
 PR #51 の設計は `doc/design/user-console-auto-refresh.md:31` で、PR #50 が追加する作成日時・最終アクセス日時の `details` 開閉状態と操作位置を自動更新後も保つことを明記している。
 
@@ -128,6 +166,8 @@ PR #51 の設計は `doc/design/user-console-auto-refresh.md:31` で、PR #50 �
 
 専用 detached review worktree には `node_modules` を配置していないため、最初の `node --import tsx --test ...` は `ERR_MODULE_NOT_FOUND: tsx` で実行環境上失敗した。製品試験の失敗としては扱っていない。その後、同一リポジトリの既存 worktree に導入済みの `tsx` 実行ファイルを使い、source と cwd は PR #51 の review worktree のまま再実行して 25/25 成功を確認した。
 
+RDMCP-PR51-REV-003 の順序競合確認では、製品 worktree 外の review scratch に既存25件と追加1件を置き、同じPR sourceを読み込んで実行した。既存25件は全て pass、追加した「古い初期 `/api/console-state` 応答を新しい自動更新後に完了させる」試験だけが fail し、最終表示は `actual: '1'`, `expected: '5'` だった。これにより、古い状態応答が新しい状態を上書きする経路を動的にも確認した。
+
 設計用語 lint の直接再実行も review worktree の依存未配置により `yaml` package が見つからず実施できなかった。代わりに inline-code 箇所を全件静的確認し、exact-head CI の Ubuntu `Run lint` 成功を確認した。
 
 ### CI
@@ -154,6 +194,16 @@ job:
 
 exact-head run `37076454672` でも全 job の `Prepare diagnostics`、`Record environment`、`Upload diagnostics` が success だった。今回 workflow 変更は不要である。
 
+## Coverage disposition
+
+- changed files: 6/6 reviewed
+- direct dependencies: `/api/events`, audit notification generation, `/api/console-state`, auth expiry, session state reconstructionを確認
+- security/privacy: principal境界、認証終了時の取得停止、背景取得によるidle期限非延長を確認
+- concurrency: auto/manual generation、retry、pagehide/BFCacheを確認し、状態応答順序競合を `RDMCP-PR51-REV-003` として検出
+- UX state retention: focus復元は確認し、文字列選択・可視位置保持不足を `RDMCP-PR51-REV-001` として検出
+- documentation/lint: whitelist追加なし、明白なlint回避なし。OFF説明不足とTDD文言矛盾を `REV-002` / `REV-004` として検出
+- sibling PR interaction: PR #50 current HEADとの統合は conflict を再確認し、`RDMCP-PR51-HOLD-001` として held
+
 ## レビューで変更しなかったもの
 
 レビュー担当として製品コード、設計、テスト、workflow は修正していない。マージも行っていない。
@@ -162,6 +212,8 @@ exact-head run `37076454672` でも全 job の `Prepare diagnostics`、`Record e
 
 1. `RDMCP-PR51-REV-001` を修正し、文字列選択と一覧表示位置を保持する回帰試験を追加する。
 2. `RDMCP-PR51-REV-002` の OFF 時説明を追加し、表示試験を補強する。
-3. PR #50 が先に main へ入った場合は、その main を取り込んで `RDMCP-PR51-HOLD-001` の競合を解消し、日時 `details` と自動更新を組み合わせて検証する。
-4. 修正後の PR current HEAD と完全一致する CI run だけを確認する。
-5. 再レビューでは同じ finding ID と severity を維持する。
+3. `RDMCP-PR51-REV-003` は逆順完了の失敗試験を製品テストへ追加してから、状態取得の直列化またはlatest-wins制御を実装する。
+4. `RDMCP-PR51-REV-004` のTDD順序表現を修正する。
+5. PR #50 が先に main へ入った場合は、その main を取り込んで `RDMCP-PR51-HOLD-001` の競合を解消し、日時 `details` と自動更新を組み合わせて検証する。
+6. 修正後の PR current HEAD と完全一致する CI run だけを確認する。
+7. 再レビューでは同じ finding ID と severity を維持する。
