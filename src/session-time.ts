@@ -27,10 +27,10 @@ export function createSessionTimeFormatter(): SessionTimeFormatter {
     const elapsed = date.getTime() - nowDate.getTime();
     const elapsedMagnitude = Math.abs(elapsed);
     const dayDifference = jstDayNumber(date) - jstDayNumber(nowDate);
-    const suffix = elapsed < 0 ? "前" : "後";
+    const suffix = elapsed <= 0 ? "前" : "後";
     let relative: string;
 
-    if (elapsedMagnitude < 60_000) relative = "たった今";
+    if (elapsedMagnitude < 60_000) relative = `${Math.floor(elapsedMagnitude / 1_000)}秒${suffix}`;
     else if (dayDifference === -1) relative = "昨日";
     else if (dayDifference === 1) relative = "明日";
     else if (dayDifference < -1) relative = `${Math.abs(dayDifference)}日前`;

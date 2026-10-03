@@ -101,17 +101,17 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
   const elements = new Map<string, FakeElement>([["log-console", root], ["log-status", status], ["log-new-button", newest], ["log-older-button", older], ...Object.entries(extras)]);
   const scrollY = 0; let scrollCalls = 0;
   const windowListeners = new Map<string, () => void>();
-  const intervals = new Map<number, () => void>(); let nextInterval = 0;
+  const intervals = new Map<number, { callback: () => void; delay: number }>(); let nextInterval = 0;
   const windowStub = {
     scrollY, scrollX: 0, innerHeight: 600,
     addEventListener: (name: string, listener: () => void) => { windowListeners.set(name, listener); },
-    setInterval: (callback: () => void) => { const id = ++nextInterval; intervals.set(id, callback); return id; },
+    setInterval: (callback: () => void, delay: number) => { const id = ++nextInterval; intervals.set(id, { callback, delay }); return id; },
     clearInterval: (id: number) => { intervals.delete(id); },
     scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }),
   };
   const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), get activeElement() { return FakeElement.activeElement; }, documentElement: { scrollHeight: 1200 } };
   runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: TestDate });
-  return { root, status, newest, older, windowStub, windowListeners, intervals, tickIntervals: () => { for (const callback of intervals.values()) callback(); }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
+  return { root, status, newest, older, windowStub, windowListeners, intervals, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {
@@ -337,7 +337,7 @@ test("session timestamp cells expose relative and exact values as native disclos
     calls.push(request);
     if (request.pathname === "/api/console-state") return response(200, {
       stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-02T00:00:00Z",
-      sessions: [{ session_id: "stable-session", created_at: "2026-10-02T01:00:01Z", last_used_at: "2026-09-20T00:00:00Z", state: "active", active: true }],
+      sessions: [{ session_id: "stable-session", created_at: "2026-10-02T01:59:01Z", last_used_at: "2026-09-20T00:00:00Z", state: "active", active: true }],
     });
     return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
   }, [], { "session-rows": sessionRows }, "", now);
@@ -347,10 +347,10 @@ test("session timestamp cells expose relative and exact values as native disclos
   assert.equal(createdDetails?.tagName, "details");
   assert.equal(lastAccessDetails?.tagName, "details");
   assert.equal(createdDetails?.open, false);
-  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "59分前");
+  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "59\u79d2\u524d");
   assert.match(createdDetails?.children[1]?.textContent ?? "", /JST/);
-  assert.equal(createdDetails?.children[0]?.children[0]?.dateTime, "2026-10-02T01:00:01.000Z");
-  assert.equal(ui.intervals.size, 1);
+  assert.equal(createdDetails?.children[0]?.children[0]?.dateTime, "2026-10-02T01:59:01.000Z");
+  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000]);
 
   const oldSummary = createdDetails?.children[0];
   assert.ok(oldSummary);
@@ -372,9 +372,13 @@ test("session timestamp cells expose relative and exact values as native disclos
   const relativeTime = restoredSummary?.children[0];
   const redrawRow = sessionRows.children[0];
   const requestCount = calls.length;
+  ui.setNow(now + 1_000);
+  ui.tickIntervals();
+  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "1分前");
+  assert.equal(ui.intervals.size, 1, "the one-second timer releases itself when no timestamp uses seconds");
   ui.setNow(now + 60_000);
   ui.tickIntervals();
-  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "1時間前");
+  assert.equal(createdDetails?.children[0]?.children[0]?.textContent, "1分前");
   assert.equal(restoredSummary?.children[0], relativeTime, "the interval changes text without replacing the time element");
   assert.equal(createdDetails?.children[1]?.textContent, exactValue);
   assert.equal(sessionRows.children[0], redrawRow, "the interval changes text without replacing the row");

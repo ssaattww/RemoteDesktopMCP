@@ -489,6 +489,7 @@ function clientBootstrap(): void {
           addCell(row, session.working_directory ?? "—");
         }
         if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
+        syncSessionSecondUpdates();
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
       if (runningRows && state.running) {
@@ -585,15 +586,43 @@ function clientBootstrap(): void {
   }, { passive: true });
   const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
   let relativeUpdateInterval: number | undefined;
+  let secondsUpdateInterval: number | undefined;
+  const isSecondDisplay = (value: string | null) => /^\d+秒(?:前|後)$/.test(value ?? "");
+  const sessionRelativeElements = () => sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? [];
   const updateSessionRelativeTimes = () => {
-    for (const relative of sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? []) {
-      relative.textContent = formatSessionTime(relative.dateTime)?.relative ?? "—";
+    for (const relative of sessionRelativeElements()) {
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+    }
+    syncSessionSecondUpdates();
+  };
+  const updateSessionSecondTimes = () => {
+    let hasSecondDisplay = false;
+    for (const relative of sessionRelativeElements()) {
+      if (!isSecondDisplay(relative.textContent)) continue;
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+      if (isSecondDisplay(next)) hasSecondDisplay = true;
+    }
+    if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionSecondUpdates = () => {
+    const hasSecondDisplay = Array.from(sessionRelativeElements()).some((relative) => isSecondDisplay(relative.textContent));
+    if (hasSecondDisplay && secondsUpdateInterval === undefined) {
+      secondsUpdateInterval = window.setInterval(updateSessionSecondTimes, 1_000);
+    } else if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
     }
   };
   const stopSessionRelativeUpdates = () => {
-    if (relativeUpdateInterval === undefined) return;
-    window.clearInterval(relativeUpdateInterval);
+    if (relativeUpdateInterval !== undefined) window.clearInterval(relativeUpdateInterval);
+    if (secondsUpdateInterval !== undefined) window.clearInterval(secondsUpdateInterval);
     relativeUpdateInterval = undefined;
+    secondsUpdateInterval = undefined;
   };
   const startSessionRelativeUpdates = () => {
     if (!sessionRows || relativeUpdateInterval !== undefined) return;
