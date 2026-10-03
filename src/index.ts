@@ -455,7 +455,7 @@ export class RemoteDesktopService {
         if (workingDirectory !== undefined && workingDirectory !== target.workingDirectory) changedFields.push("workingDirectory");
         if (purpose !== undefined && purpose !== target.purpose) changedFields.push("purpose");
         if (hasExternalUrl && linkUpdate.link.externalUrl !== target.externalUrl) changedFields.push("externalUrl");
-        if (hasExternalTitle && (linkUpdate.link.externalTitle !== target.externalTitle || linkUpdate.link.externalTitleSource !== target.externalTitleSource)) changedFields.push("externalTitle");
+        if (hasExternalTitle && (linkUpdate.link.externalTitle !== target.externalTitle || linkUpdate.link.externalTitleSource !== target.externalTitleSource || linkUpdate.shouldFetch)) changedFields.push("externalTitle");
         if (!changedFields.length) return { result: { ok: true as const, session_id: target.id, working_directory: target.workingDirectory, purpose: target.purpose, external_url: target.externalUrl, external_title: target.externalTitle, external_title_source: target.externalTitleSource, external_title_status: target.externalTitleStatus, version: target.version, changedFields } };
         const previous = { workingDirectory: target.workingDirectory, purpose: target.purpose, externalUrl: target.externalUrl, externalTitle: target.externalTitle, externalTitleSource: target.externalTitleSource, externalTitleStatus: target.externalTitleStatus, linkRevision: target.linkRevision, version: target.version, touched: target.touched, expires: target.expires };
         if (workingDirectory !== undefined) target.workingDirectory = workingDirectory;
@@ -474,7 +474,7 @@ export class RemoteDesktopService {
           if (this.sessions.get(sessionId) !== committed.target || committed.target.version !== committed.previous.version + 1) return;
           committed.target.workingDirectory = committed.previous.workingDirectory;
           committed.target.purpose = committed.previous.purpose;
-          Object.assign(committed.target, { externalUrl: committed.previous.externalUrl, externalTitle: committed.previous.externalTitle, externalTitleSource: committed.previous.externalTitleSource, externalTitleStatus: committed.previous.externalTitleStatus, linkRevision: committed.previous.linkRevision });
+          if (committed.target.linkRevision !== committed.previous.linkRevision) Object.assign(committed.target, { externalUrl: committed.previous.externalUrl, externalTitle: committed.previous.externalTitle, externalTitleSource: committed.previous.externalTitleSource, externalTitleStatus: committed.previous.externalTitleStatus, linkRevision: committed.previous.linkRevision });
           committed.target.version = committed.previous.version;
           committed.target.touched = committed.previous.touched;
           committed.target.expires = committed.previous.expires;

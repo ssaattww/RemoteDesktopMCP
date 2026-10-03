@@ -527,6 +527,137 @@ test("Issue 48: a fetched title does not advance the edit version or get erased 
   } finally { await owner.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
+test("Issue 48: explicitly clearing an empty failed title retries the fetch", async () => {
+  const f = await fixture();
+  let requestCount = 0;
+  const releaseRetries: Array<(value: { status: number; contentType: string; body: Uint8Array }) => void> = [];
+  f.service.cfg.sessionLinkTransport = {
+    resolve: async () => ["93.184.216.34"],
+    request: async () => {
+      requestCount += 1;
+      if (requestCount === 1) return { status: 500, contentType: "text/plain", body: new Uint8Array() };
+      return new Promise((resolve) => { releaseRetries.push(resolve); });
+    },
+  };
+  const owner = await mcp(f.service);
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const opened = await owner.call("session_open", { working_directory: f.root, purpose: "Retry failed title" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
+    const cookie = `rdmcp_user=${token}`;
+    const page = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1]; assert.ok(csrf);
+    const patch = (body: Record<string, unknown>) => fetch(`${base}/api/sessions/${encodeURIComponent(String(opened.session_id))}`, { method: "PATCH", headers: { cookie, origin: f.service.cfg.baseUrl, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
+
+    const initial = await patch({ expectedVersion: 1, externalUrl: "https://example.com/retry" });
+    assert.equal(initial.status, 200);
+    const session = f.service.sessions.get(String(opened.session_id)); assert.ok(session);
+    for (let tries = 0; tries < 100 && session.externalTitleStatus === "pending"; tries += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(session.externalTitleStatus, "failed");
+    assert.equal(session.externalTitle, undefined);
+    assert.equal(requestCount, 1);
+
+    const retry = await patch({ expectedVersion: 2, externalTitle: null });
+    assert.equal(retry.status, 200);
+    const retryResult = await retry.json() as { version: number; external_title_status: string; changedFields: string[] };
+    assert.equal(retryResult.version, 3, "an explicit clear that retries retrieval is a user metadata action");
+    assert.deepEqual(retryResult.changedFields, ["externalTitle"]);
+    assert.equal(session.externalTitleStatus, "pending");
+    assert.equal(session.linkRevision, 2);
+    assert.equal(requestCount, 2, "clearing an empty title starts a new fetch attempt");
+
+    const pendingRetry = await patch({ expectedVersion: 3, externalTitle: null });
+    assert.equal(pendingRetry.status, 200, "an explicit clear also supersedes an already-pending attempt");
+    assert.equal((await pendingRetry.json() as { version: number }).version, 4);
+    assert.equal(session.linkRevision, 3);
+    assert.equal(requestCount, 3);
+
+    releaseRetries[0]!({ status: 200, contentType: "text/html; charset=utf-8", body: new TextEncoder().encode("<title>Stale retry</title>") });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(session.externalTitleStatus, "pending", "the superseded attempt cannot complete the newest retrieval");
+    assert.equal(session.externalTitle, undefined);
+
+    releaseRetries[1]!({ status: 500, contentType: "text/plain", body: new Uint8Array() });
+    for (let tries = 0; tries < 100 && session.externalTitleStatus === "pending"; tries += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(session.externalTitleStatus, "failed");
+    assert.equal(session.version, 4, "the asynchronous failure does not advance the edit version");
+  } finally {
+    for (const release of releaseRetries) release({ status: 500, contentType: "text/plain", body: new Uint8Array() });
+    await owner.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await f.cleanup();
+  }
+});
+
+test("Issue 48: a fetched title survives rollback of an unrelated audit failure", async () => {
+  const f = await fixture();
+  let releaseFetch!: (value: { status: number; contentType: string; body: Uint8Array }) => void;
+  let markFetchStarted!: () => void;
+  const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
+  f.service.cfg.sessionLinkTransport = { resolve: async () => ["93.184.216.34"], request: async () => { markFetchStarted(); return new Promise((resolve) => { releaseFetch = resolve; }); } };
+  const auditService = f.service as unknown as { audit: (event: string, fields: Record<string, unknown>) => Promise<void> };
+  const originalAudit = auditService.audit.bind(f.service);
+  let holdMetadataAudit = false;
+  let releaseMetadataAudit!: () => void;
+  let markMetadataAuditStarted!: () => void;
+  const metadataAuditGate = new Promise<void>((resolve) => { releaseMetadataAudit = resolve; });
+  const metadataAuditStarted = new Promise<void>((resolve) => { markMetadataAuditStarted = resolve; });
+  auditService.audit = async (event, fields) => {
+    if (holdMetadataAudit && event === "session.metadata.updated" && fields.version === 3) {
+      holdMetadataAudit = false;
+      markMetadataAuditStarted();
+      await metadataAuditGate;
+      throw new Error("injected metadata audit failure");
+    }
+    await originalAudit(event, fields);
+  };
+  const owner = await mcp(f.service);
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const opened = await owner.call("session_open", { working_directory: f.root, purpose: "Before rollback" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
+    const cookie = `rdmcp_user=${token}`;
+    const page = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1]; assert.ok(csrf);
+    const patch = (body: Record<string, unknown>) => fetch(`${base}/api/sessions/${encodeURIComponent(String(opened.session_id))}`, { method: "PATCH", headers: { cookie, origin: f.service.cfg.baseUrl, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
+
+    const saveLink = await patch({ expectedVersion: 1, externalUrl: "https://example.com/rollback" });
+    assert.equal(saveLink.status, 200);
+    await fetchStarted;
+    holdMetadataAudit = true;
+    const purposeSave = patch({ expectedVersion: 2, purpose: "Will roll back" });
+    await metadataAuditStarted;
+    const session = f.service.sessions.get(String(opened.session_id)); assert.ok(session);
+    releaseFetch({ status: 200, contentType: "text/html; charset=utf-8", body: new TextEncoder().encode("<title>Fetched during audit</title>") });
+    for (let tries = 0; tries < 100 && session.externalTitleStatus === "pending"; tries += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(session.externalTitle, "Fetched during audit");
+    assert.equal(session.externalTitleStatus, "resolved");
+
+    releaseMetadataAudit();
+    const failedSave = await purposeSave;
+    assert.equal(failedSave.status, 503);
+    assert.equal(session.purpose, "Before rollback");
+    assert.equal(session.version, 2);
+    assert.equal(session.externalTitle, "Fetched during audit", "rollback of unrelated metadata preserves a valid concurrent fetch result");
+    assert.equal(session.externalTitleStatus, "resolved");
+  } finally {
+    releaseMetadataAudit();
+    if (releaseFetch) releaseFetch({ status: 500, contentType: "text/plain", body: new Uint8Array() });
+    auditService.audit = originalAudit;
+    await owner.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await f.cleanup();
+  }
+});
+
 test("Issue 48: emergency stop is accepted while a session working directory is being validated", async () => {
   const f = await fixture();
   const owner = await mcp(f.service);
