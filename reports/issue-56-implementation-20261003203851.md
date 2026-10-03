@@ -143,3 +143,11 @@
 - focused証拠: `node --import tsx --test --test-name-pattern='NR003 and NR004: searches return every page' test/regressions.test.ts` exit 0（2 tests pass）。
 - 84a3abbからの全体再検証: lint exit 0（Markdown 106 files / 0 issues、design terms含む）、check exit 0、build exit 0、full `npm test` exit 0（166 tests / 155 pass / 11 skip / 0 fail、duration 133742ms）。
 - 次段階: test-onlyの追加差分を新commit/pushし、同一reviewerに修正確認を依頼、新head GitHub CIの全platform/shard結果を確認する。前の失敗runは修正対象外コードのテストwait budget不足として区別する。
+
+## KERO-56-001 修正記録
+
+- 指摘: clock anomalyをラッチした後の強制OFFでも通常操作が`TODO_STALE`になり、OFF中も時計異常検出で拒否する。またOFF切替が`performance.now()`取得に依存している。
+- Red: `turning enforcement off releases a latched Todo clock anomaly`、`clock divergence while enforcement is off does not block, and clock checks resume after re-enable`、`disabling enforcement succeeds when the monotonic clock is unavailable` の3 focused testsを追加し、修正前に失敗を確認した。失敗原因は前2件がOFF後の`clock_anomaly`拒否、3件目がOFF処理で単調時計例外を受けること。
+- Green: `todoGate`はOFF時にclock read/checkより前に許可応答を返す。OFF遷移はmonotonic clockを読まずに異常ラッチと時計比較baselineを消去する。ON遷移のみ有限単調時刻を先に確立し、enabledAt/baselineを記録して5分猶予を開始する。ON後の異常判定とtimestamp破損のfail-closedは維持する。
+- 検証: Issue #56異常/OFF/再ON focused 5/5 pass（3新規＋時計異常既存2件）。全体`npm test` 169 tests / 158 pass / 11 skipped / 0 failed。`npm run lint`（Markdown 106 files / 0 issues、design terms含む）、`npm run check`、`npm run build`はすべてexit 0。
+- 設計仕様はOFF中にTodo由来の時計異常を判定・拒否しないこと、OFF時ラッチ解除、再ONで時計基準を新設し以降の異常をfail-closedとすることを明記。

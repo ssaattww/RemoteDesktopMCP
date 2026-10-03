@@ -90,7 +90,7 @@
 
 ## 2026-10-03 CI修正の同一reviewer検証
 
-### 対象と独立性
+### 今回の対象と独立性
 
 - レビュー種別: NREV closure後のCI修正に限定したfix verification。過去の4709fc6判定は削除・上書きせず、その時点でincompleteだった履歴として保持する。
 - 今回target HEAD: 84a3abb6a7a043f30694d0079bd6db5cc6421a19。parent: 4709fc61c297232008ce3ae164bf1548ed62ab37。branch: feature/issue-56-shared-todo。作業treeはclean。HEADと親をrev-parseで確認し、target差分はtest/issue-56-shared-todo.test.ts、reports/issue-56-implementation-20261003203851.md、本レポートのみ。src/production code変更なし。
@@ -113,7 +113,7 @@
 - production source unchanged / 2-second production throttle unchanged: checked_no_finding。
 - prior NREV-56-01〜03 identities and severities: checked_no_finding（全件closed mediumを保持）。
 - target HEAD local lint/check/build/focused/full npm test evidence: checked_no_finding（提示された実行記録を照合。自ら再実行したとは主張しない）。
-- New exact-HEAD GitHub CI: held（run 37159591840起動済み、Ubuntu success、Windows 3 shardのtest実行中）。
+- 84a3abb exact-head GitHub CIは後続Windows shard failureで失敗と確定し、その履歴を下記に保持。74923a9 exact-head CI run 37160762875は全job successで完了。
 - Real Desktop Commander subprocess/network timeout: held（fixture外）。
 - 未探索: なし。
 
@@ -145,3 +145,63 @@
 - 修正: test-only poll budgetを最大10秒（200回×50ms）に変更。status/output polling fallbackなし。Production codeは変更していない。
 - 修正後ローカル証拠: 該当NR003/NR004 focused commandは2/2 pass。lint、check、buildもexit 0。full `npm test` は166 tests / 155 pass / 11 skipped / 0 failed。
 - 次段階: 親は新しいheadをpushし、同一reviewerの再確認と新head CIの全job完了後に判定を更新する。実Desktop Commander subprocess/network timeout自体は未検証であり、SDK in-memory RequestTimeout fixtureでの境界検証との区別を保つ。
+
+## 2026-10-03 Windows shard wait修正の同一reviewer検証
+
+### 対象と独立性
+
+- レビュー種別: 前回CI修正follow-upのbounded fix verification。同じreviewer identityを保持し、CI run 37159591840の追加失敗、test-only wait増加、および新target CIだけを確認。過去の4709fc6および84a3abb時点の判定は履歴として保持する。
+- 今回target: HEAD 74923a938e13ac10ce4dff5095c9c42829ddfea0、親84a3abb6a7a043f30694d0079bd6db5cc6421a19、branch feature/issue-56-shared-todo。treeは確認開始時clean。commit差分はreports/issue-56-fix-verification-20261003220818.md、reports/issue-56-implementation-20261003203851.md、test/regressions.test.ts。src production codeの変更なし。
+- Reviewer identity / profile: /root/issue56_normal_reviewerとしてcontinuity維持。元profile gpt-6-luna / medium / fork none。runtime model/roleは観測不能・null相当のまま保持し推測しない。
+- NREV-56-01〜03はclosed、original ID/severity mediumを維持し、再分類なし。今回diffで新規コードfindingなし。
+
+### 37159591840の失敗診断と修正レビュー
+
+- Workflow job logをGitHub connectorから取得: Windows shard 2/3 job 111310072979。PR merge-check checkout SHAは6d7ecb1e6f1669e444d387837f507c39d29b59bd（head 84a3abb + base bfe3793）。jobは52 tests中51 pass / 1 fail。失敗はtest/regressions.test.ts:933の NR003/NR004自然終了audit assertion “natural exit must be audited without process status/output polling”のみ。その他の51 testsはpass。run 37159591840ではUbuntuおよびWindows shard 1/3、3/3がsuccess。
+- 修正diffはtest/regressions.test.tsのpoll upper boundを30から200へ変更し、固定50ms waitでmax 10sに拡大。production watcher間隔、process handler、audit codeに変更なし。fallback status/output pollingは追加されていない。
+- 根本原因説明は対象テストの構造と整合する。自然終了child後のautonomous watcherを最大1.5sだけ待っていたため、負荷が高いWindows shardでeventを観測できない場合がある。10s bounded waitはwatcherが自然にauditする条件を待ち、status/outputからauditを発生させる経路を足さない。レビュー範囲では不要な製品挙動変更や無制限待機を認めない。
+
+### 検証証拠とfixtureの限界
+
+- 親提供のfocused evidence: node --import tsx --test --test-name-pattern='NR003 and NR004: searches return every page' test/regressions.test.ts exit 0、2/2 pass。
+- 親提供のtarget 74923a9 local evidence: lint exit 0（Markdown 106 files / 0 issues、terms含む）、check exit 0、build exit 0、npm test exit 0（166 tests / 155 pass / 11 skip / 0 fail）。本レビューではtestを再実行していない。
+- 84a3abbから持ち越したIssue #56 timeout fixtureはSDK in-memory client/server transportがRequestTimeout code -32001を生成し、それをDesktop Commander call境界のfixtureへ注入してprocess_kill resultを検証する。fixtureはSDK RequestTimeoutのcodeとRDMCP wrapperのunknown結果の組成を検証するが、実Desktop Commander外部transport、子process、実network timeoutは検証しない。
+- issue-56-shared-todoのSDK timeout fixtureとNREV closure pathは今回commitで変更されていない。今回のCI失敗は別の既存regression test wait budgetに限定されている。
+
+### Coverage disposition / closure matrix
+
+| 項目 | 必要条件 | 対象path / fixture | 証拠 | 処置 |
+| --- | --- | --- | --- | --- |
+| CI失敗の原因同定 | 正確なfail job/logと対象assertionを把握 | run 37159591840 / Windows shard2 job 111310072979 / regressions.test.ts:933 | connector job log: 52 total, 51 pass, 1 fail。UbuntuとWindows shard1/3はsuccess | checked_no_finding |
+| 自然終了audit wait修正 | 負荷時も自律watcherだけを待ち、fallback status/output pollingを使わない | regressions.test.ts NR003/NR004: loop 30→200 × 50ms | test diff、親提供focused 2/2 pass | checked_no_finding |
+| Production scope | このCI test failure修正でruntimeを変更しない | target diffにsrc変更なし | git show diff/name list | checked_no_finding |
+| Issue #56 finding continuity | NREV-56-01/02/03のmedium identityを保持 | 前回closed matrix。今回はtest/report変更のみ | source findingsは再open理由なし | checked_no_finding |
+| SDK timeout fixture | SDK request timeout code -32001をwrapperへ渡しapplied unknown/no retry | 84a3abbのin-memory Client/McpServer fixture + injected adapter boundary | 前回fixture 1/1 pass証拠。実DC/networkはheld | checked_no_finding (fixture scope) |
+| Target local validation | focused / lint / check / build / full suiteのtarget一致証拠 | HEAD 74923a9 | 親提供記録: focused 2/2、npm test 166/155 pass/11 skip、lint/check/build all success | checked_no_finding (provided evidence) |
+| New-head GitHub CI | 最新headの全OS/shardを成功確認 | run 37160762875 | Ubuntu lint/check/build/test success、Windows shards 1/3, 2/3, 3/3のcheck/build/test success。全4 job completed success | closed |
+| 実Desktop Commander timeout | 外部transport mappingを検証 | 実DC/process/network | 実行していない | held |
+
+### 新target CI status / verdict
+
+- GitHub commit workflow lookupは74923a938e13ac10ce4dff5095c9c42829ddfea0にPR-triggered run 37160762875を返した。これは新targetに関連付くrunである。
+- 最終job state: Ubuntu lint/typecheck/build/test success。Windows shard 1/3、2/3、3/3のcheck/build/test success。全4 job completed success。
+- 判定: complete / closed。修正diffに新しいfindingはなく、run 37160762875の全4 job successを確認した。旧run failureは履歴に残す。実Desktop Commander subprocess/network timeoutはfixture外のため未検証riskとして継続。
+
+## KERO-56-001 時計異常後のOFF切替と再有効化の修正検証
+
+### 指摘とRed
+
+- 指摘元: 親keroのPRコメント [5974671360](https://github.com/ssaattww/RemoteDesktopMCP/pull/61#issuecomment-5974671360)。対象既存HEADは `74923a938e13ac10ce4dff5095c9c42829ddfea0`。
+- 内容: `todoGate`が強制無効判定前にclock anomalyを拒否し、OFF切替も `performance.now()` 取得に依存するため、異常状態を解除できずOFF自体も失敗し得る。
+- Red: 新規3 testを修正前に実行し失敗確認。異常発生後OFF/通常操作、OFF中時計ずれ/再ON、単調時計throw中OFFを対象とする。
+
+### 修正とGreen
+
+- `todoGate`: enforcement OFFを単調時計の読取・時計異常判定より前に成功扱いする。
+- `todoSetEnforcement`: OFF遷移では単調時計を読まずに時計異常状態と比較基準を破棄。ON遷移は有限な単調時計の取得に成功した後だけ状態を変更し、`enabledAtMono`と比較基準を再設定する。
+- 再ONは切替後5分の猶予を開始し、その後の壁時計/単調時計の乖離を検出してfail-closedする。版番号>0のtimestamp破損検知、owner認可、緊急停止、監査故障時の既存規則には変更なし。
+- 設計文書も、OFF中は時計異常を検出・拒否しないこと、OFFで異常記録を解除すること、再ON時に時計基準を再確立することへ同期した。
+- 修正後focused: clock anomaly既存2件と切替関連3件で5/5 pass。
+- 修正後全体: `npm test` 169 tests / 158 pass / 11 skipped / 0 failed。`npm run lint`、`npm run check`、`npm run build` exit 0。Markdown lintは106 files / 0 issues、design-term lintも成功。
+- 同一normal reviewerの限定レビュー: `pass_with_held`、KERO-56-001に新規required findingなし。既存owner、Emergency Stop、監査経路で回帰なし。レビュー記録は `reports/issue-56-normal-review-20261003213135.md`。保留はこの未コミット差分に対するmatching CI。
+- 親keroによる独立再確認とGitHub CIは未了。

@@ -88,3 +88,41 @@
 - 未探索: なし。今回見つけた各問題は差分起因で、位置・再現条件・必要対応を上記へ記録。
 - 残る運用リスク: 期限判定は起動中のsession stateを使う設計であり、プロセス再起動でTodo/sessionは失効する。これは設計どおり。監査故障中の実測adapter挙動は判断できない。
 - 次の対応: NREV-56-01〜03を修正し、各finding completeness matrixにproduction経路・実際のcomposition fixture・focused evidenceを揃えた後、対象HEADでfocused suiteと型検査を実行する。実Desktop Commander timeout経路も確認し、同一reviewerのfinding-limited fix verificationへ進む。
+
+## 2026-10-03 KERO-56-001 focused normal review
+
+### 対象同一性・範囲
+
+- review mode: initial focused normal review of KERO-56-001 working-tree fix.
+- base HEAD SHA: 74923a938e13ac10ce4dff5095c9c42829ddfea0。branch feature/issue-56-shared-todo。HEADはこのbaseから移動しておらず、コード/設計/テスト修正は未コミット。
+- 対象開始時のworktree state: dirty。変更ファイルはdoc/design/shared-todo-and-stale-update-gate.md、src/index.ts、test/issue-56-shared-todo.test.ts、reports/issue-56-implementation-20261003203851.md、reports/issue-56-fix-verification-20261003220818.md。これらすべてを含む開始時diff SHA-256: 5154af5835349d6968eb5f2598da6f5a1313fc087cb09dd5b04148775b5a1dde。source/test/designに限定したdiff SHA-256: 153a012334e3526f772d49de657a88f0ee236f81a7064695e898319c5290f7b4。
+- 対象: todoSetEnforcement / todoGate OFF・ON動作、3つのTDDケース、設計文書、実装/修正検証報告への記録。緊急停止・監査故障経路の関連 regression を確認。前回closedのNREV-56-01〜03はidentity/severity mediumのまま保持。
+- reviewer identity/profile: /root/issue56_normal_reviewerとして継続。元指定gpt-6-luna / medium / fork none。runtime model/roleは観測不可なのでnull/unknownを維持し推測しない。
+
+### 確認結果
+
+- 実装経路: todoSetEnforcementはsession owner/active/expiry確認を行った後、todoLock配下で状態を切替える。OFF遷移はperformance.now / Date.nowを呼ばず、enabled=false、clockAnomaly=falseとし、前回のgate clock比較baselineを削除する。enforcement_changed監査失敗は既存どおりaudit_warning/applied結果に変換する。
+- 執行経路: todoGateはロック下で最初にenabledを確認し、OFFなら単調/壁時計読取、clockAnomaly判定、timestamp検証を行わずfresh扱いで返す。よってOFF中はTodo由来clock anomalyにより通常操作を拒否しない。外側wrapperは既存のuser emergency-stop判定を先に行い、Todo gateより前にstopped userを拒否する。session owner check、audit warning、kill/status/output allowlistは今回差分で変えていない。
+- 再有効化: ON transition時はperformance.nowを取得しNumber.isFiniteを要求してから状態を書換え、Date.nowと共に新しいenabledAtMono/lastGateMono/lastGateWallを設定。anomaly latchを解除し、過去の無効期間や前回時計比較値を持ち越さない。以後はclock comparisonが再開し、freshnessは新enabledAtMonoから300000msの猶予を与える。monotonic取得が有限でないときはmutation前にthrowする。
+- 3新規TDD case: anomaly latch後にOFFで通常操作が通り、再ON後は300000ms期限を新基準で再適用するcase。OFF時間中のclock divergenceを許可し、再ON後のdivergenceを再検知するcase。performance.nowがthrowする状態でもOFF遷移とOFF中の通常操作が成功するcase。各testのfake clockをfinallyで復元し、session所有のMCP toolを介して実際のproduction stateとwrapperを組成する。
+- Recovery/audit/stop: 既存のclock anomaly fail-closed test群、Todo update recovery、audit outage safe exception testとEmergency Stop all-audit-failure cleanup testを確認。追加差分はtodoSetEnforcement/todoGateに限定され、stopUserExecutionやowner/session guardを変更していない。OFF時はgate anomalyだけを解除し、Emergency Stopのstopped checkは残る。
+- Docs/report: designはOFF中にclock check/rejectionをしない、OFF遷移でTodo由来anomalyを解除、時計非依存のOFF、ON時に有限clock baselineを作成して5分猶予後に時計異常を再適用、と今回の実装に合わせて改訂。implementation reportは3 Red/Green、5 focused pass、全体test/lint/check/build証拠を記録。TDD report evidenceは親提供の記録として扱う。
+
+### Coverage disposition / findings
+
+- OFFで既存Todo clock anomalyを理由に通常操作を拒否しない: checked_no_finding。
+- OFF中にperformance.now/Date.nowをTodo gateが読まず、clock divergenceを新規検出しない: checked_no_finding。
+- OFF操作自体がperformance.now unavailable時も成功する: checked_no_finding。
+- ONで有限monotonic baselineとwall comparison baselineを新規確立し、5分猶予を再開始: checked_no_finding。OFF-after-anomalyと通常grace切替テストで構成経路を確認。
+- 再ON後のclock anomaly検知・fail-closed復帰: checked_no_finding。
+- user/session owner認可、Emergency Stop優先順位、audit warning/failure behaviorの回帰: checked_no_finding。
+- テストと報告の妥当性: checked_no_finding（親提供の変更前Red/Greenと変更後focused 5/5、full npm test 169 total / 158 pass / 11 skip / 0 fail、lint/check/build成功の実行記録を照合。今回レビューでは再実行していない）。
+- exact working-tree CI: held。run 37160762875はbase commit 74923a9に対するものであり、未コミットKERO diffのCI証拠ではない。
+- 実Desktop Commander subprocess/network timeout: not_applicable to this specific clock/OFF change; previous fix-verification report retains it as an unverified risk for the overall feature.
+- unexplored: なし。
+- Findings: KERO-56-001について新規required findingなし。Severity reclassificationなし。NREV-56-01〜03の元medium finding identities/statusはこのfocused passの範囲外でclosedのまま保持。
+
+### Verdict / next action
+
+- Verdict: pass_with_held。今回の実装・design/test/report diffで要求されたOFF bypassと再ON fail-closed/graceを確認し、必須所見なし。保留は未コミットworking-tree diffに対するmatching CIのみで、所有者は親。実Desktop Commander timeoutは今回の時計修正範囲外のため判断対象外であり、過去レポートの未検証riskは維持する。
+- Next action: parentがKERO-56-001 source/test/design/report diffを統合・commitした後、そのexact HEADの検証/CI証拠を結び付ける。今回reviewerはsource/testを変更せず、commit/push/mergeを行っていない。

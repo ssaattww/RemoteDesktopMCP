@@ -572,7 +572,32 @@ export class RemoteDesktopService {
     });
   }
   async todoSetEnforcement(user: string, sessionId: string, enabled: boolean) {
-    return this.todoLock.run(async () => { const session = this.session(user, sessionId); const now = Date.now(); const mono = performance.now(); const before = session.todo.enabled; let auditWarning = false; if (before !== enabled) { session.todo.enabled = enabled; if (enabled) session.todo.enabledAtMono = mono; session.todo.lastGateMono = mono; session.todo.lastGateWall = now; try { await this.audit("todo.enforcement_changed", { user, sessionId: session.id, enabled, previous: before }); } catch { auditWarning = true; } } return { session_id: sessionId, enabled: session.todo.enabled, ...(auditWarning ? { audit_warning: true, applied: true } : {}) }; });
+    return this.todoLock.run(async () => {
+      const session = this.session(user, sessionId);
+      const before = session.todo.enabled;
+      let auditWarning = false;
+      if (before !== enabled) {
+        let mono: number | undefined;
+        let wall: number | undefined;
+        if (enabled) {
+          mono = performance.now();
+          if (!Number.isFinite(mono)) throw new Error("Monotonic clock is unavailable.");
+          wall = Date.now();
+        }
+        session.todo.enabled = enabled;
+        session.todo.clockAnomaly = false;
+        if (enabled) {
+          session.todo.enabledAtMono = mono!;
+          session.todo.lastGateMono = mono!;
+          session.todo.lastGateWall = wall!;
+        } else {
+          delete session.todo.lastGateMono;
+          delete session.todo.lastGateWall;
+        }
+        try { await this.audit("todo.enforcement_changed", { user, sessionId: session.id, enabled, previous: before }); } catch { auditWarning = true; }
+      }
+      return { session_id: sessionId, enabled: session.todo.enabled, ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
+    });
   }
   private todoException(toolName: string, user: string, sessionId: unknown, record: Record<string, unknown>): boolean {
     if (["session_open", "session_close", "todo_get", "todo_update", "todo_enforcement_set", "file_transfer_cancel"].includes(toolName)) return true;
@@ -583,6 +608,7 @@ export class RemoteDesktopService {
   private async todoGate(session: Session): Promise<{ stale: boolean; reason?: string; lastUpdatedAt: string | null }> {
     return this.todoLock.run(async () => {
       const todo = session.todo;
+      if (!todo.enabled) return { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
       let mono: number;
       try { mono = performance.now(); if (!Number.isFinite(mono)) throw new Error(); }
       catch { todo.clockAnomaly = true; return { stale: true, reason: "clock_unavailable", lastUpdatedAt: todo.lastUpdatedAt }; }

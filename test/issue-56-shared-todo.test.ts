@@ -173,6 +173,99 @@ test("clock anomalies are audited, fail closed, and clear only after a Todo upda
   }
 });
 
+test("turning enforcement off releases a latched Todo clock anomaly", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  let monotonicNow = originalNow();
+  let wallNow = originalWallNow();
+  performance.now = () => monotonicNow;
+  Date.now = () => wallNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "disable after clock anomaly" });
+    const sessionId = String(opened.session_id);
+    monotonicNow += 1;
+    wallNow += 60_002;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE.*clock_anomaly/s);
+
+    await owner.call("todo_enforcement_set", { session_id: sessionId, enabled: false });
+    await owner.call("node_list", { session_id: sessionId });
+    await owner.call("todo_enforcement_set", { session_id: sessionId, enabled: true });
+    await owner.call("node_list", { session_id: sessionId });
+    monotonicNow += 299_999;
+    wallNow += 299_999;
+    await owner.call("node_list", { session_id: sessionId });
+    monotonicNow += 1;
+    wallNow += 1;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE.*todo_stale/s);
+  } finally {
+    performance.now = originalNow;
+    Date.now = originalWallNow;
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("clock divergence while enforcement is off does not block, and clock checks resume after re-enable", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  let monotonicNow = originalNow();
+  let wallNow = originalWallNow();
+  performance.now = () => monotonicNow;
+  Date.now = () => wallNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "clock anomaly while disabled" });
+    const sessionId = String(opened.session_id);
+    await owner.call("todo_enforcement_set", { session_id: sessionId, enabled: false });
+    monotonicNow += 1;
+    wallNow += 60_002;
+    await owner.call("node_list", { session_id: sessionId });
+
+    await owner.call("todo_enforcement_set", { session_id: sessionId, enabled: true });
+    await owner.call("node_list", { session_id: sessionId });
+    monotonicNow += 1;
+    wallNow += 60_002;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE.*clock_anomaly/s);
+    assert.ok(h.audits.some((entry) => entry.event === "todo.clock_anomaly"));
+  } finally {
+    performance.now = originalNow;
+    Date.now = originalWallNow;
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("disabling enforcement succeeds when the monotonic clock is unavailable", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  let monotonicNow = originalNow();
+  let wallNow = originalWallNow();
+  performance.now = () => monotonicNow;
+  Date.now = () => wallNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "disable with unavailable clock" });
+    const sessionId = String(opened.session_id);
+    monotonicNow += 300_000;
+    wallNow += 300_000;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE.*todo_stale/s);
+
+    performance.now = () => { throw new Error("monotonic clock unavailable"); };
+    const disabled = await owner.call("todo_enforcement_set", { session_id: sessionId, enabled: false });
+    assert.equal(disabled.enabled, false);
+    await owner.call("node_list", { session_id: sessionId });
+  } finally {
+    performance.now = originalNow;
+    Date.now = originalWallNow;
+    await owner.close();
+    await h.close();
+  }
+});
+
 test("disabling bypasses freshness and re-enabling starts a new five-minute grace period", async () => {
   const originalNow = performance.now.bind(performance);
   const originalWallNow = Date.now.bind(Date);
