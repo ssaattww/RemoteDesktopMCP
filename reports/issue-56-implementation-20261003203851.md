@@ -56,22 +56,34 @@
 - TypeScript初回: `tsc -p tsconfig.json --noEmit` exit `2`。stdoutに `src/user-console.ts` の結果unionへ `conflict` / `audit_warning` を直接参照した型エラー2件。union存在判定へ修正。
 - TypeScript再実行: `tsc -p tsconfig.json --noEmit` exit `0`。stdout/stderrとも空。
 - 初回setup失敗は親所有のRed evidence reportに記載済みで、ここでは仕様Redとして数えない。Focusedテストと型検査は有効。
+- follow-up開始: branch `feature/issue-56-shared-todo`, HEAD `e1f001d0bfbcdb7e380630b37839cae251d623b4`, 初期worktree clean。実行時にlock SHA一致済みsiblingの`node_modules`を一時symlinkし、各コマンド後に削除。installなし。
+- Red（clock anomaly監査）: `tsx --test --test-name-pattern='clock anomalies are audited' test/issue-56-shared-todo.test.ts` exit `1`。clock anomalyで`TODO_STALE`拒否は発生したが、`todo.clock_anomaly`の専用監査assertionが`actual: false`で失敗。stdoutに当該AssertionError、stderr空。後続Green同コマンド exit `0`、1/1 pass、stdout/stderr各diagnosticはstdoutのpass行のみ/stderr空。
+- 既存挙動のfocused検証: `--test-name-pattern='disabling bypasses freshness|versioned Todo with a missing'` exit `0`、2/2 pass。OFF中は期限超過操作を許可し、ON遷移時刻から再猶予、version>0/null monotonic timestampは拒否、Todo更新で復帰を確認。
+- Red（stale process snapshot）: `--test-name-pattern='stale process status returns'` の初回試行はtest fixtureのDesktop Commander未初期化によるsetup failureでありRedとして不算入。fixture修正後に同focused command exit `1`、stdoutで `actual: 'fresh output'`, `expected: 'cached output'` assertion failure、stderr空。実装後同コマンド exit `0`、1/1 pass、stale時read adapter呼出し0・cached outputを確認。
+- Red（session close audit failure）: `--test-name-pattern='session close completes when its audit'` exit `1`。監査故障中にclose cleanup後も`Error: Operation failed.`となる仕様assertion path。実装後同コマンド exit `0`、1/1 pass、closed state・`audit_warning: true`・`applied: true`確認。
+- UI form/API integration: `--test-name-pattern='Todo forms enforce CSRF'` exit `0`、1/1 pass。CSRF form add, stale-version conflict redirect, missing CSRF 403, enforcement toggle, non-owner 404を確認。現実装で既にGreenだったため新たなRedとしては数えない。
+- 最終focused回帰: `tsx --test test/issue-56-shared-todo.test.ts` exit `0`、12 tests / 12 pass / 0 fail。stdoutに12件passと集計、stderr空。
+- 最終型検査: `tsc -p tsconfig.json --noEmit` exit `0`、stdout/stderr空。
 
 ## 対象ファイル
 
 - 変更: `src/index.ts`（session Todo状態、初期有効、session Todo MCP取得/更新/強制切替、単調時計gate、監査失敗時のgate fail-closedとTodo更新の適用済みwarning応答）。
 - 変更: `src/user-console.ts`（session owner確認付きTodo GET/PUT/enforcement HTTP API、既存CSRF保護を使用するHTML POST操作、session detail先頭の一覧・進捗・更新時刻・強制状態・追加/編集/状態/削除UI）。
 - 変更: `test/issue-56-shared-todo.test.ts`（直接MCP harness、初期version 0/null、owner境界、更新、299999/300000ms、Todo監査故障回復、gate監査故障時process起動抑止、上部配置、HTTP owner/CSRFテスト）。
+- follow-up変更: `src/index.ts`（clock anomaly監査event、stale時process status/outputのcached snapshot例外、session close内部audit failureの適用済みwarning応答）。
+- follow-up変更: `test/issue-56-shared-todo.test.ts`（clock anomaly/reset、OFF/ON grace、timestamp欠落、stale process cache、session close audit failure、Todo UI form CSRF/conflict/owner integration）。
 - レポート: 本節以降のchild-owned sectionsを更新。Dispatch profile節は編集していない。
 
 ## 指摘事項
 
 - 指摘: 期限拒否 `TODO_STALE` はMCP応答内にmachine-readable code/reason/actionを載せる。通常操作の `todo.gate_allowed` 監査失敗は処理関数実行前にfail-closed。Todo updateのstate差替え後監査失敗は `audit_warning: true`, `applied: true` を返す。HTTP APIは既存session active owner確認とCSRF helperを使う。
+- follow-upでclock anomaly/unavailableを`todo.clock_anomaly`として記録（監査故障でもstale拒否維持）、stale時の所有確認済みprocess status/outputは`todoStale` contextを使い保存済みsnapshotだけを返すよう追加。session closeの内部監査失敗はcleanup済み応答に`audit_warning`と`applied`を付ける。
+- UIのPOST formはCSRF、active-session owner、version conflictを通ることをintegrationで確認。ON/OFF formは状態反映を確認。
 
 ## 結果
 
-- 結果: 有効RedからTodo tools/state、初期null扱い、299999ms許可/300000ms拒否、更新後基準再確立、監査故障の基本分岐、session detail最上部UI、owner/CSRF保護済みHTTP APIまで実装した。focused実行4/4、UI/API 2/2、TypeScript `--noEmit`成功。変更は未commit。親から区切り確認を受け、通常push用の当該実装区切りで停止し、次の親follow-up待ち。
+- 結果: 有効RedからTodo tools/state、初期null扱い、299999ms許可/300000ms拒否、更新後基準再確立、監査故障の基本分岐、session detail最上部UI、owner/CSRF保護済みHTTP APIまで実装した。follow-upでclock anomaly専用監査、OFF/ON猶予・timestamp破損回復、stale process snapshot、session close audit warningを追加。最終focused実行12/12、TypeScript `--noEmit`成功。UI form CSRF/conflict/owner統合は追加確認済み。現在の差分は親管理の区切りcommit/push待ち。
 
 ## リスク
 
-- 未解決: 再有効化猶予とversion >0/null timestamp異常のassertion、壁時計・単調時計異常、Todo concurrency/conflict、監査wrapper pre/postの全failure位置、session close/transfer cancel/emergency stop監査例外、所有process status/outputのstale時watcher snapshot限定、process_killの2秒重複要求・terminating再試行、UI form操作自体の統合テスト、安全例外の固定allowlist範囲、より広い既存focused regressionは未完了または未検証。親のcommit/push/通常reviewと次段のTDDが必要。
+- 未解決: process_killの2秒シリアル再試行・terminating状態での再要求・finished process拒否は未実装/未検証。transfer_cancelとemergency stopの各cleanup・監査故障経路は未検証。共通wrapperのpre/post監査故障全位置、特に処理適用結果が不確定な場合の`applied: unknown`応答は未検証。clock逆行/monotonic unavailableの個別ケース、監査故障時にclock anomalyを記録できない警告表現、Todo同時更新競合の追加MCP/API競合検証、より広い既存回帰suiteは未完了または未検証。作業差分は未commitであり、親の通常確認・commit/push・reviewが必要。

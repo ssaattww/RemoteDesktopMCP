@@ -132,6 +132,118 @@ test("ordinary session operations allow 299999ms and are denied at the 300000ms 
   }
 });
 
+test("clock anomalies are audited, fail closed, and clear only after a Todo update", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  let monotonicNow = originalNow();
+  let wallNow = originalWallNow();
+  performance.now = () => monotonicNow;
+  Date.now = () => wallNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "clock anomaly test" });
+    const sessionId = String(opened.session_id);
+    monotonicNow += 1;
+    wallNow += 60_002;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE/);
+    assert.ok(h.audits.some((entry) => entry.event === "todo.clock_anomaly"), "clock anomaly needs its own audit record");
+    await owner.call("todo_update", { session_id: sessionId, expected_version: 0, changes: [{ op: "add", text: "reset clock baseline" }] });
+    await owner.call("node_list", { session_id: sessionId });
+  } finally {
+    performance.now = originalNow;
+    Date.now = originalWallNow;
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("disabling bypasses freshness and re-enabling starts a new five-minute grace period", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  let monotonicNow = originalNow();
+  let wallNow = originalWallNow();
+  performance.now = () => monotonicNow;
+  Date.now = () => wallNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "toggle grace test" });
+    const sessionId = String(opened.session_id);
+    await owner.call("todo_enforcement_set", { session_id: sessionId, enabled: false });
+    monotonicNow += 600_000;
+    wallNow += 600_000;
+    await owner.call("node_list", { session_id: sessionId });
+    await owner.call("todo_enforcement_set", { session_id: sessionId, enabled: true });
+    monotonicNow += 299_999;
+    wallNow += 299_999;
+    await owner.call("node_list", { session_id: sessionId });
+    monotonicNow += 1;
+    wallNow += 1;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE/);
+  } finally {
+    performance.now = originalNow;
+    Date.now = originalWallNow;
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("a versioned Todo with a missing monotonic update time is stale until updated", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "missing timestamp test" });
+    const sessionId = String(opened.session_id);
+    await owner.call("todo_update", { session_id: sessionId, expected_version: 0, changes: [{ op: "add", text: "timestamped" }] });
+    h.service.sessions.get(sessionId)!.todo.lastTodoUpdatedMono = null;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE/);
+    const snapshot = await owner.call("todo_get", { session_id: sessionId });
+    const itemId = (snapshot.items as Array<{ id: string }>)[0]!.id;
+    const updated = await owner.call("todo_update", { session_id: sessionId, expected_version: 1, changes: [{ op: "edit", id: itemId, text: "recovered" }] });
+    assert.equal(updated.version, 2);
+    await owner.call("node_list", { session_id: sessionId });
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("stale process status returns the cached snapshot without reading Desktop Commander", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  let monotonicNow = originalNow();
+  let wallNow = originalWallNow();
+  performance.now = () => monotonicNow;
+  Date.now = () => wallNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  let reads = 0;
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "cached process status test" });
+    const sessionId = String(opened.session_id);
+    const processId = "owned-process-status-test";
+    const internals = h.service as unknown as { processes: Map<string, unknown>; currentProcessOwners: Map<string, string>; dc: { currentGeneration(): string; generation?: string; client?: unknown }; cfg: RuntimeConfig };
+    internals.dc.generation = "test-generation";
+    internals.dc.client = { close: async () => undefined };
+    const generation = internals.dc.currentGeneration();
+    internals.processes.set(processId, { id: processId, sessionId, user: "owner@example.test", generation, pid: 42, state: "running", output: "cached output", cursor: 10 });
+    internals.currentProcessOwners.set(`local:${generation}:42`, processId);
+    internals.cfg.processAdapter = { async start() { return ""; }, async read() { reads += 1; return "fresh output"; }, async terminate() { return ""; }, async sessions() { return "PID: 42"; } };
+    monotonicNow += 300_000;
+    wallNow += 300_000;
+    const snapshot = await owner.call("process_status", { session_id: sessionId, node_id: "local", process_id: processId });
+    assert.equal(snapshot.state, "running");
+    assert.equal(snapshot.output, "cached output");
+    assert.equal(reads, 0, "stale process status must not fetch output after the gate expires");
+  } finally {
+    performance.now = originalNow;
+    Date.now = originalWallNow;
+    await owner.close();
+    await h.close();
+  }
+});
+
 test("Todo updates remain available when audit storage fails and report the committed state", async () => {
   const h = await harness();
   const owner = await h.connect("owner@example.test");
@@ -146,6 +258,24 @@ test("Todo updates remain available when audit storage fails and report the comm
     assert.equal(updated.version, 1);
     assert.equal(updated.audit_warning, true);
     assert.equal(updated.applied, true);
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("session close completes when its audit write fails and reports the applied cleanup", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "safe cleanup audit test" });
+    const sessionId = String(opened.session_id);
+    h.setAuditFailure(new Error("audit unavailable"));
+    const closed = await owner.call("session_close", { session_id: sessionId });
+    assert.equal(closed.closed, true);
+    assert.equal(closed.audit_warning, true);
+    assert.equal(closed.applied, true);
+    assert.equal(h.service.sessions.get(sessionId)?.state, "closed");
   } finally {
     await owner.close();
     await h.close();
@@ -197,5 +327,30 @@ test("the authenticated Todo HTTP API reads and updates only an owned active ses
     assert.equal(updated.status, 200);
     assert.equal((await updated.json() as { version: number }).version, 1);
     assert.equal((await fetch(`${h.baseUrl}/api/sessions/not-owned-session-00001/todo`, { headers: { cookie: h.cookie } })).status, 404);
+  } finally { await h.close(); }
+});
+
+test("Todo forms enforce CSRF and ownership while handling add, conflict, and enforcement toggle", async () => {
+  const h = await consoleHarness();
+  try {
+    const detailUrl = `${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`;
+    const detail = await fetch(detailUrl, { headers: { cookie: h.cookie } });
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; assert.ok(csrf);
+    const endpoint = `${detailUrl}/todo`;
+    const form = (entries: Record<string, string>) => new URLSearchParams({ csrf, ...entries });
+    const headers = { cookie: h.cookie, origin: "http://127.0.0.1", "content-type": "application/x-www-form-urlencoded" };
+    const added = await fetch(endpoint, { method: "POST", headers, body: form({ expected_version: "0", op: "add", text: "from form" }), redirect: "manual" });
+    assert.equal(added.status, 303);
+    assert.equal((await h.service.todoGet("owner@example.test", h.sessionId)).version, 1);
+    const conflict = await fetch(endpoint, { method: "POST", headers, body: form({ expected_version: "0", op: "add", text: "stale form" }), redirect: "manual" });
+    assert.equal(conflict.status, 303);
+    assert.match(conflict.headers.get("location") ?? "", /todo=conflict/);
+    const denied = await fetch(endpoint, { method: "POST", headers, body: new URLSearchParams({ expected_version: "1", op: "add", text: "no csrf" }), redirect: "manual" });
+    assert.equal(denied.status, 403);
+    const toggle = await fetch(`${endpoint}/enforcement`, { method: "POST", headers, body: form({ enabled: "false" }), redirect: "manual" });
+    assert.equal(toggle.status, 303);
+    assert.equal(h.service.sessions.get(h.sessionId)?.todo.enabled, false);
+    const notOwned = await fetch(`${h.baseUrl}/user/sessions/not-owned-session-00001/todo`, { method: "POST", headers, body: form({ expected_version: "0", op: "add", text: "x" }), redirect: "manual" });
+    assert.equal(notOwned.status, 404);
   } finally { await h.close(); }
 });
