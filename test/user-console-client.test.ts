@@ -102,16 +102,19 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
   const scrollY = 0; let scrollCalls = 0;
   const windowListeners = new Map<string, () => void>();
   const intervals = new Map<number, { callback: () => void; delay: number }>(); let nextInterval = 0;
+  const timeouts = new Map<number, { callback: () => void; delay: number }>(); let nextTimeout = 0;
   const windowStub = {
     scrollY, scrollX: 0, innerHeight: 600,
     addEventListener: (name: string, listener: () => void) => { windowListeners.set(name, listener); },
     setInterval: (callback: () => void, delay: number) => { const id = ++nextInterval; intervals.set(id, { callback, delay }); return id; },
     clearInterval: (id: number) => { intervals.delete(id); },
+    setTimeout: (callback: () => void, delay: number) => { const id = ++nextTimeout; timeouts.set(id, { callback, delay }); return id; },
+    clearTimeout: (id: number) => { timeouts.delete(id); },
     scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }),
   };
   const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), get activeElement() { return FakeElement.activeElement; }, documentElement: { scrollHeight: 1200 } };
   runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: TestDate });
-  return { root, status, newest, older, windowStub, windowListeners, intervals, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
+  return { root, status, newest, older, windowStub, windowListeners, intervals, timeouts, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, tickTimeout: (delay: number) => { const match = [...timeouts.entries()].find(([, timer]) => timer.delay === delay); if (!match) throw new Error("no timeout scheduled for " + delay); timeouts.delete(match[0]); match[1].callback(); }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {
@@ -401,7 +404,7 @@ test("session timestamp cells expose relative and exact values as native disclos
   assert.equal(ui.sources.length, 2, "the applied log refresh restarts the event stream once");
 });
 
-test("future session times start seconds updates and release both timers across page lifecycle", async () => {
+test("future session times schedule their seconds boundary and release updates across page lifecycle", async () => {
   const sessionRows = new FakeElement("tbody");
   const calls: URL[] = [];
   const now = Date.parse("2026-10-02T02:00:00.000Z");
@@ -409,30 +412,37 @@ test("future session times start seconds updates and release both timers across 
     const request = new URL(url, "http://local.test"); calls.push(request);
     if (request.pathname === "/api/console-state") return response(200, {
       stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-02T00:00:00Z",
-      sessions: [{ session_id: "future-session", created_at: "2026-10-02T02:01:01Z", last_used_at: "2026-10-02T02:01:01Z", state: "active", active: true }],
+      sessions: [{ session_id: "future-session", created_at: "2026-10-02T02:01:01Z", last_used_at: "2026-10-02T03:00:00Z", state: "active", active: true }],
     });
     return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
   }, [], { "session-rows": sessionRows }, "", now);
   await settle();
-  const relative = sessionRows.children[0]?.children[1]?.children[0]?.children[0]?.children[0];
-  assert.equal(relative?.textContent, "1\u5206\u5f8c");
+  const createdRelative = sessionRows.children[0]?.children[1]?.children[0]?.children[0]?.children[0];
+  const lastAccessRelative = sessionRows.children[0]?.children[2]?.children[0]?.children[0]?.children[0];
+  assert.equal(createdRelative?.textContent, "1\u5206\u5f8c");
+  assert.equal(lastAccessRelative?.textContent, "1\u6642\u9593\u5f8c");
   assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay), [60_000]);
-
-  ui.setNow(now + 2_000);
-  ui.tickInterval(60_000);
-  assert.equal(relative?.textContent, "59\u79d2\u5f8c");
-  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000]);
+  assert.deepEqual([...ui.timeouts.values()].map((timeout) => timeout.delay), [1_001]);
 
   const requestCount = calls.length;
+  ui.setNow(now + 1_001);
+  ui.tickTimeout(1_001);
+  assert.equal(createdRelative?.textContent, "59\u79d2\u5f8c");
+  assert.equal(lastAccessRelative?.textContent, "59\u5206\u5f8c");
+  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000]);
+  assert.equal(ui.timeouts.size, 1, "the next future timestamp keeps one later boundary wakeup");
+
   ui.windowListeners.get("pagehide")?.();
-  assert.equal(ui.intervals.size, 0, "page departure releases the active seconds and minute timers");
+  assert.equal(ui.intervals.size, 0, "page departure releases the active seconds and minute intervals");
+  assert.equal(ui.timeouts.size, 0, "page departure releases the future boundary wakeup");
   ui.windowListeners.get("pageshow")?.();
   ui.windowListeners.get("pageshow")?.();
-  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000], "repeated restoration creates one timer at each cadence");
+  assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000], "repeated restoration creates one interval at each cadence");
+  assert.equal(ui.timeouts.size, 1, "repeated restoration creates only one future boundary wakeup");
   ui.setNow(now + 3_000);
   ui.tickInterval(1_000);
-  assert.equal(relative?.textContent, "58\u79d2\u5f8c");
-  assert.equal(calls.length, requestCount, "relative-time timers do not issue requests");
+  assert.equal(createdRelative?.textContent, "58\u79d2\u5f8c");
+  assert.equal(calls.length, requestCount, "relative-time updates do not issue requests");
 });
 
 test("pages without a session list do not create relative-time intervals", async () => {

@@ -489,7 +489,7 @@ function clientBootstrap(): void {
           addCell(row, session.working_directory ?? "—");
         }
         if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
-        syncSessionSecondUpdates();
+        syncSessionTimeUpdates();
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
       if (runningRows && state.running) {
@@ -587,6 +587,7 @@ function clientBootstrap(): void {
   const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
   let relativeUpdateInterval: number | undefined;
   let secondsUpdateInterval: number | undefined;
+  let futureBoundaryTimeout: number | undefined;
   const isSecondDisplay = (value: string | null) => /^\d+秒(?:前|後)$/.test(value ?? "");
   const sessionRelativeElements = () => sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? [];
   const updateSessionRelativeTimes = () => {
@@ -595,6 +596,7 @@ function clientBootstrap(): void {
       if (relative.textContent !== next) relative.textContent = next;
     }
     syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
   };
   const updateSessionSecondTimes = () => {
     let hasSecondDisplay = false;
@@ -618,11 +620,38 @@ function clientBootstrap(): void {
       secondsUpdateInterval = undefined;
     }
   };
+  const syncSessionFutureBoundary = () => {
+    if (futureBoundaryTimeout !== undefined) {
+      window.clearTimeout(futureBoundaryTimeout);
+      futureBoundaryTimeout = undefined;
+    }
+    const now = Date.now();
+    let nearestDelay: number | undefined;
+    for (const relative of sessionRelativeElements()) {
+      const timestamp = Date.parse(relative.dateTime);
+      const remaining = timestamp - now;
+      if (!Number.isFinite(timestamp) || remaining < 60_000) continue;
+      const delay = Math.min(remaining - 59_999, 2_147_483_647);
+      if (nearestDelay === undefined || delay < nearestDelay) nearestDelay = delay;
+    }
+    if (nearestDelay !== undefined) {
+      futureBoundaryTimeout = window.setTimeout(() => {
+        futureBoundaryTimeout = undefined;
+        updateSessionRelativeTimes();
+      }, nearestDelay);
+    }
+  };
+  const syncSessionTimeUpdates = () => {
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
   const stopSessionRelativeUpdates = () => {
     if (relativeUpdateInterval !== undefined) window.clearInterval(relativeUpdateInterval);
     if (secondsUpdateInterval !== undefined) window.clearInterval(secondsUpdateInterval);
+    if (futureBoundaryTimeout !== undefined) window.clearTimeout(futureBoundaryTimeout);
     relativeUpdateInterval = undefined;
     secondsUpdateInterval = undefined;
+    futureBoundaryTimeout = undefined;
   };
   const startSessionRelativeUpdates = () => {
     if (!sessionRows || relativeUpdateInterval !== undefined) return;
