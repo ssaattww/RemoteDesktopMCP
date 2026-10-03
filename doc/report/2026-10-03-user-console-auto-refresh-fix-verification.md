@@ -60,3 +60,13 @@
 - 新たなblocking issueは見つからなかった。対象findingの指定された境界選択、一覧内選択、最新状態の追いつき、離脱・認証終了時の破棄を確認した。
 - 通常レビューで記録された `RDMCP-PR51-HOLD-001`（PR #50との統合条件）はこのfinding限定の確認範囲外であり、別途追跡する。
 - CIの対象HEAD一致run、reviewer role/前回担当との独立性、実適用profileは未確認。ロール観測不能の制約を除き、テスト実行可能なローカル環境で対象findingの検証は完了。
+
+## 2026-10-03 マージ後再確認追補
+
+- 再確認対象: merge HEAD `b098af2c688ad8f98d85dde0402bc710e7430bfb`。第1親はPR #51側 `b0f04f09e1f7508b4891a772e96fa15884aafb24`、第2親は `origin/main` / PR #50 merge `c0c786a3d696724d780291aed9c8b89cbe2d531e`。対象ブランチは `issue46-user-console-auto-refresh-design` で、確認時のHEADは指定値と一致した。開始時の作業ツリーはclean。
+- 確認コマンド: `git show -s --format='%H%n%P%n%s' b098af2` および `git diff b0f04f0..b098af2 -- src/user-console-client.ts test/user-console-client.test.ts doc/design/user-console-auto-refresh.md`。マージ差分で追加された日時フォーマッタ、details描画、開閉状態保存、同一セッション/日時種別による対応付け、summaryへの `focus({ preventScroll: true })` 復元を確認した。
+- 確認コマンド: `node --import tsx --test test/user-console-client.test.ts` — exit 0、36 tests / 36 pass / 0 fail。マージ後の試験 `session timestamp disclosure, relative value, open state, and focus survive automatic state refresh` は相対表示、正確なJST表示、開閉維持、同じsummaryへのフォーカス復元、時刻経過後の相対表示更新を確認する。境界選択試験は両端が一覧外でも live Range が一覧と交差する場合に置換を延期し、後続の最新状態を選択解除後に反映する。別試験で一覧内選択維持、`pagehide` / `auth-expired` 後の延期状態破棄も確認した。
+- 統合経路の確認: `refreshStateFrom()` は日時detailsの状態取得・行置換より前に選択範囲を判定する。範囲交差中はその状態応答全体を保留するため、日時detailsも置換されない。選択解除時の再描画では同じセッションIDと日時種別の開閉状態を保存し、同じdetailsのsummaryにフォーカスを戻す。日時要素の相対表示タイマーも再描画後に同期する。PR #50 と PR #51 の振る舞いが同じ再描画で衝突する問題は見つからなかった。
+- 判定: **pass（マージ後再確認）**。`RDMCP-PR51-REV-001` は指定範囲とPR #50連携を含め解消状態を維持。新たなblocking findingなし。
+- 限界: 境界選択延期と日時details復元はそれぞれ実行試験で確認したが、両条件を同一fixture内で同時に組み合わせた試験はない。相互作用はマージ後の実装経路を読んで確認した。現HEADに一致するCI run、reviewer role/前回担当との独立性、および実適用profileは観測できず未確認。role選択・照会欄の不在は作業を止める条件にせず記録した。
+- 実行profile: user requested `gpt-6-luna` / `medium` / fork `none`。この実行環境では最終適用profileの信頼できる証跡を観測できないため、適用状態は未検証。
