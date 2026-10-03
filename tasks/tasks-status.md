@@ -38,7 +38,7 @@
 | F03 | P4 | 単一 PC の Tailscale Funnel と ChatGPT 公開接続検証 | F01,F01a,F01b,F01c | M | 実際の公開経路から認証と操作、再起動後の接続を確認 | 公開起動済み。HTTPSの認証案内と未認証401確認、ChatGPT実操作を利用者へ依頼中 |
 | F04 | P4 | 公開接続の通常・独立レビュー | F01a,F01b,F01c | M | Sol / high で公開用変更を確認し、F03 の実運用結果と未検証事項を区別 | 通常10件解消後、3ffd783の独立レビューで追加3件。F01dで対応し同じ独立担当へ限定確認 |
 | T09 | P4 | Issue #55: 長時間実行プロセスの目的・コマンド表示 | T08 | M | 設計レビュー、Red/Green、所有者・認可・マスク回帰、Windows実画面確認手順と証拠、Draft PR | 設計レビューpass。通常reviewのNR55-1/2はfix-verification pass_with_held。最新全体試験120件中109成功・skip 11・失敗0、lint/build成功。FA780実画面・画像証拠とDraft更新・push待ち |
-| I45 | P6 | Issue 45 / PR #52 のセッション外部URLとタイトル機能 | 既存セッション・コンソール基盤。PR #54 / Issue 48 の後編集機能が依存 | M | 任意URL/タイトル、自動取得、タイトル単独表示、後編集API共有契約、SSRF/認可/ログ秘匿、TDD、通常・独立レビュー、最終PR CIを確認 | 最新 main `bfe3793` の auto-refresh/selection-preservation を保持しながら通常merge中。旧最終確認を撤回。統合後検証・同じ独立 reviewer closure・exact-head CIをやり直す |
+| I45 | P6 | Issue 45 / PR #52 のセッション外部URLとタイトル機能 | 既存セッション・コンソール基盤。PR #54 / Issue 48 の後編集機能が依存 | M | 任意URL/タイトル、自動取得、タイトル単独表示、後編集API共有契約、SSRF/認可/ログ秘匿、TDD、通常・独立レビュー、最終PR CIを確認 | 最新 main `bfe3793` を通常merge済み（`650469a`）。focused 59/59、全体157/146/0/11、check/lint/build、headless Chromium を確認。旧最終確認を撤回し、新HEADの通常review、同じ独立reviewer closure、exact-head CIを再実施 |
 | T10 | P5 | P1 Issue #46: User Console 自動更新と選択保持 | なし | M | 一覧と交差するlive Rangeの間は破壊的更新を保留し、解除後に最新状態を反映。`pagehide` / 認証失効で保留破棄。PR #50日時表示とPR #60の長時間process context/active-firstを併存。通常・独立レビューと統合後CIを完了 | 当初実装・通常fix verification・独立レビュー・FA780実画面9ケースと旧HEAD CIは成功。PR #60取り込みでpackage.json、client、test、trackingの競合を検出し、両featureを維持して通常統合中。旧attestationの有効性は撤回。PR #51 squash-merged into main at `bfe3793`。最新main統合後の通常レビュー、同じ独立reviewerの差分確認、exact-head CI待ち |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
