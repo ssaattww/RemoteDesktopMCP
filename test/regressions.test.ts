@@ -637,9 +637,8 @@ test("DR002: no-replace commit preserves a winner and removes the losing temp", 
 });
 
 test("DR002: upload begin fails safely when the destination lacks atomic no-replace support", async () => {
-  const f = await fixture(); let unsupported: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  const f = await fixture({ initializeService: false }); let unsupported: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
   try {
-    await f.service.close();
     const cfg = { ...f.service.cfg, linkNoReplace: async () => { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); } };
     unsupported = new RemoteDesktopService(cfg); await unsupported.initialize(); api = await mcp(unsupported);
     const session = await openSession(api);
@@ -822,9 +821,8 @@ test("DR003: protected identity manifests accept safe legacy values and fail clo
 });
 
 test("NR009: canonical allowed roots work through a symlink or Windows junction", async (t) => {
-  const f = await fixture(); let service: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  const f = await fixture({ initializeService: false }); let service: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
   try {
-    await f.service.close();
     const aliasedRoot = path.join(f.base, "allowed-root-link");
     try { await symlink(f.root, aliasedRoot, process.platform === "win32" ? "junction" : "dir"); }
     catch (error) {

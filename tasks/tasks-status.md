@@ -38,6 +38,13 @@
 | F03 | P4 | 単一 PC の Tailscale Funnel と ChatGPT 公開接続検証 | F01,F01a,F01b,F01c | M | 実際の公開経路から認証と操作、再起動後の接続を確認 | 公開起動済み。HTTPSの認証案内と未認証401確認、ChatGPT実操作を利用者へ依頼中 |
 | F04 | P4 | 公開接続の通常・独立レビュー | F01a,F01b,F01c | M | Sol / high で公開用変更を確認し、F03 の実運用結果と未検証事項を区別 | 通常10件解消後、3ffd783の独立レビューで追加3件。F01dで対応し同じ独立担当へ限定確認 |
 
+## Issue #24 の継続作業
+
+| ID | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
+| --- | --- | --- | --- | --- | --- | --- |
+| R24-01 | P5 | PR #42 測定gate修正と実測証跡 | なし | M | 同じPR/head/attemptの成功測定stepと有効artifactだけを既測定扱いし、通常reviewと実測結果をIssue #24へ記録 | 済み。通常review `pass_with_held`、run `37131069186` 成功、16ファイル各3回の中央値をIssue #24へ記録。fixture追加不足はheld |
+| R24-02 | P5 | 計測に基づく不要なfixture初期化の削減 | R24-01 | S | DR002/NR009の既存assertion・実Commander・ACL・隔離tempを保ったまま重複初期化を省き、対象試験・必要検証・通常reviewが成功。測定変更後は新しいfile集合fingerprintで再計測する | 2ケースの重複fixture初期化を除去。変更前・変更後のfixture-runtime/regressions全32件はLinuxで各pass、fail/skip 0。通常review `pass_with_held`（必須指摘なし）。exact-head PR #62 CI `37138712212` はUbuntuとWindows 3 shard全success。計測 `37138740545` は48/48 success、artifact `11280895030` と新fingerprintを取得しIssue #24へ比較追記済み。ただし測定と必須CIが一部並行したため性能効果の比較は参考値で、因果効果は未確定。local full gate・CI・計測を含む報告は `reports/2026-10-03-issue24-fixture-init-pr-ci-measurement.md`。独立最終レビュー待ち。manifestは未適用 |
+
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。
 設計作業の既存レポート: `reports/2026-09-25-design-followup.md`。
