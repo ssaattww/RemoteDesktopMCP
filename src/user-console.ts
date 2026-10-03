@@ -37,6 +37,7 @@ export async function isUserConsoleLoginAllowed(service: RemoteDesktopService, l
 export type UserConsolePairing = {
   submit(login: Login, code: string): { ok: true; confirmationId: string } | { ok: false; reason: string };
   revoke(login: Login): void;
+  setLoginRecordCheck?(check: (login: Login) => boolean): void;
 };
 
 export async function readUserCuiSnapshot(service: RemoteDesktopService, principal: string) {
@@ -64,6 +65,7 @@ type Budget = { attempts: number; reset: number };
 
 export function mountUserConsole(app: Express, service: RemoteDesktopService, options: { pairing?: UserConsolePairing } = {}) {
   const logins = new Map<string, Login>();
+  options.pairing?.setLoginRecordCheck?.((login) => [...logins.values()].some((record) => record === login));
   const pending = new Map<string, Pending>();
   const loginBudgets = new Map<string, Budget>();
   const passwordBudgets = new Map<string, Budget>();

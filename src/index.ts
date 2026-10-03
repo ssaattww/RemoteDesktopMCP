@@ -1317,6 +1317,7 @@ export async function startCuiFromEnvironment(): Promise<void> {
     write: (text) => process.stdout.write(`${text}\n`),
     clear: () => process.stdout.write("\u001b[2J\u001b[H"),
     jsonl,
+    onDisplayStop: () => process.stderr.write("The paired view stopped. The server remains active; press q to exit. Restart CUI for a new pairing.\n"),
     onEnd: () => readerRef.current?.close(),
   });
   const app = createApp(service, { pairing: cui });
@@ -1333,7 +1334,7 @@ export async function startCuiFromEnvironment(): Promise<void> {
         const input = line.trim();
         if (input === "q") { cui.stop(); reader.close(); return; }
         const match = /^approve ([A-F0-9]{10})$/.exec(input);
-        if (match) { void cui.approve(match[1]!).then((approved) => process.stderr.write(approved ? `Confirmed ${match[1]}. Read-only view started.\n` : "No matching live confirmation. This CUI process has ended.\n")); return; }
+        if (match) { void cui.approve(match[1]!).then((approved) => process.stderr.write(approved ? `Confirmed ${match[1]}. Read-only view started.\n` : "No live matching confirmation. The server remains active; press q to exit. Restart CUI for a new pairing.\n")); return; }
         process.stderr.write("Enter approve <ID> from the browser confirmation page, or q to quit.\n");
       });
       reader.once("close", resolve);

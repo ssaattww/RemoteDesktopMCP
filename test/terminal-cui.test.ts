@@ -27,6 +27,80 @@ test("pairing requires browser code and a matching local confirmation before rea
   ctl.stop();
 });
 
+test("duplicate approval cannot stop the display bound by the first approval", async () => {
+  let releaseFirstCheck!: (allowed: boolean) => void;
+  let firstCheck = true;
+  let ended = 0;
+  const output: string[] = [];
+  const ctl = new TerminalCui({
+    read: async () => snapshot,
+    active: () => {
+      if (firstCheck) {
+        firstCheck = false;
+        return new Promise<boolean>((resolve) => { releaseFirstCheck = resolve; });
+      }
+      return true;
+    },
+    write: (s) => output.push(s), clear() {}, every: () => 1, cancel() {},
+    onEnd: () => { ended++; },
+  });
+  const code = ctl.takePairingCode();
+  const candidate = ctl.submit(login, code);
+  assert.ok(candidate.ok);
+  const first = ctl.approve(candidate.confirmationId);
+  assert.equal(await ctl.approve(candidate.confirmationId), false, "duplicate request is ignored while approval is in flight");
+  releaseFirstCheck(true);
+  assert.equal(await first, true);
+  await settle();
+  assert.equal(ctl.isBound, true);
+  assert.equal(await ctl.approve(candidate.confirmationId), false, "consumed confirmation cannot be replayed");
+  assert.equal(ctl.isBound, true, "a stale duplicate response cannot end the active display");
+  assert.equal(ended, 0);
+  assert.equal(output.length, 1);
+  ctl.stop();
+  assert.equal(ended, 1, "only explicit process stop closes the reader");
+});
+
+test("login revocation stops only the view and does not end the CUI server", async () => {
+  let ended = 0;
+  let displayStopped = 0;
+  const output: string[] = [];
+  const ctl = new TerminalCui({
+    read: async () => snapshot, active: () => true,
+    write: (s) => output.push(s), clear() {}, jsonl: true,
+    every: () => 1, cancel() {},
+    onEnd: () => { ended++; },
+    onDisplayStop: () => { displayStopped++; },
+  });
+  const code = ctl.takePairingCode();
+  const candidate = ctl.submit(login, code);
+  assert.ok(candidate.ok);
+  assert.equal(await ctl.approve(candidate.confirmationId), true);
+  await settle();
+  assert.equal(output.length, 1);
+  ctl.revoke(login);
+  assert.equal(ctl.isBound, false);
+  assert.equal(ended, 0, "revocation leaves the reader and HTTP/MCP server alive");
+  assert.equal(displayStopped, 1);
+  assert.deepEqual(ctl.submit(login, code), { ok: false, reason: "busy" }, "used pairing code cannot be reused after logout");
+  ctl.stop();
+  assert.equal(ended, 1, "explicit q/stop is the only process shutdown path");
+});
+
+test("CUI checks that the exact login record remains in the user console registry", async () => {
+  let current = true;
+  let stopped = 0;
+  const ctl = new TerminalCui({ read: async () => snapshot, active: () => true, write() {}, clear() {}, jsonl: true, every: () => 1, cancel() {}, onDisplayStop: () => { stopped++; } });
+  ctl.setLoginRecordCheck((record) => record === login && current);
+  const candidate = ctl.submit(login, ctl.takePairingCode());
+  assert.ok(candidate.ok);
+  assert.equal(await ctl.approve(candidate.confirmationId), true);
+  current = false;
+  await settle();
+  assert.equal(ctl.isBound, false);
+  assert.equal(stopped, 1);
+});
+
 test("pairing challenge expires after five minutes and exhausts after five failures", () => {
   let now = 0;
   const make = () => new TerminalCui({ read: async () => snapshot, active: () => true, write() {}, clear() {}, now: () => now, random: (n) => Buffer.alloc(n, 8) });
