@@ -1574,6 +1574,7 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   assert.equal(updatedRow.children[7]?.children[0]?.rel, "noopener noreferrer");
   assert.equal(updatedRow.children[7]?.children[0]?.referrerPolicy, "no-referrer");
   assert.equal(updatedRow.children[7]?.children[1]?.textContent, "自動取得");
+  assert.equal(updatedRow.children[7]?.className, "session-external-link-cell", "auto-refreshed rows retain the narrow-screen wrapping class");
   assert.equal(sessionRows.children[1]?.children[7]?.children[0]?.className, "session-external-title");
   assert.equal(sessionRows.children[1]?.children[7]?.children[0]?.textContent, "Title without URL");
   assert.equal(updatedRow.querySelector("form[data-session-edit]"), sessionForm, "the same editor form is moved into the reconciled row");

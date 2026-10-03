@@ -8,6 +8,36 @@ import { fixture, mcp } from "./fixture.js";
 const body = (title: string) => new TextEncoder().encode(`<html><title>${title}</title></html>`);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+test("Issue 48 session editors retain wrapping external titles on narrow screens", async () => {
+  const f = await fixture();
+  f.service.cfg.sessionLinkTransport = { resolve: async () => ["93.184.216.34"], request: async () => { throw new Error("manual titles do not fetch"); } };
+  const api = await mcp(f.service);
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const longTitle = "A long session link title ".repeat(7).trim();
+    await api.call("session_open", { url: "https://example.com/long-title", title: longTitle });
+    const login = await fetch(`${base}/user/login`, {
+      method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual",
+    });
+    assert.equal(login.status, 303);
+    const token = /rdmcp_user=([^;,]+)/u.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
+    const page = await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } });
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.match(html, /<th>編集<\/th>/u, "the Issue 48 editor remains in the session row");
+    assert.match(html, /<td class="session-external-link-cell" data-session-external-link><a class="session-external-link"[^>]*>A long session link title/u);
+    assert.match(html, /@media\(max-width:600px\)\{[^<]*th,td\{padding:7px;white-space:nowrap\}[^<]*\.session-list td\.session-external-link-cell\{white-space:normal;overflow-wrap:anywhere;min-width:8em\}/u, "the narrow-screen link cell overrides the table-wide nowrap rule");
+  } finally {
+    await api.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await f.cleanup();
+  }
+});
+
 async function readLinkEvent(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
   let text = "";
   const deadline = Date.now() + 3_000;

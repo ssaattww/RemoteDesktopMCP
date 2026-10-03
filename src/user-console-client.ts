@@ -950,7 +950,7 @@ function clientBootstrap(): void {
           const purposeCell = addCell(row, session.purpose ?? "—"); purposeCell.dataset.sessionPurpose = "true";
           addCell(row, session.session_id);
           const directoryCell = addCell(row, session.working_directory ?? "—"); directoryCell.dataset.sessionDirectory = "true";
-          const externalLinkCell = addCell(row, "—"); externalLinkCell.dataset.sessionExternalLink = "true"; renderExternalLink(externalLinkCell, session);
+          const externalLinkCell = addCell(row, "—"); externalLinkCell.className = "session-external-link-cell"; externalLinkCell.dataset.sessionExternalLink = "true"; renderExternalLink(externalLinkCell, session);
           if (session.active && !state.stopped) {
             const existingEditor = editorCells.get(session.session_id);
             if (existingEditor) { row.append(existingEditor); restoredEditorIds.add(session.session_id); }
