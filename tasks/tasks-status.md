@@ -5,7 +5,7 @@
 ## 現在の対象
 
 現在の優先作業は Issue #24 の P5。P4 公開接続の記録は維持し、複数実行PCと ChatGPT の実操作はこのPRの対象外。
-R24-03では既存29 regression casesを意味単位の test files へ移す。ケース本体、assertion、実Commander/ACL経路、ケース別fixture隔離、cleanupを維持し、CIでの所要時間が改善したと判断できる比較可能な証拠を取る。
+R24-03で29ケースの意味単位分割とWindows実測を完了したが、3分目標は未達。PR #63はdraft/openでbaseから独立しmergeableだが、Issue #24全体は未完了とする。R24-04では実測とshard診断で次の律速となった`independent-fixes.test.ts`を意味単位へ分割する。PR #62のfixture-init改善は別branchのまま保持し、R24-03/R24-04の比較へ混ぜない。
 
 | ID | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -42,7 +42,8 @@ R24-03では既存29 regression casesを意味単位の test files へ移す。�
 | --- | --- | --- | --- | --- | --- | --- |
 | R24-01 | P5 | PR #42 測定gate修正と実測証跡 | なし | M | 同じPR/head/attemptの成功測定stepと有効artifactだけを既測定扱いし、通常reviewと実測結果をIssue #24へ記録 | 完了。通常review `pass_with_held`、run `37131069186` 成功、16ファイル各3回の中央値をIssue #24へ記録 |
 | R24-02 | P5 | 計測に基づく不要なfixture初期化の削減 | R24-01 | S | DR002/NR009の既存assertion・実Commander・ACL・隔離tempを保ったまま重複初期化を省き、試験・review・ローカル/リモート検証を完了。性能効果が比較可能な条件で未確認なら未確認と報告する | 実装・通常review `pass_with_held`・独立最終review `pass_with_held` 完了。PR #62 exact-head CI `37143566328` はUbuntuとWindows 3 shard成功。測定 `37138740545` は48/48 successだが必須CIと一部並行したため因果効果は未確認。manifest未適用。詳細は `reports/2026-10-03-issue24-fixture-init-independent-final-review.md` と `reports/2026-10-03-issue24-fixture-init-pr-ci-measurement.md`。PR #62はdraft/open、未merge |
-| R24-03 | P5 | `regressions.test.ts` 29ケースを意味単位へ分割し、実行時間への影響を測る | R24-02 | M | 設計レビュー後にTDDで分割。29ケースがcase名とcallback本体を保って各1回だけ存在し、assertion・実Commander/ACL・ケース隔離/cleanupを維持。分割前後のケース対応・focused/all-suiteテスト・ファイル/CI所要時間を比較可能な条件で検証し、通常reviewと両OS exact-head CIを通し、別branchのdraft PRでIssue #24へ記録 | TDD分割・通常review `pass_with_held`・ローカル検証完了。設計closure review pass。候補`8f2b8c3`で29/29 callback本文一致、`npm test` 134件 (123 pass/11 skip/0 fail)、focused移動先30件成功、`npm run check`/`npm run lint`成功。Windows exact-head CI、設計手順に基づく3回測定、draft PR公開は未完了。報告: `reports/issue-24-r24-03-design-review-20261003200701.md`, `reports/issue-24-r24-03-normal-review-20261003223000.md` |
+| R24-03 | P5 | `regressions.test.ts` 29ケースを意味単位へ分割し、実行時間への影響を測る | R24-02 | M | 設計レビュー後にTDDで分割。29ケースがcase名とcallback本体を保って各1回だけ存在し、assertion・実Commander/ACL・ケース隔離/cleanupを維持。分割前後のケース対応・focused/all-suiteテスト・ファイル/CI所要時間を比較可能な条件で検証し、通常reviewと両OS exact-head CIを通し、別branchのdraft PRでIssue #24へ記録 | 作業完了（3分未達の結果を記録）。候補`aec94a9`、29/29 callback本文一致、`npm test` 134件（123 pass/11 skip/0 fail）、focused移動先30件成功、check/lint成功。通常review `pass_with_held`。PR #63 exact-head run `37151708780` attempts 1/2/3 success、workflow全体中央値364秒、最大Windows Test step中央値272秒。測定run `37155306957` は22ファイル×3回66/66成功。Issue #24にrun/job/step秒と個別測定、runner差による因果推定の制限を記録。PR #63はdraft/open・mergeableでbaseから単独統合可能。独立最終review/統合は未実施・未merge |
+| R24-04 | P5 | `independent-fixes.test.ts` 8ケースを意味群へ分割し、次のCI律速を短くする | R24-03 | M | 設計レビュー後、TDDでIFR-002履歴2件、IFR-003/006転送2件、IFR-001/004/005プロセス4件を3ファイルへ移す。全8 case名/callback本文/fixture/cleanupを各1回保つ。focused/all-suite/check/lint、両OS exact-head CIを通し、Windows CI 3回中央値と候補全test file×3成功測定を取り、Issueへ記録する。比較中に別runを重ねず、PR #63本体へ混在させない | 設計案作成中。基準はPR #63候補CI 3回（workflow中央値364秒、最大Windows Test step中央値272秒）、`independent-fixes.test.ts`単独中央値219.570秒。ケース別診断はCI attempt 3ログ。 |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。
