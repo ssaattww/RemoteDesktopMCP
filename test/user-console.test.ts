@@ -340,3 +340,134 @@ test("Google user login binds callback cookie at the callback path and rechecks 
     assert.equal(revoked.headers.get("location"), "/user/login");
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+test("Issue 48: session metadata edits require owner and CSRF, compare versions, and reject unsupported states and fields", async () => {
+  const f = await fixture();
+  const owner = await mcp(f.service);
+  const other = await mcp(f.service, "other@example.test");
+  f.service.cfg.processAdapter = { start: async () => "PID 81", read: async () => "", terminate: async () => "", sessions: async () => "" };
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const owned = await owner.call("session_open", { working_directory: f.root, purpose: "Initial purpose" });
+    const foreign = await other.call("session_open", { working_directory: f.data, purpose: "Private purpose" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const cookieValue = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(cookieValue);
+    const cookie = `rdmcp_user=${cookieValue}`;
+    const page = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    assert.match(page, new RegExp(`data-session-edit="${String(owned.session_id)}"`), "active owned sessions expose an edit control");
+    const update = (sessionId: string, body: Record<string, unknown>, csrfToken = csrf, origin = f.service.cfg.baseUrl, withCookie = true) => fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH", headers: { ...(withCookie ? { cookie } : {}), origin, "content-type": "application/json", "x-csrf-token": csrfToken }, body: JSON.stringify(body),
+    });
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, purpose: "No login" }, "", f.service.cfg.baseUrl, false)).status, 401);
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, purpose: "No token" }, "")).status, 403);
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, purpose: "Wrong origin" }, csrf, "https://attacker.example")).status, 403);
+    const externalUrlRejected = await update(String(owned.session_id), { expectedVersion: 1, externalUrl: "https://example.test" });
+    assert.equal(externalUrlRejected.status, 400, "link fields remain unsupported in this implementation slice");
+    assert.equal((await externalUrlRejected.json() as { error: string }).error, "unsupported_field");
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, externalTitle: "Not supported yet" })).status, 400, "link fields remain unsupported in this implementation slice");
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, unexpected: true })).status, 400, "unknown fields are rejected");
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, workingDirectory: f.base, purpose: "Updated purpose" })).status, 200);
+    const state = await (await fetch(`${base}/api/console-state`, { headers: { cookie } })).json() as { sessions: Array<{ session_id: string; working_directory: string; purpose: string; version: number }> };
+    const current = state.sessions.find((session) => session.session_id === owned.session_id);
+    assert.ok(current);
+    assert.equal(current.session_id, owned.session_id);
+    assert.equal(current.working_directory, f.base);
+    assert.equal(current.purpose, "Updated purpose");
+    assert.equal(current.version, 2);
+    await writeFile(`${f.base}/not-a-directory`, "file");
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 2, workingDirectory: `${f.base}/not-a-directory` })).status, 400);
+    const audit = f.service.auditEntriesForConsole().find((event) => event.event === "session.metadata.updated");
+    assert.ok(audit);
+    assert.deepEqual(audit.changedFields, ["workingDirectory", "purpose"]);
+    assert.equal(audit.previousVersion, 1);
+    assert.equal(audit.version, 2);
+    assert.equal(JSON.stringify(audit).includes(f.base), false, "updated values are not copied into the audit event");
+    const auditCount = f.service.auditEntriesForConsole().filter((event) => event.event === "session.metadata.updated").length;
+    const noOp = await update(String(owned.session_id), { expectedVersion: 2, workingDirectory: f.base, purpose: "Updated purpose" });
+    assert.equal(noOp.status, 200);
+    assert.equal((await noOp.json() as { version: number }).version, 2);
+    assert.equal(f.service.auditEntriesForConsole().filter((event) => event.event === "session.metadata.updated").length, auditCount);
+    const concurrent = await Promise.all([
+      update(String(owned.session_id), { expectedVersion: 2, purpose: "Concurrent edit A" }),
+      update(String(owned.session_id), { expectedVersion: 2, purpose: "Concurrent edit B" }),
+    ]);
+    assert.deepEqual(concurrent.map((response) => response.status).sort(), [200, 409]);
+    const concurrentState = await (await fetch(`${base}/api/console-state`, { headers: { cookie } })).json() as typeof state;
+    const concurrentPurpose = concurrentState.sessions.find((session) => session.session_id === owned.session_id)?.purpose;
+    assert.ok(["Concurrent edit A", "Concurrent edit B"].includes(String(concurrentPurpose)));
+    assert.equal(concurrentState.sessions.find((session) => session.session_id === owned.session_id)?.version, 3);
+    const conflict = await update(String(owned.session_id), { expectedVersion: 2, purpose: "Stale overwrite" });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json() as { error: string }).error, "version_conflict");
+    assert.equal((await (await fetch(`${base}/api/console-state`, { headers: { cookie } })).json() as typeof state).sessions.find((session) => session.session_id === owned.session_id)?.purpose, concurrentPurpose);
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 3, workingDirectory: `${f.base}-missing` })).status, 400);
+    assert.equal((await update(String(foreign.session_id), { expectedVersion: 1, purpose: "Attempt" })).status, 404);
+    assert.equal((await update("missing-session-id-00000000", { expectedVersion: 1, purpose: "Attempt" })).status, 404);
+    const closed = await owner.call("session_open", { working_directory: f.root, purpose: "Closed session" });
+    await owner.call("session_close", { session_id: closed.session_id });
+    assert.equal((await update(String(closed.session_id), { expectedVersion: 1, purpose: "Attempt" })).status, 404);
+    const expired = await owner.call("session_open", { working_directory: f.root, purpose: "Expired session" });
+    f.service.sessions.get(String(expired.session_id))!.expires = Date.now() - 1;
+    assert.equal((await update(String(expired.session_id), { expectedVersion: 1, purpose: "Attempt" })).status, 404);
+    const stopped = await owner.call("session_open", { working_directory: f.root, purpose: "Stopped session" });
+    await f.service.stopUserExecution("owner@example.test");
+    assert.equal((await update(String(stopped.session_id), { expectedVersion: 1, purpose: "Attempt" })).status, 404);
+  } finally { await owner.close(); await other.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("session edit and process start use one ordering boundary and preserve each start snapshot", async () => {
+  const f = await fixture();
+  const owner = await mcp(f.service);
+  const startedDirectories: string[] = [];
+  let releaseFirstStart!: () => void;
+  let firstStartEntered!: () => void;
+  const firstEntered = new Promise<void>((resolve) => { firstStartEntered = resolve; });
+  const release = new Promise<void>((resolve) => { releaseFirstStart = resolve; });
+  let calls = 0;
+  f.service.cfg.processAdapter = {
+    start: async (_command, _timeout, workingDirectory) => {
+      startedDirectories.push(String(workingDirectory));
+      calls++;
+      if (calls === 1) { firstStartEntered(); await release; }
+      return `PID ${80 + calls}`;
+    },
+    read: async () => "", terminate: async () => "", sessions: async () => "",
+  };
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const owned = await owner.call("session_open", { working_directory: f.root, purpose: "Snapshot test" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const cookieValue = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(cookieValue);
+    const cookie = `rdmcp_user=${cookieValue}`;
+    const page = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const firstProcess = owner.call("process_start", { session_id: owned.session_id, command: "first" });
+    await firstEntered;
+    const update = fetch(`${base}/api/sessions/${encodeURIComponent(String(owned.session_id))}`, {
+      method: "PATCH", headers: { cookie, origin: f.service.cfg.baseUrl, "content-type": "application/json", "x-csrf-token": csrf },
+      body: JSON.stringify({ expectedVersion: 1, workingDirectory: f.base, purpose: "Updated while start waits" }),
+    });
+    let updateSettled = false;
+    void update.then(() => { updateSettled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(updateSettled, false, "edit waits until the in-flight start snapshots and launches with the old directory");
+    releaseFirstStart();
+    assert.ok((await firstProcess).process_id);
+    const updated = await update;
+    assert.equal(updated.status, 200);
+    const secondProcess = await owner.call("process_start", { session_id: owned.session_id, command: "second" });
+    assert.ok(secondProcess.process_id);
+    assert.deepEqual(startedDirectories, [f.root, f.base]);
+    const sessionProcesses = [...f.service.processes.values()].filter((process) => process.sessionId === owned.session_id).sort((left, right) => left.pid - right.pid);
+    assert.deepEqual(sessionProcesses.map((process) => process.workingDirectorySnapshot), [f.root, f.base]);
+    const startAudit = f.service.auditEntriesForConsole().filter((event) => event.event === "process.start");
+    assert.deepEqual(startAudit.map((event) => event.workingDirectorySnapshot), [f.root, f.base]);
+  } finally { releaseFirstStart(); await owner.close().catch(() => undefined); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});

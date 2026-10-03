@@ -88,10 +88,56 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
   const elements = new Map<string, FakeElement>([["log-console", root], ["log-status", status], ["log-new-button", newest], ["log-older-button", older], ...Object.entries(extras)]);
   const scrollY = 0; let scrollCalls = 0;
   const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: () => undefined, scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }) };
-  const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), documentElement: { scrollHeight: 1200 } };
+  const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, querySelectorAll: () => [], createElement: (tagName: string) => new FakeElement(tagName), documentElement: { scrollHeight: 1200 } };
   runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement });
   return { root, status, newest, older, windowStub, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
+
+test("session metadata editor uses the authenticated PATCH contract and preserves input on a version conflict", async () => {
+  const directory = { value: "C:/old" };
+  const purpose = { value: "Old purpose" };
+  const output = { textContent: "" };
+  const button = { disabled: false };
+  const directoryCell = { textContent: "C:/old" };
+  const purposeCell = { textContent: "Old purpose" };
+  const row = { querySelector: (selector: string) => selector === "[data-session-directory]" ? directoryCell : purposeCell };
+  let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  const form = {
+    dataset: { sessionEdit: "owned/session", version: "3" },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf-token" } : name === "workingDirectory" ? directory : purpose },
+    addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
+    querySelector: (selector: string) => selector === "output" ? output : button,
+    closest: () => row,
+  };
+  const requests: Array<{ url: string; init: { method: string; headers: Record<string, string>; body: string } }> = [];
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null },
+    encodeURIComponent,
+    fetch: async (url: string, init: { method: string; headers: Record<string, string>; body: string }) => {
+      requests.push({ url, init });
+      return requests.length === 1
+        ? response(200, { version: 4, working_directory: "C:/canonical", purpose: "New purpose" })
+        : response(409, { error: "version_conflict" });
+    },
+  });
+  assert.ok(handler);
+  await handler({ preventDefault() {} });
+  assert.equal(requests[0]?.url, "/api/sessions/owned%2Fsession");
+  assert.equal(requests[0]?.init.method, "PATCH");
+  assert.equal(requests[0]?.init.headers["x-csrf-token"], "csrf-token");
+  assert.deepEqual(JSON.parse(requests[0]!.init.body), { expectedVersion: 3, workingDirectory: "C:/old", purpose: "Old purpose" });
+  assert.equal(form.dataset.version, "4");
+  assert.equal(directory.value, "C:/canonical");
+  assert.equal(purpose.value, "New purpose");
+  assert.equal(directoryCell.textContent, "C:/canonical");
+  assert.equal(purposeCell.textContent, "New purpose");
+  purpose.value = "Unsaved conflicting input";
+  await handler({ preventDefault() {} });
+  assert.equal(form.dataset.version, "4");
+  assert.equal(purpose.value, "Unsaved conflicting input");
+  assert.match(output.textContent, /別の更新があります/);
+  assert.equal(button.disabled, false);
+});
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {
   const calls: URL[] = [];

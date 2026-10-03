@@ -25,6 +25,47 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
 }
 
 function clientBootstrap(): void {
+  document.querySelectorAll<HTMLFormElement>("[data-session-edit]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const sessionId = form.dataset.sessionEdit;
+      const csrf = (form.elements.namedItem("csrf") as HTMLInputElement | null)?.value ?? "";
+      const directory = form.elements.namedItem("workingDirectory") as HTMLInputElement | null;
+      const purpose = form.elements.namedItem("purpose") as HTMLInputElement | null;
+      const status = form.querySelector("output");
+      const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
+      const expectedVersion = Number(form.dataset.version);
+      if (!sessionId || !directory || !purpose || !Number.isSafeInteger(expectedVersion)) return;
+      if (button) button.disabled = true;
+      if (status) status.textContent = "保存中…";
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json", "x-csrf-token": csrf },
+          body: JSON.stringify({ expectedVersion, workingDirectory: directory.value, purpose: purpose.value }),
+        });
+        const result = await response.json() as { error?: string; version?: number; working_directory?: string; purpose?: string };
+        if (!response.ok || result.version === undefined || result.working_directory === undefined || result.purpose === undefined) {
+          if (status) status.textContent = response.status === 409 ? "別の更新があります。入力を確認して再編集してください。" : response.status === 404 ? "編集できるセッションではありません。" : result.error === "unsupported_field" ? "URL・題名の編集はまだ利用できません。" : "保存できませんでした。入力内容を確認してください。";
+          return;
+        }
+        form.dataset.version = String(result.version);
+        directory.value = result.working_directory;
+        purpose.value = result.purpose;
+        const row = form.closest("tr");
+        const directoryCell = row?.querySelector<HTMLElement>("[data-session-directory]");
+        const purposeCell = row?.querySelector<HTMLElement>("[data-session-purpose]");
+        if (directoryCell) directoryCell.textContent = result.working_directory;
+        if (purposeCell) purposeCell.textContent = result.purpose;
+        if (status) status.textContent = "保存しました。";
+      } catch {
+        if (status) status.textContent = "通信できませんでした。入力内容は保持しています。";
+      } finally {
+        if (button) button.disabled = false;
+      }
+    });
+  });
   const consoleRoot = document.getElementById("log-console");
   if (!consoleRoot) return;
   const root = consoleRoot;
