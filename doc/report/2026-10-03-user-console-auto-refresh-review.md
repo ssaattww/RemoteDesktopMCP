@@ -225,3 +225,42 @@ exact-head run `37076454672` でも全 job の `Prepare diagnostics`、`Record e
 同 HEAD 一致の pull_request CI は run `37084614215` が `in_progress` だった。利用者指示により CI 完了待機は行っていない。技術判定は exact-head CI が成功済みのレビュー対象 HEAD `11367c321838d8900c0068d441a05b2dea569e64` に対するものとする。
 
 PR #50 の current HEAD は `f9b60a5ea3fb7b7138efee0a020ba46661b106bb` へ進んでおり、前回確認した `fd86a5ab468388d81692195d4d07c7ea27ff06c8` からの追加差分は `package.json` のみだった。したがって `RDMCP-PR51-HOLD-001` は未解消の保留条件として維持し、PR #50 が先に入る場合は新しい main に対して統合確認をやり直す。
+
+## 再レビュー（fix verification）
+
+再レビュー対象の technical HEAD は `f347fa4ff93f17bc9134120d0511e4ff57e1768f`。前回 technical HEAD `11367c321838d8900c0068d441a05b2dea569e64` から、レビュー報告 commit 3件と修正 commit `b649ea2bf09099992500ab97f9d25b3b35c3b057`、`56b15fa22a8fd5ceb9142b8ba8b178e50bddf00b`、`f347fa4ff93f17bc9134120d0511e4ff57e1768f` を確認した。製品修正範囲は設計1、製品2、試験2の5ファイルで、workflow、依存、認証設定の変更はない。
+
+### finding closure
+
+- `RDMCP-PR51-REV-001` Medium: **open**
+  - 一覧内だけで完結する選択については、セッションID・列番号・列内位置を保存し、複数行、正逆方向、Selection API fallback、対象変更・削除、可視行位置を扱う実装と回帰試験が追加された。
+  - ただし `src/user-console-client.ts:584-590` は両端が一覧内で解決できる選択だけを保存対象とし、片端だけが一覧内の選択は保存しない。その後 `src/user-console-client.ts:597` の `sessionRows.replaceChildren()` が一覧行を削除する。
+  - DOM Standard の live range pre-remove 規則では、削除ノード配下にある Range 端点は削除前の親ノードと子indexへ移される。したがって一覧外から一覧内へまたがる選択は、Selection APIを明示的に呼ばなくても一覧行置換の影響を受け、元の選択状態を維持できない。
+  - `test/user-console-client.test.ts:1007` の境界選択試験は `restoreCount == 0` と `clearCount == 0` だけを確認する。試験用 `FakeElement.replaceChildren` は children 配列を置換するだけで live Range / Selection 端点の自動更新をモデル化していないため、このブラウザ挙動を検出できない。
+  - 必要対応: 境界をまたぐ選択も更新前に識別・保存し、一覧側端点を新しい同等セルへ復元するか、選択範囲に含まれる行を置換しない差分更新方式にする。実ブラウザ相当の live Range 変更を再現できる回帰試験を追加する。
+- `RDMCP-PR51-REV-002` Low: **closed**
+  - `src/user-console.ts:262` に、自動更新停止中は自動反映せず `↻ 更新` を使う説明が追加された。
+  - `test/user-console.test.ts:139` が説明文を検証する。
+- `RDMCP-PR51-REV-003` Medium: **closed**
+  - `stateRequestGeneration` を自動列と独立 `refreshState` の双方で共有し、要求開始後に古くなった `/api/console-state` 応答をJSON反映前に破棄する。
+  - `test/user-console-client.test.ts:866` が「初期state応答を保留→SSE由来の新state反映→初期応答完了」の逆順ケースを検証する。
+- `RDMCP-PR51-REV-004` Low: **closed**
+  - `doc/design/user-console-auto-refresh.md:84,107` は、試験追加を製品実装前、成功確認を実装後と明記して順序矛盾を解消した。
+
+### held
+
+`RDMCP-PR51-HOLD-001` は継続。2026-10-03 11:05 +09:00 時点で PR #50 は OPEN / draft、HEAD `3a5bb524a23317a950f8b1cb09483b141bbc8fca`。PR #50 が先に main へ入る場合は、その main 上で日時 `details` の開閉・フォーカス保持と本PRの自動更新を統合確認する。
+
+### validation
+
+- `git diff --check 11367c321838d8900c0068d441a05b2dea569e64..f347fa4ff93f17bc9134120d0511e4ff57e1768f`: pass
+- reviewer worktree は current technical HEAD `f347fa4ff93f17bc9134120d0511e4ff57e1768f` に detached で固定し、差分確認後も clean。
+- review worktree と既存 base worktree に `tsx` が無かったため、再レビュー担当による focused test のローカル再実行は行っていない。追加インストールも行っていない。
+- exact-head CI run `37087482904`: success。headSha は `f347fa4ff93f17bc9134120d0511e4ff57e1768f` と一致し、Ubuntu と Windows 3 shard が全て success。各jobの `Prepare diagnostics`、`Record environment`、`Upload diagnostics` も success。
+- `.github/workflows/lint.yml` は test result、stdout、stderr、environment log を `if: always()` で artifact 化する構成を維持している。
+- RDMCP process の PATH では `rg` を利用できなかったため、`rg` 呼び出し失敗を確認後、tracked file限定検索は `git grep` で補完した。
+- 実Edge headlessによるscratch検証はプロセス自体は exit 0 だったが `--dump-dom` のstdout/stderrを取得できず、判定証拠には使用していない。
+
+### 再レビュー判定
+
+**fail**。前回4 finding のうち `REV-002`、`REV-003`、`REV-004` は解消。`REV-001` は一覧内選択と表示位置の多くのケースを修正したが、一覧境界をまたぐ文字列選択の保持が未解消のため Medium のまま open とする。新しい finding ID は追加しない。
