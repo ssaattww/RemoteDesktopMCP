@@ -41,6 +41,7 @@
 | R54-02 | P5 | PR #54 の編集summary focus復元とrefresh/save応答順のP2指摘を同一通常レビュアーが修正確認 | R54-01 | S | stable report IDs PR54-NR-001/002で元HEAD・箇所を対応付け、修正HEADのfocused検証とP2 severity維持を記録 | 同一通常レビュアーがPR54-NR-001/002/003を確認済み。NR-004確認中、修正後Windows CI待ち |
 | R54-03 | P5 | PR #54 現ビルドのFA780 UI手動確認と画面証拠 | R54-01,R54-02 | S | 編集draft/focus、他画面更新、保存待ち追加入力、409二択、相対時刻・詳細開閉を親が現ビルドで確認・撮影 | 親の実機確認待ち |
 | R54-04 | P5 | Windows shard 1/3のprocess snapshot fixture終了後に発生する非同期audit ENOENTの原因調査・修正 | R54-01 | S | run 37133047283のexact errorをproduction watcherとtest fixtureに照合。試験対象のスナップショット保証を保った最小TDD修正をし、同reviewer確認と修正後Windows CIで検証 | fixtureを完了processモデルに修正。通常review・Windows CI待ち |
+| R54-05 | P5 | Windows shard 1/3のIssue 13テスト終了後に発生するprocess watcher ENOENTのサービス終了競合を修正 | R54-01,R54-04 | M | run 37134613123のexact errorをclose/watcher/test cleanup経路と照合。closeでin-flight観測をdrainし再登録を抑止するTDD回帰を追加、同reviewerと修正後Windows CIで検証 | TDD修正済み。focused 4/4・全体130件中119 pass/11 skip/0 fail、check/build/lint成功。watcher拒否時もtransfer/backend cleanupを試行し元エラーを維持。同reviewer再確認で新規指摘なし。修正後Windows CI待ち |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。
