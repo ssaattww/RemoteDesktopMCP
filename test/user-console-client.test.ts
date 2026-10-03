@@ -89,7 +89,7 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
   const scrollY = 0; let scrollCalls = 0;
   const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: () => undefined, scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }) };
   const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), documentElement: { scrollHeight: 1200 } };
-  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement });
+  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, URL, encodeURIComponent, Element: FakeElement });
   return { root, status, newest, older, windowStub, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
@@ -305,6 +305,33 @@ test("state refresh updates only session and running rows with the selected filt
   assert.equal(runningTable.hidden, false);
   assert.equal(runningEmpty.hidden, true);
   assert.notEqual(updatedAt.textContent, "");
+});
+
+test("session-link-updated refreshes owner state without fetching log pages and renders title text safely", async () => {
+  const sessionRows = new FakeElement();
+  const calls: string[] = [];
+  const ui = boot(async (url) => {
+    calls.push(url);
+    if (url.startsWith("/api/console-state")) return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-09-28T00:00:00Z",
+      sessions: [{ session_id: "active-link", created_at: "2026-09-27T00:00:00Z", state: "active", active: true, external_url: "https://example.com/?private=1", external_title: "<Work & item>" }],
+      running: [],
+    });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": sessionRows });
+  await settle();
+  const initialCalls = calls.length;
+  ui.sources[0]!.dispatch("session-link-updated", JSON.stringify({ session_id: "active-link", link_revision: 0 }));
+  await settle();
+  assert.ok(calls.length > initialCalls);
+  assert.equal(calls.some((url) => url.startsWith("/api/logs")), false);
+  const row = sessionRows.children[0]!;
+  const anchor = row.children[7]?.children[0] as unknown as { href: string; textContent: string; target: string; rel: string; referrerPolicy: string };
+  assert.equal(anchor.href, "https://example.com/?private=1");
+  assert.equal(anchor.textContent, "<Work & item>");
+  assert.equal(anchor.target, "_blank");
+  assert.equal(anchor.rel, "noopener noreferrer");
+  assert.equal(anchor.referrerPolicy, "no-referrer");
 });
 
 test("pull-down refresh only starts on the visible newest log block and ignores horizontal or canceled gestures", async () => {
