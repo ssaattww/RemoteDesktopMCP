@@ -35,13 +35,25 @@ findings:
     origin: review
     status: open
     summary: The UI has the auto-refresh checkbox but omits the design-required explanation that OFF mode uses manual refresh.
+  - id: RDMCP-PR51-REV-003
+    severity: Medium
+    origin: review
+    status: open
+    summary: An older /api/console-state response can complete after a newer automatic refresh and overwrite the newer state.
+  - id: RDMCP-PR51-REV-004
+    severity: Low
+    origin: review
+    status: open
+    summary: The design contradicts itself about TDD order by requiring both test-first and regression-test-after-implementation.
 
 held_conditions:
   - id: RDMCP-PR51-HOLD-001
     status: held
     summary: PR #50 is still open/draft and a three-way merge with PR #51 conflicts at session timestamp focus restoration; if PR #50 lands first, rebase and combined regression verification are required.
     related_pr: 50
-    related_head: 4102253628d4d638c26fa5c3a986082a53fe9e59
+    related_head: f9b60a5ea3fb7b7138efee0a020ba46661b106bb
+    related_head_checked_at: 2026-10-03T10:10:24+09:00
+    related_head_note: PR #50 advanced after the technical review; its latest commit modifies package.json, so integration remains a held condition and must be rechecked if PR #50 lands first.
 
 validation:
   local:
@@ -81,6 +93,8 @@ scope_notes:
 next_steps:
   - Fix RDMCP-PR51-REV-001 and add regression coverage for text selection and visible-row/scroll preservation.
   - Fix RDMCP-PR51-REV-002 and add UI rendering coverage.
+  - Add a RED regression test for RDMCP-PR51-REV-003, then prevent stale /api/console-state responses from overwriting newer state.
+  - Fix the TDD-order wording for RDMCP-PR51-REV-004.
   - If PR #50 lands first, rebase PR #51 and resolve RDMCP-PR51-HOLD-001 while preserving timestamp details open/focus behavior.
   - Validate only CI runs whose headSha exactly matches the new PR current HEAD.
   - Re-review the same finding IDs without changing their severities.

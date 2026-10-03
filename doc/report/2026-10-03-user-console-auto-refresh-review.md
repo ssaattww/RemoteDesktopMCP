@@ -217,3 +217,11 @@ exact-head run `37076454672` でも全 job の `Prepare diagnostics`、`Record e
 5. PR #50 が先に main へ入った場合は、その main を取り込んで `RDMCP-PR51-HOLD-001` の競合を解消し、日時 `details` と自動更新を組み合わせて検証する。
 6. 修正後の PR current HEAD と完全一致する CI run だけを確認する。
 7. 再レビューでは同じ finding ID と severity を維持する。
+
+## 再開時追補
+
+2026-10-03 10:10 +09:00 時点で、PR #51 の remote current HEAD は `cec5f7bc5ed98bb5d7157d6e7772cd9cc04e7a17` だった。レビュー対象 `11367c321838d8900c0068d441a05b2dea569e64` 以降の差分は本レビュー report / handoff のみで、製品コード、設計、テスト、workflow の追加変更はない。
+
+同 HEAD 一致の pull_request CI は run `37084614215` が `in_progress` だった。利用者指示により CI 完了待機は行っていない。技術判定は exact-head CI が成功済みのレビュー対象 HEAD `11367c321838d8900c0068d441a05b2dea569e64` に対するものとする。
+
+PR #50 の current HEAD は `f9b60a5ea3fb7b7138efee0a020ba46661b106bb` へ進んでおり、前回確認した `fd86a5ab468388d81692195d4d07c7ea27ff06c8` からの追加差分は `package.json` のみだった。したがって `RDMCP-PR51-HOLD-001` は未解消の保留条件として維持し、PR #50 が先に入る場合は新しい main に対して統合確認をやり直す。
