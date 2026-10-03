@@ -128,3 +128,39 @@
 - 指定HEAD `72ea62933222d875db21857ff65221017d53e937` の `doc/design/shared-todo-and-stale-update-gate.md:34` を確認。`nowMonotonic - max(lastTodoUpdatedMono, enabledAtMono) >= 300_000` とし、後続文で「有効中に一覧更新が成功すれば、その更新単調時計値から通常の5分期限を数え直す」と明記する。
 - 判定: **説明十分、findingなし**。`max` はTodo更新時刻と今回の有効化時刻の後者を基準にするため、ON時には過去の古いTodo時刻にかかわらず切替から5分の猶予となる。ただしON後にTodoを更新すれば、その更新が新しい後者となって期限は更新時点から新たに5分数える。したがって更新があれば「切替から絶対5分で拒否」ではなく、最終更新から5分で拒否される通常規則に戻る。この意味は式と文章の両方から読み取れる。
 - 有効化猶予を採用するかどうか自体はscope/default/graceの親判断としてheldのまま。今回選んでいない。
+
+## 利用者選択反映後の設計確認
+
+- モード: 選択反映後の設計レビュー。対象HEAD: `b791e3e75f4f87cbbd51a229613a640dce4d8d7d`（branch `feature/issue-56-shared-todo`）。この節は前の初回レビューとDREV-56-01限定確認とは独立して選択反映差分を確認する。初回の `fail` とDREV-56-01の `closed in design` 記録は維持する。
+- 選択反映diff: `git diff 72ea62933222d875db21857ff65221017d53e937 b791e3e75f4f87cbbd51a229613a640dce4d8d7d -- doc/design/shared-todo-and-stale-update-gate.md tasks/tasks-status.md tasks/phases-status.md`。設計文書とtrackingのみの差分で、製品コード/テスト変更なし。
+- 証拠: 設計 `doc/design/shared-todo-and-stale-update-gate.md:5-20,22-61,36-57,65-115,128-136`、現行wrapper `src/index.ts:1027-1075`、session/transfer/process操作 `src/index.ts:1123-1125,1144-1152,1166-1175`、既存詳細UI構成 `src/user-console.ts:263-272`、関連する `doc/design/functional-requirements.md` を確認。テスト・lint・製品変更・Issue/PR操作なし。
+
+### DREV-56-02 の指摘
+
+#### DREV-56-02 — High — 初期有効セッションの空Todoは作成時猶予と欠落時fail-closedの規則が衝突
+
+- 起点: 選択反映後の設計内の仕様矛盾。場所: `doc/design/shared-todo-and-stale-update-gate.md:25-27,34,61`。
+- 影響: 選択仕様は、初期有効セッションの空Todoについてsession作成時から5分は通常操作を許可する（`:18,34,61`）。しかしgateの基本式は `lastTodoUpdatedMono` のみで計算する（`:25`）。新規sessionではTodoを一度も更新していないため `lastTodoUpdatedMono` は未定義が自然である。一方 `:27` は有効中に更新単調時計値が欠落すれば通常操作を拒否し、Todo更新で基準を作り直すよう案内する。この規則を文字どおり適用すると新規空Todo sessionは猶予開始直後から通常操作を拒否され、`:34,61` の猶予と矛盾する。`:34` の `max(lastTodoUpdatedMono, enabledAtMono)` は猶予を使う意図を示すが、`:25` の基本式と`:27` の欠落時異常処理に接続されていない。
+- 必要な対応: 未更新でTodo本文が空の有効sessionに対する有効baselineを明記し、基本判定式と異常規則を一致させる。例えば `lastTodoUpdatedMono` がまだ一度も設定されていない状態は有効な初期状態と定義し、`enabledAtMono` をfallback基準として用いて、作成から300,000ms未満は許可、境界以上を拒否する。これに対し、Todo更新済なのにtimestampが欠落/破損した状態は異常としてfail-closedとする。もしくは初回未更新状態を示すsentinelを定義する。`:25` の式も初回更新前から一意に評価可能にする。
+- 根拠/代替: `:34,61` はsession作成時に `enabledAtMono` を記録して5分猶予と明記するので、初回Todo更新までそれをbaselineにする代替が決定済仕様に忠実。初回5分の前にTodo入力を強制する、または初期値を無効へ戻す案は利用者の決定変更となるため採らない。
+
+### 確認した要求・選択
+
+| 確認点 | 状態 | 根拠 / 評価 |
+| --- | --- | --- |
+| Scope=session、初期有効 | `checked_no_finding` | `:5,17-20` が選択と、担当者・別session共有なしを一貫して明記。 |
+| 初期有効の空Todoとsession作成から5分猶予 | `checked_finding` | `:18,34,61` は猶予を規定するが、`:25,27` の未設定timestamp処理と衝突。DREV-56-02。 |
+| OFF可能、再有効化時の猶予、成功Todo更新後の期限再計算、max式 | `checked_no_finding` | `:32,34,61`。OFFは時間拒否を解除、再度ONごと新しい `enabledAtMono`、更新成功時はその時点から5分。maxが後者を選び、ON後の更新が切替時の5分猶予を起点から数え直すことも明記。 |
+| Session Map寿命と再起動 | `checked_no_finding` | `:61,67-71`。session/Todoは起動中だけ保持し、再起動後旧session IDは再利用不可。session再開を暗黙導入しない。 |
+| Todo/emergency stop/process status-output-kill/transfer cancel/session closeによる循環防止 | `checked_no_finding` | `:38-49,99-109`。Todo管理、既存緊急停止、同じuser/session所有process/transferの状態・後片付けを例外化。期限後status/outputは保存済状態のみ、kill再要求は直列化し終了済みへ送らない。通常の任意process start等へ広げない。 |
+| Owner境界と固定allowlist | `checked_no_finding` | `:42,45-49,75-77,91-93`。所有者/session確認、固定操作名で判定し、引数force・自由記述・呼出し元申告・名前prefixで拡張しない。迂回路との所見なし。 |
+| 共通監査wrapper例外経路 / DREV-56-01 | `checked_no_finding`（設計） | `:89-95` は通常操作の許可監査必須/fail-closed、固定例外の事前監査失敗時続行、事後失敗を適用済/不明状態＋警告で返すことを規定。前回の限定確認を維持。実装・動作検証ではない。 |
+| Session詳細画面上部UI | `checked_no_finding` | `:9,57,128-136` が配置・項目・進捗・更新時刻・強制状態/切替・回復案内を規定。既存session詳細画面 `src/user-console.ts:271` と配置が整合。 |
+| Issue #56 受入要件との一致 | `checked_finding` | Todo共有、scope、5分境界、OFF/ON猶予、安全例外、画面位置は概ね一致。空Todo新sessionの猶予だけDREV-56-02。 |
+
+### 判定と残件
+
+- 判定: **fail**。利用者決定の3項目はそのまま維持されているが、新sessionの未更新Todo時刻についてbaselineの規則がなく、初期猶予と異常時拒否規則が衝突する。DREV-56-02解消が実装開始前に必要。
+- DREV-56-01は前回の限定設計確認結果を維持し、このHEADの設計差分で後戻りはない。初回historical `fail` も維持。
+- scope=session、初期有効、ON切替から5分猶予を再選択/変更していない。
+- 未検証: 製品実装、テスト、CI、実audit故障、対象OSの時計休止semantics。指示に従い実行せず。Role/profile observabilityも実効profileも確認可能な証拠がなく、実効profileは主張しない。
