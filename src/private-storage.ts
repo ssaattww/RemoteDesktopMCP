@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, open, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { protectAndVerifyKind } from "./private-storage-protection.js";
 
 type PrivateKind = "file" | "directory";
 
@@ -131,9 +132,9 @@ async function protectPrivate(target: string, expected: PrivateKind): Promise<vo
   if (await kind(target) !== expected) throw new Error("Private storage path type is invalid.");
   if (process.platform === "win32") {
     // The protect operation verifies the resulting owner and complete ACL in
-    // the same PowerShell process after Set-Acl, so a second assert process is
-    // redundant and adds substantial startup cost on Windows.
-    await windowsAcl(target, "protect");
+    // the same PowerShell process after Set-Acl. Keep the independent path-kind
+    // check without spawning another PowerShell process for the ACL assertion.
+    await protectAndVerifyKind(target, expected, (candidate) => windowsAcl(candidate, "protect"), kind);
     return;
   }
   await chmod(target, expected === "directory" ? 0o700 : 0o600);
