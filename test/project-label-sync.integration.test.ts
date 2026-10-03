@@ -42,6 +42,7 @@ function createStatefulAdapter({ priority = "P1", priorityUpdatedAt = baselineTi
   if (secondItemFails) items.push({ projectId, id: "PVTI_project_issue_2", contentType: "Issue", number: 2, repository: "ssaattww/RemoteDesktopMCP" });
   const writes = [];
   const mutations = [];
+  let labelCreateCalls = 0;
   const valueId = (field) => projectFields[field] === null ? null : `value-${field}-${projectFields[field]}`;
   const snapshot = (field) => makeSnapshot(projectFields[field], projectTimes[field], valueId(field), currentLabels, currentTimeline, field);
 
@@ -66,6 +67,7 @@ function createStatefulAdapter({ priority = "P1", priorityUpdatedAt = baselineTi
   const adapter = {
     readProject: async () => ({ id: projectId, fields }),
     readProjectItems: async () => items,
+    ensureSupportedLabels: async () => { labelCreateCalls += 1; },
     readProjectItem: async (itemId) => {
       if (itemId === "PVTI_project_issue_2") throw new Error("later item read failed");
       return {
@@ -114,8 +116,37 @@ function createStatefulAdapter({ priority = "P1", priorityUpdatedAt = baselineTi
       currentTimeline.push(entry);
     },
   };
-  return { adapter, writes, mutations, read: () => ({ projectFields: { ...projectFields }, labels: [...currentLabels], timeline: [...currentTimeline], saved: structuredClone(saved) }) };
+  return { adapter, writes, mutations, read: () => ({ projectFields: { ...projectFields }, labels: [...currentLabels], timeline: [...currentTimeline], saved: structuredClone(saved) }), labelCreateCalls: () => labelCreateCalls };
 }
+
+test("synchronizeProject validates every target identity before any mutation", async (t) => {
+  await t.test("rejects a target whose saved Project item maps to another Issue", async () => {
+    const scenario = createStatefulAdapter();
+    const state = scenario.read().saved;
+    state.items[projectItemId].issueNumber = 2;
+    scenario.adapter.readState = async () => ({ state: structuredClone(state), refSha: "state-ref" });
+
+    await assert.rejects(synchronizeProject({ adapter: scenario.adapter }), /maps to a different issue number/);
+    assert.equal(scenario.labelCreateCalls(), 0);
+    assert.deepEqual(scenario.writes, []);
+    assert.deepEqual(scenario.mutations, []);
+  });
+
+  await t.test("checks a later target before label creation or writes for an earlier valid target", async () => {
+    const scenario = createStatefulAdapter({ secondItemFails: true });
+    const state = scenario.read().saved;
+    state.items.PVTI_project_issue_2 = {
+      ...structuredClone(state.items[projectItemId]),
+      issueNumber: 3,
+    };
+    scenario.adapter.readState = async () => ({ state: structuredClone(state), refSha: "state-ref" });
+
+    await assert.rejects(synchronizeProject({ adapter: scenario.adapter }), /maps to a different issue number/);
+    assert.equal(scenario.labelCreateCalls(), 0);
+    assert.deepEqual(scenario.writes, []);
+    assert.deepEqual(scenario.mutations, []);
+  });
+});
 
 test("synchronizeProject executes both directions, clears, removes duplicate labels, and recovers an interrupted label operation", async (t) => {
   await t.test("issue to Project set reaches updateProjectField", async () => {

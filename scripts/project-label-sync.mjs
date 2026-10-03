@@ -899,6 +899,14 @@ export async function synchronizeProject({ adapter, dryRun = false, issueNumber 
   const plans = [];
   const initialSnapshots = new Map();
 
+  // Verify every persisted Project item identity before reads that may lead to any write.
+  for (const target of targets) {
+    const itemState = state.items[target.id];
+    if (itemState && itemState.issueNumber !== target.number) {
+      throw new Error("State item ID maps to a different issue number.");
+    }
+  }
+
   // Read every target and both fields before the first persistent or content write.
   for (const target of targets) {
     for (const field of ["priority", "status"]) {
@@ -917,7 +925,6 @@ export async function synchronizeProject({ adapter, dryRun = false, issueNumber 
       },
     };
     const itemState = state.items[target.id];
-    if (itemState.issueNumber !== target.number) throw new Error("State item ID maps to a different issue number.");
 
     for (const field of ["priority", "status"]) {
       const storedField = fieldStateFor(itemState, field);
