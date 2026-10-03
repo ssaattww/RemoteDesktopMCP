@@ -20,6 +20,59 @@ test("every tool requires a comment that is retained in operation audit history"
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("Issue 55: running process details stay ahead of completed details and missing metadata never borrows another process", async () => {
+  const f = await fixture(); const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string"); const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const sessionId = "issue55-session";
+    const otherSessionId = "issue55-other-session";
+    await f.service.audit("session.open", { user: "owner@example.test", sessionId });
+    await f.service.audit("session.open", { user: "owner@example.test", sessionId: otherSessionId });
+    const starts = [
+      { at: "2026-10-01T00:00:00.000Z", sessionId, processId: "running-no-metadata", command: "", comment: "" },
+      { at: "2026-10-01T00:00:01.000Z", sessionId, processId: "completed-process", command: "echo completed", comment: "Completed job" },
+      { at: "2026-10-01T00:00:02.000Z", sessionId, processId: "shared-process", command: "echo first-running", comment: "First running job" },
+      { at: "2026-10-01T00:00:03.000Z", sessionId: otherSessionId, processId: "shared-process", command: "echo other-session", comment: "Other session secret" },
+    ];
+    for (const entry of starts) await f.service.audit("process.start", { ...entry, user: "owner@example.test" });
+    await f.service.audit("process.exit", { at: "2026-10-03T00:00:00.000Z", user: "owner@example.test", sessionId, processId: "completed-process", exitCode: 0 });
+    const activeProcess = (id: string, processSession: string, pid: number, state: "running" | "finished") => ({ id, sessionId: processSession, user: "owner@example.test", generation: "fixture-generation", pid, state, output: "", cursor: 0 });
+    f.service.processes.set("fixture-first-running", activeProcess("shared-process", sessionId, 1001, "running"));
+    f.service.processes.set("fixture-empty-metadata-running", activeProcess("running-no-metadata", sessionId, 1002, "running"));
+    f.service.processes.set("fixture-finished", activeProcess("completed-process", sessionId, 1003, "finished"));
+    f.service.processes.set("fixture-same-id-other-session", activeProcess("shared-process", otherSessionId, 1004, "running"));
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(token);
+    const cookie = `rdmcp_user=${token}`;
+    const stateResponse = await fetch(`${base}/api/console-state?session_id=${encodeURIComponent(sessionId)}`, { headers: { cookie } });
+    const state = await stateResponse.json() as { running: Array<Record<string, unknown>> };
+    const mismatches: string[] = [];
+    if (stateResponse.status !== 200) mismatches.push(`same-session console-state status was ${stateResponse.status}`);
+    if (JSON.stringify(state.running.map((entry) => entry.operation_id)) !== JSON.stringify(["shared-process", "running-no-metadata"])) mismatches.push(`same-session running IDs were ${JSON.stringify(state.running.map((entry) => entry.operation_id))}`);
+    if (JSON.stringify(state.running.map((entry) => [entry.purpose, entry.command])) !== JSON.stringify([["First running job", "echo first-running"], ["", ""]])) mismatches.push("same-session console-state omitted purpose/command needed after refresh");
+    const detail = await (await fetch(`${base}/user/sessions/${encodeURIComponent(sessionId)}`, { headers: { cookie } })).text();
+    const runningSection = /<h2>Running operations<\/h2>([\s\S]*?)<\/section>/.exec(detail)?.[1] ?? "";
+    const runningRows = [...runningSection.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].slice(1).map((match) => match[1] ?? "");
+    if (!/shared-process/.test(runningRows[0] ?? "") || !/First running job[\s\S]*echo first-running/.test(runningRows[0] ?? "")) mismatches.push(`first Running operations row omitted its purpose/command or process identity: ${runningRows[0] ?? "<missing>"}`);
+    if (!/running-no-metadata/.test(runningRows[1] ?? "") || !/未記録/.test(runningRows[1] ?? "")) mismatches.push(`second Running operations row omitted its process identity or missing-value fallback: ${runningRows[1] ?? "<missing>"}`);
+    const runningLink = /<a\b[^>]*href="#([^"]+)"[^>]*data-session-id="issue55-session"[^>]*data-process-id="shared-process"[^>]*>[^<]*<\/a>/.exec(runningSection);
+    if (!runningLink) mismatches.push("running row lacks an in-page link identified by session and process IDs");
+    else if (!new RegExp(`<article[^>]*data-session-id="issue55-session"[^>]*data-process-id="shared-process"[^>]*>[\\s\\S]*?<h3[^>]*id="${runningLink[1]}"`).test(detail)) mismatches.push("running link does not resolve to the heading of its same-session process detail");
+    if (/Other session secret|echo other-session/.test(detail)) mismatches.push("duplicate process ID leaked metadata from another session");
+    const blocks = [...detail.matchAll(/<article class="process-block"[^>]*data-process-id="([^"]+)"[\s\S]*?<\/article>/g)];
+    const blockFor = (processId: string) => blocks.find((match) => match[1] === processId)?.[0] ?? "";
+    const missingBlock = blockFor("running-no-metadata");
+    const order = blocks.map((match) => match[1]);
+    if (JSON.stringify(order) !== JSON.stringify(["shared-process", "running-no-metadata", "completed-process"])) mismatches.push(`running-first order was ${JSON.stringify(order)}`);
+    if (!/未記録/.test(missingBlock)) mismatches.push("empty purpose/command did not render 未記録");
+    if (/First running job|echo first-running|Completed job|echo completed/.test(missingBlock)) mismatches.push("missing metadata borrowed another process's values");
+    if (!/First running job/.test(blockFor("shared-process")) || !/echo first-running/.test(blockFor("shared-process"))) mismatches.push("shared-process purpose/command are not in its own same-session detail");
+    if (!/Completed job/.test(blockFor("completed-process")) || !/echo completed/.test(blockFor("completed-process"))) mismatches.push("completed-process purpose/command are not in its own detail");
+    assert.deepEqual(mismatches, [], "process order and missing-metadata isolation contract");
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
 test("Issue 22: user log API pages owner-scoped persisted events and exposes SSE notifications without bodies", async () => {
   const f = await fixture(); const server = createApp(f.service).listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -136,6 +189,8 @@ test("user console lists each active connection's working directory and purpose 
     assert.ok(token);
     const html = await (await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(html, new RegExp(String(own.session_id)));
+    assert.match(html, /id="auto-refresh"/);
+    assert.match(html, /自動更新を停止中は新しい情報を自動反映しません。手動更新（↻ 更新）を使用してください。/, "the paused toggle explains that automatic reflection stops and manual refresh remains available");
     assert.match(html, /Build &lt;safe&gt; feature/);
     assert.match(html, /作業ディレクトリ/);
     assert.match(html, /セッション一覧/);
@@ -155,6 +210,7 @@ test("user console lists each active connection's working directory and purpose 
     assert.doesNotMatch(html, /first-only\.txt|first-command|first-output|second-only\.txt/);
     const detail = await (await fetch(`${base}/user/sessions/${encodeURIComponent(String(own.session_id))}`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(detail, /セッションの内容/);
+    assert.doesNotMatch(detail, /id="auto-refresh"/);
     assert.match(detail, /<details><summary>操作履歴<\/summary>/);
     assert.doesNotMatch(detail, /http-equiv="refresh"/);
     assert.match(detail, /作成日時: .*最終アクセス日時:/);

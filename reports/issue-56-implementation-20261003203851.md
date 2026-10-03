@@ -115,4 +115,13 @@
 
 ## リスク
 
-- 未解決: Desktop Commander本物のtransport timeoutはこの環境で再現せず、adapter mockに既知のtimeout code `-32001`を設定してproduction wrapper compositionを確認。実bridge/実network timeout mappingは未検証として保持。Emergency Stop persistence自体の失敗提示、より広い既存回帰suiteも未実行。現在差分は未commitで親の通常確認・commit/push・review待ち。
+- 未解決: Desktop Commander本物のtransport timeoutはこの環境で再現せず、adapter mockに既知のtimeout code `-32001`を設定してproduction wrapper compositionを確認。実bridge/実network timeout mappingは未検証として保持。Emergency Stop persistence自体の失敗提示も未実行。
+
+## 親による最新main統合・回帰
+
+- upstream: `origin/main` を `bfe3793309e09acdd180ffe22a4e4a81e87fc668` までfetch。PR #51（User Console自動更新、merge SHA `bfe3793`）とPR #60（長時間プロセス目的・コマンド、merge SHA `ed4d9b9`）の両方がmainに含まれることを確認した。
+- 統合: Issue #56 branchの `8586650` にorigin/mainを通常merge。package.json、src/user-console.ts、tasks/phases-status.md、tasks/tasks-status.mdの4 conflictを解消。セッション詳細ではTodoパネルを既存自動更新UIの上部に維持し、PR #60由来のprocess purpose/command metadata表示を併存。package.jsonのdesign-term lint対象はPR #51/#60の設計とIssue #56設計をすべて含めた。追跡IDは既存mainのIssue #55/T09、Issue #46/T10を維持し、Issue #56をT11/P6へ振り直した。`src/user-console-client.ts`およびそのテストのPR #51変更も取り込み、package-lock/dependenciesに変更なし。
+- main/PR状態: PR #51はMERGED、merge SHA `bfe3793309e09acdd180ffe22a4e4a81e87fc668`。PR #60はMERGED、merge SHA `ed4d9b9d04ef32e40b49a5c978286cddb0e0c466`。PR #51 CIはUbuntuとWindows 3 shardすべてSUCCESS。PR #61はこの統合前にCONFLICTINGと報告された。統合後のmergeability確認は後続。
+- 統合後全体テスト: `npm test` exit `0`。165 tests、154 pass、11 skip、0 fail、duration 135242 ms。出力は `/tmp/rdmcp-issue56-merge-test.log` に保存。
+- 統合後品質確認: `npm run lint` exit `0`（ESLint、markdownlint 105 files/0 issues、design terms）、`npm run check` exit `0`、`npm run build` exit `0`。
+- この報告追記時点ではmain merge commitはまだpending。統合後の通常reviewer finding closure verificationとPR #61 mergeability確認も未完了。
