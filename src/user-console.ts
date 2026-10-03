@@ -159,12 +159,22 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const previous = operationMap.get(key);
       operationMap.set(key, { sessionId: currentEvent.session.id, event: { ...(previous?.event ?? {}), ...currentEvent.event, receivedAt: previous?.event.receivedAt ?? currentEvent.event.receivedAt ?? currentEvent.event.at, startAt: currentEvent.event.startAt ?? previous?.event.startAt, endedAt: currentEvent.event.endedAt ?? previous?.event.endedAt, durationMs: currentEvent.event.durationMs ?? previous?.event.durationMs, connectionId: currentEvent.event.connectionId ?? previous?.event.connectionId } });
     }
+    const processMetadata = new Map<string, { purpose: string; command: string }>();
+    for (const session of allSessions.filter((entry) => entry.user === principal && (sessionId === undefined || entry.id === sessionId))) {
+      for (const event of session.events) {
+        if (event.event !== "process.start" || typeof event.processId !== "string") continue;
+        processMetadata.set(`${session.id}:${event.processId}`, {
+          purpose: typeof event.comment === "string" ? event.comment : "",
+          command: typeof event.command === "string" ? event.command : "",
+        });
+      }
+    }
     const running = [
       ...[...operationMap.entries()].flatMap(([operationId, operation]) => {
         const status = typeof operation.event.status === "string" ? operation.event.status : operation.event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(operation.event.event) ? operation.event.event.slice("operation.".length) : "running";
         return status === "running" ? [{ operation_id: operationId, connection_id: String(operation.event.connectionId ?? operation.sessionId), label: String(operation.event.tool ?? "operation"), status }] : [];
       }),
-      ...[...service.processes.values()].filter((process) => process.user === principal && (sessionId === undefined || process.sessionId === sessionId) && (process.state === "running" || process.state === "terminating")).map((process) => ({ operation_id: process.id, connection_id: process.sessionId, label: "process", status: process.state, termination_unconfirmed: process.terminationUnconfirmed || undefined })),
+      ...[...service.processes.values()].filter((process) => process.user === principal && (sessionId === undefined || process.sessionId === sessionId) && (process.state === "running" || process.state === "terminating")).map((process) => ({ operation_id: process.id, connection_id: process.sessionId, label: "process", status: process.state, purpose: processMetadata.get(`${process.sessionId}:${process.id}`)?.purpose ?? "", command: processMetadata.get(`${process.sessionId}:${process.id}`)?.command ?? "", termination_unconfirmed: process.terminationUnconfirmed || undefined })),
     ];
     const state = service.userExecutionState(principal);
     return res.json({ stopped: state.stopped, activeSessions: activeLive.length, runningProcesses: running.length, sessions, running, updatedAt: new Date().toISOString() });
@@ -269,11 +279,16 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       return res.type("html").send(page(body + stopDetails, res.locals.userNonce));
     }
     body += `<section><div class="toolbar"><h2>${selectedSession.id.startsWith("request:") ? "セッション外の操作" : "セッションの内容"}</h2><a href="/user">一覧に戻る</a></div><p class="session-meta">Connection ID: ${escape(selectedSession.id)}<br>作成日時: ${jst(selectedSession.at)}<br>最終アクセス日時: ${jst(selectedSession.lastAccessAt ?? selectedSession.at)}<br>作業ディレクトリ: ${escape(selectedSession.workingDirectory ?? "—")}<br>用途: ${escape(selectedSession.purpose ?? "—")}</p></section>`;
+    const processMetadata = new Map<string, { purpose: string; command: string }>();
+    for (const session of visibleSessions) for (const event of session.events) {
+      if (event.event === "process.start" && typeof event.processId === "string") processMetadata.set(`${session.id}:${event.processId}`, { purpose: typeof event.comment === "string" ? event.comment : "", command: typeof event.command === "string" ? event.command : "" });
+    }
     const runningRows = [
-      ...runningOperations.map(({ session, event }) => ({ operationId: String(event.operationId ?? "—"), connectionId: String(event.connectionId ?? session.id), label: String(event.tool ?? "operation"), status: "running" })),
-      ...running.map((process) => ({ operationId: process.id, connectionId: process.sessionId, label: "process", status: `${process.state}${process.terminationUnconfirmed ? " (termination unconfirmed)" : ""}` })),
+      ...runningOperations.map(({ session, event }) => ({ operationId: String(event.operationId ?? "—"), connectionId: String(event.connectionId ?? session.id), label: String(event.tool ?? "operation"), status: "running", process: false, purpose: "", command: "" })),
+      ...running.map((process) => ({ operationId: process.id, connectionId: process.sessionId, label: "process", status: `${process.state}${process.terminationUnconfirmed ? " (termination unconfirmed)" : ""}`, process: true, ...(processMetadata.get(`${process.sessionId}:${process.id}`) ?? { purpose: "", command: "" }) })),
     ];
-    body += `<section><h2>Running operations</h2><div id="running-table" class="scroll"${runningRows.length ? "" : " hidden"}><table><thead><tr><th>Operation ID</th><th>Connection ID</th><th>Tool / 状態</th></tr></thead><tbody id="running-rows">${runningRows.map((item) => `<tr><td style="overflow-wrap:anywhere">${escape(item.operationId)}</td><td style="overflow-wrap:anywhere">${escape(item.connectionId)}</td><td class="running">${escape(item.label)} · ${escape(item.status)}</td></tr>`).join("")}</tbody></table></div><p id="running-empty"${runningRows.length ? " hidden" : ""}>実行中の操作はありません。</p></section>`;
+    const processAnchorId = (session: string, process: string) => `process-${encodeURIComponent(session)}-${encodeURIComponent(process)}`;
+    body += `<section><h2>Running operations</h2><div id="running-table" class="scroll"${runningRows.length ? "" : " hidden"}><table><thead><tr><th>Operation ID</th><th>Connection ID</th><th>Tool / 状態</th><th>実行目的</th><th>コマンド</th><th>詳細</th></tr></thead><tbody id="running-rows">${runningRows.map((item) => `<tr><td style="overflow-wrap:anywhere">${escape(item.operationId)}</td><td style="overflow-wrap:anywhere">${escape(item.connectionId)}</td><td class="running">${escape(item.label)} · ${escape(item.status)}</td><td style="overflow-wrap:anywhere">${escape(item.process ? item.purpose || "未記録" : "—")}</td><td style="overflow-wrap:anywhere">${escape(item.process ? item.command || "未記録" : "—")}</td><td>${item.process ? `<a href="#${escape(processAnchorId(item.connectionId, item.operationId))}" data-session-id="${escape(item.connectionId)}" data-process-id="${escape(item.operationId)}">詳細へ</a>` : "—"}</td></tr>`).join("")}</tbody></table></div><p id="running-empty"${runningRows.length ? " hidden" : ""}>実行中の操作はありません。</p></section>`;
     const opRows = operations.map(({ session, event, status }) => {
       const tool = String(event.tool ?? "—");
       const receivedAt = String(event.receivedAt ?? event.at);
@@ -292,7 +307,12 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       const previous = processGroups.get(key);
       processGroups.set(key, { session, events: [...(previous?.events ?? []), event] });
     }
-    const processDetails = [...processGroups.values()].sort((left, right) => Date.parse(right.events.at(-1)!.at) - Date.parse(left.events.at(-1)!.at)).slice(0, 100);
+    const runningProcessKeys = new Set(running.map((process) => `${process.sessionId}:${process.id}`));
+    const processDetails = [...processGroups.entries()].sort(([leftKey, left], [rightKey, right]) => {
+      const leftRunning = runningProcessKeys.has(leftKey) ? 1 : 0;
+      const rightRunning = runningProcessKeys.has(rightKey) ? 1 : 0;
+      return rightRunning - leftRunning || Date.parse(right.events.at(-1)!.at) - Date.parse(left.events.at(-1)!.at);
+    }).map(([, group]) => group).slice(0, 100);
     body += `<section><details><summary>操作履歴</summary><div class="scroll"><table><thead><tr><th>受信時刻</th><th>Connection ID</th><th>Operation ID</th><th>Tool</th><th>状態</th><th>対象</th><th>開始</th><th>終了</th><th>実行時間</th><th>詳細</th></tr></thead><tbody id="operation-rows">${opRows}</tbody></table></div><p><small>この画面には現在ログインしている使用者自身の記録だけを表示します。</small></p></details></section>`;
     body += `<section id="process-details"><h2>コマンドと出力の詳細</h2>${logControls}${processDetails.map(({ session, events }) => {
       const start = events.find((event) => event.event === "process.start");
@@ -307,7 +327,9 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
         const remaining = snapshot.startsWith(earlierOutput) ? snapshot.slice(earlierOutput.length).replace(/^\n/, "") : snapshot;
         if (remaining) outputEvents.push({ ...exit, output: remaining });
       }
-      return `<article class="process-block" data-process-id="${escape(latest.processId ?? "—")}" data-session-id="${escape(session.id)}" data-events-json="${escape(JSON.stringify(events))}"><p>${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</p>${comment === undefined ? "" : `<h3>実行目的</h3><pre>${escape(comment)}</pre>`}${command === undefined ? "" : `<h3>コマンド</h3><pre>${escape(command)}</pre>`}${outputEvents.length ? `<details><summary>出力</summary>${outputEvents.map((event) => `<div class="output-part"><small>${event.event === "process.exit" ? "終了時の出力 · " : ""}${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}</details>` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
+      const purpose = typeof comment === "string" && comment ? comment : "未記録";
+      const commandText = typeof command === "string" && command ? command : "未記録";
+      return `<article class="process-block" data-session-id="${escape(session.id)}" data-process-id="${escape(latest.processId ?? "—")}" data-events-json="${escape(JSON.stringify(events))}"><h3 id="${escape(processAnchorId(session.id, String(latest.processId ?? "—")))}" tabindex="-1">${jst(start?.at ?? events[0]?.at)} · ${escape(session.id)} · ${escape(latest.processId ?? "—")}</h3><h3>実行目的</h3><pre>${escape(purpose)}</pre><h3>コマンド</h3><pre>${escape(commandText)}</pre>${outputEvents.length ? `<details><summary>出力</summary>${outputEvents.map((event) => `<div class="output-part"><small>${event.event === "process.exit" ? "終了時の出力 · " : ""}${jst(event.at)}</small><pre>${escape(event.output)}</pre></div>`).join("")}</details>` : ""}${exit ? `<p>終了コード: ${escape(exit.exitCode ?? "—")}${exit.result ? ` · ${escape(exit.result)}` : ""}</p>` : ""}</article>`;
     }).join("")}</section>`;
     return res.type("html").send(page(body + stopDetails, res.locals.userNonce));
   });
