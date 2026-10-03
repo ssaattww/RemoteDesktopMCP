@@ -33,6 +33,12 @@ function clientBootstrap(): void {
   type LogPage = { items: LogItem[]; newestCursor: string; oldestCursor: string; hasMoreOlder: boolean; hasMoreNewer: boolean };
   type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
   type LogState = "current" | "pending" | "refreshing" | "resync-required";
+  type ConsoleState = {
+    stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
+    sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
+    running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
+    unassignedOperations?: Array<{ id: string; at: string }>;
+  };
   const sessionId = root.dataset.sessionId ?? "";
   const operationRows = document.getElementById("operation-rows") as HTMLTableSectionElement | null;
   const processDetails = document.getElementById("process-details");
@@ -82,6 +88,7 @@ function clientBootstrap(): void {
   let noticeGeneration = 0;
   let stateRequestGeneration = 0;
   let statePending = false;
+  let deferredConsoleState: ConsoleState | undefined;
   let resyncPending = false;
   let pageHidden = document.hidden;
   let autoController: AbortController | undefined;
@@ -92,6 +99,7 @@ function clientBootstrap(): void {
   function stopAuthentication() {
     if (authenticationEnded) return;
     authenticationEnded = true;
+    deferredConsoleState = undefined;
     cancelAutomatic();
     manualPending = false;
     manualGeneration += 1;
@@ -553,12 +561,27 @@ function clientBootstrap(): void {
     } catch { if (!authenticationEnded && status) status.textContent = "過去のログを取得できませんでした。再試行してください。"; }
     finally { if (olderButton) { olderButton.disabled = authenticationEnded; olderButton.textContent = "過去のログを読み込む"; } }
   };
-  const refreshStateFrom = async (state: {
-        stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
-        sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
-        running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
-        unassignedOperations?: Array<{ id: string; at: string }>;
-      }) => {
+  const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
+  const selectionIntersectsSessionRows = () => {
+    if (!sessionRows) return false;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    const anchorInside = Boolean(selection.anchorNode && sessionRows.contains(selection.anchorNode as Node));
+    const focusInside = Boolean(selection.focusNode && sessionRows.contains(selection.focusNode as Node));
+    // Selections wholly owned by the list can use the existing endpoint rebinding.
+    if (anchorInside && focusInside) return false;
+    try {
+      const range = typeof selection.getRangeAt === "function" && (selection.rangeCount === undefined || selection.rangeCount > 0)
+        ? selection.getRangeAt(0) : undefined;
+      if (range?.intersectsNode) return range.intersectsNode(sessionRows);
+    } catch { /* Use endpoint containment when an implementation cannot inspect this range. */ }
+    return anchorInside !== focusInside;
+  };
+  const refreshStateFrom = async (state: ConsoleState) => {
+      if (state.sessions && selectionIntersectsSessionRows()) {
+        deferredConsoleState = state;
+        return;
+      }
       const stopped = document.getElementById("execution-state");
       const active = document.getElementById("active-session-count");
       const running = document.getElementById("running-count");
@@ -567,7 +590,6 @@ function clientBootstrap(): void {
       if (active) active.textContent = String(state.activeSessions);
       if (running) running.textContent = String(state.runningProcesses);
       if (updated) updated.textContent = timeText(state.updatedAt);
-      const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
       if (sessionRows && state.sessions) {
         const focusedElement = document.activeElement as HTMLElement | null;
         const focusedRow = focusedElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null;
@@ -694,6 +716,12 @@ function clientBootstrap(): void {
         if (unassignedSection) unassignedSection.hidden = state.unassignedOperations.length === 0;
       }
   };
+  document.addEventListener("selectionchange", () => {
+    if (!deferredConsoleState || !readsAllowed() || selectionIntersectsSessionRows()) return;
+    const latest = deferredConsoleState;
+    deferredConsoleState = undefined;
+    void refreshStateFrom(latest);
+  });
   const refreshState = async () => {
     if (!readsAllowed()) return;
     const screenGeneration = pageGeneration;
@@ -767,6 +795,7 @@ function clientBootstrap(): void {
   });
   window.addEventListener("pagehide", () => {
     pageLeft = true;
+    deferredConsoleState = undefined;
     pageGeneration += 1;
     cancelAutomatic();
     manualPending = false;

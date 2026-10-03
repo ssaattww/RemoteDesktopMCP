@@ -28,6 +28,7 @@ class FakeElement {
   children: FakeElement[] = [];
   parentElement: FakeElement | null = null;
   listeners = new Map<string, (event?: unknown) => void>();
+  onReplaceChildren?: (removed: FakeElement[]) => void;
   queries = new Map<string, FakeElement>();
   closestNodes = new Map<string, FakeElement>();
   rect = { top: 0, bottom: 100, left: 0, right: 100 };
@@ -36,7 +37,7 @@ class FakeElement {
   checked = false;
   addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
   click(name = "click") { this.listeners.get(name)?.({ target: this }); }
-  replaceChildren(...children: FakeElement[]) { this.children = children; for (const child of children) child.parentElement = this; }
+  replaceChildren(...children: FakeElement[]) { this.onReplaceChildren?.(this.children); this.children = children; for (const child of children) child.parentElement = this; }
   append(child: FakeElement) { this.children.push(child); child.parentElement = this; }
   insertRow() { const row = new FakeElement("tr"); this.append(row); return row; }
   insertCell() { const cell = new FakeElement("td"); this.append(cell); return cell; }
@@ -108,7 +109,7 @@ function response(status: number, body: unknown) {
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
-function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; toString: () => string; setBaseAndExtent?: (...args: unknown[]) => void; collapse?: (node: FakeElement, offset: number) => void; extend?: (node: FakeElement, offset: number) => void; removeAllRanges: () => void; addRange: (...args: unknown[]) => void } } = {}) {
+function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; toString: () => string; getRangeAt?: (index: number) => { intersectsNode?: (node: FakeElement) => boolean }; setBaseAndExtent?: (...args: unknown[]) => void; collapse?: (node: FakeElement, offset: number) => void; extend?: (node: FakeElement, offset: number) => void; removeAllRanges: () => void; addRange: (...args: unknown[]) => void } } = {}) {
   FakeEventSource.instances = [];
   const root = new FakeElement(); root.dataset = { sessionId, newestCursor: initialItems[0]?.cursor ?? "c0", oldestCursor: initialItems.at(-1)?.cursor ?? "c-older", hasMoreOlder: String(initialItems.length > 0), initialItems: JSON.stringify(initialItems) };
   const status = new FakeElement();
@@ -894,7 +895,7 @@ test("session row redraw restores its text selection and visible scroll anchor",
   rows.append(oldRow);
   const oldText = oldRow.cells[4]!.children[0]!;
   let restored: unknown[] | undefined;
-  const selection = { anchorNode: oldText, focusNode: oldText, anchorOffset: 1, focusOffset: 3, isCollapsed: false, toString: () => "es", setBaseAndExtent: (...args: unknown[]) => { restored = args; }, removeAllRanges: () => undefined, addRange: () => undefined };
+  const selection = { anchorNode: oldText, focusNode: oldText, anchorOffset: 1, focusOffset: 3, isCollapsed: false, toString: () => "es", getRangeAt: () => ({ intersectsNode: () => true }), setBaseAndExtent: (...args: unknown[]) => { restored = args; }, removeAllRanges: () => undefined, addRange: () => undefined };
   const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
     ? response(200, { ...emptyState, sessions: [{ session_id: "session-1", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "test", working_directory: "C:/work" }] })
     : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
@@ -1017,4 +1018,66 @@ test("a selection with only one endpoint in the session list is not reset", asyn
   await settle(); await settle();
   assert.equal(restoreCount, 0, "a selection crossing the list boundary is not partially rebound");
   assert.equal(clearCount, 0, "a selection crossing the list boundary is not explicitly cleared");
+});
+
+test("a live range crossing the session list defers replacement and applies only the latest state after selection ends", async () => {
+  const rows = new FakeElement("tbody");
+  const oldRow = new FakeElement("tr"); oldRow.dataset.sessionId = "old-session"; rows.append(oldRow);
+  const outside = new FakeElement("p"); const outsideText = new FakeElement("#text"); outsideText.textContent = "before "; const outsideEnd = new FakeElement("#text"); outsideEnd.textContent = " after"; outside.append(outsideText); outside.append(outsideEnd);
+  let selectedText = "before selected session text after";
+  const selection = {
+    anchorNode: outsideText, focusNode: outsideEnd, anchorOffset: 0, focusOffset: 1, isCollapsed: false,
+    toString: () => selectedText,
+    getRangeAt: () => ({ intersectsNode: (node: FakeElement) => node === rows && !selection.isCollapsed }),
+    setBaseAndExtent: () => assert.fail("a selection crossing the list must not be rebound"),
+    removeAllRanges: () => assert.fail("a selection crossing the list must not be cleared"), addRange: () => undefined,
+  };
+  // A DOM Range whose endpoints are outside this subtree still selects content
+  // within it; removing that content changes the live selection's text.
+  rows.onReplaceChildren = (removed) => { if (removed.some((child) => child === oldRow)) selectedText = "before after"; };
+  let stateRequests = 0;
+  const session = (id: string) => ({ session_id: id, created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: id, working_directory: "C:/work" });
+  const ui = boot(async (url) => {
+    const path = new URL(url, "http://local.test").pathname;
+    if (path === "/api/console-state") {
+      stateRequests += 1;
+      return response(200, { ...emptyState, activeSessions: stateRequests, sessions: [session(stateRequests === 1 ? "first-state" : "latest-state")] });
+    }
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": rows, "active-session-count": new FakeElement() }, "", { selection });
+  await settle(); await settle();
+  assert.equal(rows.children[0], oldRow, "the list remains intact while a live range intersects it");
+  assert.equal(selectedText, "before selected session text after", "the live range's selected text remains intact");
+
+  ui.newest.click();
+  await settle(); await settle(); await settle();
+  assert.equal(stateRequests, 2, "a later successful state response can replace the deferred state");
+  assert.equal(rows.children[0], oldRow, "later refreshes also defer while selection crosses the list");
+
+  selection.isCollapsed = true;
+  selectedText = "";
+  ui.documentListeners.get("selectionchange")?.();
+  await settle();
+  assert.equal(rows.children[0]?.dataset.sessionId, "latest-state", "selection release renders the newest deferred state");
+  assert.equal(ui.documentStub.getElementById("active-session-count")?.textContent, "2");
+});
+
+test("pagehide and auth expiry discard a deferred session state", async () => {
+  for (const ending of ["pagehide", "auth-expired"] as const) {
+    const rows = new FakeElement("tbody"); const oldRow = new FakeElement("tr"); oldRow.dataset.sessionId = "old-session"; rows.append(oldRow);
+    const outside = new FakeElement("p"); const outsideText = new FakeElement("#text"); outsideText.textContent = "outside"; outside.append(outsideText);
+    const insideText = new FakeElement("#text"); insideText.textContent = "inside";
+    const selection = { anchorNode: outsideText, focusNode: insideText, anchorOffset: 0, focusOffset: 2, isCollapsed: false, toString: () => "outside inside", getRangeAt: () => ({ intersectsNode: (node: FakeElement) => node === rows && !selection.isCollapsed }), removeAllRanges: () => undefined, addRange: () => undefined };
+    const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+      ? response(200, { ...emptyState, sessions: [{ session_id: "deferred-session", created_at: "2026-10-01T00:00:00Z", state: "active", active: true }] })
+      : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+    await settle(); await settle();
+    assert.equal(rows.children[0], oldRow, "the initial response is deferred");
+    if (ending === "pagehide") ui.windowListeners.get("pagehide")?.();
+    else ui.sources[0]!.dispatch("auth-expired");
+    selection.isCollapsed = true;
+    ui.documentListeners.get("selectionchange")?.();
+    await settle();
+    assert.equal(rows.children[0], oldRow, `${ending} discards deferred updates`);
+  }
 });
