@@ -64,6 +64,17 @@
 - UI form/API integration: `--test-name-pattern='Todo forms enforce CSRF'` exit `0`、1/1 pass。CSRF form add, stale-version conflict redirect, missing CSRF 403, enforcement toggle, non-owner 404を確認。現実装で既にGreenだったため新たなRedとしては数えない。
 - 最終focused回帰: `tsx --test test/issue-56-shared-todo.test.ts` exit `0`、12 tests / 12 pass / 0 fail。stdoutに12件passと集計、stderr空。
 - 最終型検査: `tsc -p tsconfig.json --noEmit` exit `0`、stdout/stderr空。
+- phase follow-up開始HEAD: `11301d326b0195ea5d2bb644cb930b17f5f30049`。branch `feature/issue-56-shared-todo`。node_modulesはlock SHA一致済みsiblingから一時symlink、installなし。
+- Red（kill retry/serial/ownership）: `--test-name-pattern='process kill is owner scoped'` exit `1`。fixture準備後、同時要求では1件だけterminate dispatchされ、他session/他userは拒否。しかし2秒後のterminating再要求が `Process id is stale or finished.` となる assertion failure。実装後同focused command exit `0`、1/1 pass。同時重複は1 dispatchのみ、2秒境界再要求成功、finished processは拒否、owner/session mismatch拒否。
+- Red（process kill internal audit）: `--test-name-pattern='accepted process kill remains successful'` exit `1`。termination accepted後の`process.kill_requested`監査故障が`Operation failed.`に変換される。Greenではイベント監査故障を捕捉し、`state: terminating`, `audit_warning: true`, `applied: true`を返しterminateは一度のみ。Greenを他のpriority focused群と併せexit `0`、該当1/1 pass。
+- Red（transfer cancel）: `--test-name-pattern='transfer cancellation performs owner cleanup'` exit `1`。同一session/userのcancel後に監査故障が`Operation failed.`。Greenで`cancelled`, warning, applied trueを返す。transfer IDを別session/別userから使用する試行は拒否されsnapshotは保持、その後正規所有者のみ取消してsnapshot cleanupを確認。combined Green 2/2 pass（emergency stop含む）。
+- emergency stop audit failure: 最初のテスト実行はテスト用dataDirが存在/保護されずrecovery marker作成に失敗したsetup failure。保護した一時dataDirへ切替えて再実行後exit `0`。監査書込みを全て失敗させてもstop状態永続化、session close、active transfer cancelとsnapshot cleanupが継続。
+- Red（safe exception wrapper post applied）: `--test-name-pattern='common wrapper marks a completed safe cleanup'` exit `1`。pre/post operation audit故障でsession closeは完了するが応答に`applied`がない。Greenでclosed + warning + applied trueを確認。
+- Red（ordinary `operation.received` failure）: 追加caseでexit `1`。audit receipt failure後に有効なゲート対象操作がdispatchされたため期待した`TODO_GATE_AUDIT_UNAVAILABLE` rejectionがなく、counterが副作用ルートへ到達。Greenでゲート有効中はreceipt記録失敗でfail-closed、applied falseとし、対象focused test 1/1 pass。
+- 共通wrapper適用不確定結果: audit `operation.started`故障で副作用前に`TODO_GATE_AUDIT_UNAVAILABLE/applied:false`、success-event故障後にwarning/applied true、adapter dispatch後エラー+`operation.failed` audit故障で`TODO_OPERATION_OUTCOME_UNKNOWN/applied:"unknown"`かつdispatch一度をfocused testで確認。
+- 時計異常追加確認: `performance.now()` NaN、wall-clock rollback、clock audit reasonは`clock_unavailable`/`clock_anomaly`それぞれ拒否・監査。case focused exit `0`、1/1 pass。
+- phase最終focused regression: `tsx --test test/issue-56-shared-todo.test.ts` exit `0`、20 tests / 20 pass / 0 fail。stdoutにpass行と集計、stderr空。
+- phase最終型検査: `tsc -p tsconfig.json --noEmit` exit `0`、stdout/stderr空。
 
 ## 対象ファイル
 
@@ -72,6 +83,8 @@
 - 変更: `test/issue-56-shared-todo.test.ts`（直接MCP harness、初期version 0/null、owner境界、更新、299999/300000ms、Todo監査故障回復、gate監査故障時process起動抑止、上部配置、HTTP owner/CSRFテスト）。
 - follow-up変更: `src/index.ts`（clock anomaly監査event、stale時process status/outputのcached snapshot例外、session close内部audit failureの適用済みwarning応答）。
 - follow-up変更: `test/issue-56-shared-todo.test.ts`（clock anomaly/reset、OFF/ON grace、timestamp欠落、stale process cache、session close audit failure、Todo UI form CSRF/conflict/owner integration）。
+- 第2 follow-up変更: `src/index.ts`（`process_kill` terminating再要求を2秒単調時計throttle付きで直列受付、finished拒否、process kill内部監査warningとknown/unknown applied表現、transfer cancel audit warning、固定安全操作の共通wrapper warning応答、普通ゲート操作の`operation.received`監査故障fail-closed）。
+- 第2 follow-up変更: `test/issue-56-shared-todo.test.ts`（sync barrier付きkill重複要求・retry/owner境界、kill/transfer/session cleanup audit failure、emergency stop全audit故障cleanup、wrapper pre/post/unknown、clock rollback/monotonic unavailable）。
 - レポート: 本節以降のchild-owned sectionsを更新。Dispatch profile節は編集していない。
 
 ## 指摘事項
@@ -79,11 +92,14 @@
 - 指摘: 期限拒否 `TODO_STALE` はMCP応答内にmachine-readable code/reason/actionを載せる。通常操作の `todo.gate_allowed` 監査失敗は処理関数実行前にfail-closed。Todo updateのstate差替え後監査失敗は `audit_warning: true`, `applied: true` を返す。HTTP APIは既存session active owner確認とCSRF helperを使う。
 - follow-upでclock anomaly/unavailableを`todo.clock_anomaly`として記録（監査故障でもstale拒否維持）、stale時の所有確認済みprocess status/outputは`todoStale` contextを使い保存済みsnapshotだけを返すよう追加。session closeの内部監査失敗はcleanup済み応答に`audit_warning`と`applied`を付ける。
 - UIのPOST formはCSRF、active-session owner、version conflictを通ることをintegrationで確認。ON/OFF formは状態反映を確認。
+- process_killは`processLock`で直列化し、running/terminating owner processを限定、terminating再要求は単調時計2秒未満で拒否、2秒後許可、finished状態は拒否。termination handler後の監査失敗は拒否ではなくwarningと結果の確度（known accepted=true, known rejected=false, timeout=unknown）を返す。
+- transfer cancelはowner/session一致後に状態遷移、cleanup、terminal記録を行い、イベント監査失敗は`audit_warning`/`applied:true`として返す。Emergency Stopは監査故障を理由にprocess/session/transfer cleanupを中断しないことをテスト。
+- wrapperの`operation.received` / `operation.started`失敗時、Todo gate有効な普通操作はdispatch前に`TODO_GATE_AUDIT_UNAVAILABLE/applied:false`で止める。固定例外は処理を継続し、後監査欠落時に処理別の適用結果を返す。通常操作がdispatch後に失敗し結果を確定できない場合は`TODO_OPERATION_OUTCOME_UNKNOWN/applied:"unknown"`で自動再試行を避ける。
 
 ## 結果
 
-- 結果: 有効RedからTodo tools/state、初期null扱い、299999ms許可/300000ms拒否、更新後基準再確立、監査故障の基本分岐、session detail最上部UI、owner/CSRF保護済みHTTP APIまで実装した。follow-upでclock anomaly専用監査、OFF/ON猶予・timestamp破損回復、stale process snapshot、session close audit warningを追加。最終focused実行12/12、TypeScript `--noEmit`成功。UI form CSRF/conflict/owner統合は追加確認済み。現在の差分は親管理の区切りcommit/push待ち。
+- 結果: 有効RedからTodo/MCP/API/UI、時計、監査、safe exception経路を拡充。第2 follow-upでprocess kill直列化/2秒throttle/retry、transfer cancelとEmergency Stop cleanupの監査故障継続、wrapper pre/post監査失敗のapplied true/false/unknown semanticsを追加。phase focused 20/20、TypeScript `--noEmit`成功。未commitで親管理のcommit/push・通常review待ち。
 
 ## リスク
 
-- 未解決: process_killの2秒シリアル再試行・terminating状態での再要求・finished process拒否は未実装/未検証。transfer_cancelとemergency stopの各cleanup・監査故障経路は未検証。共通wrapperのpre/post監査故障全位置、特に処理適用結果が不確定な場合の`applied: unknown`応答は未検証。clock逆行/monotonic unavailableの個別ケース、監査故障時にclock anomalyを記録できない警告表現、Todo同時更新競合の追加MCP/API競合検証、より広い既存回帰suiteは未完了または未検証。作業差分は未commitであり、親の通常確認・commit/push・reviewが必要。
+- 未解決: process kill timeout outcomeの実際のadapter異常系におけるunknown表示は直接まだ検証していない（コードでは`applied:"unknown"`を設定）。Emergency Stop persistence自体の失敗時は安全側で停止状態を維持し例外返却するため、返却/運用UIの故障提示までは未検証。複数接続からの実network raceは同期barrier付きin-memory MCP raceで代替検証し、実DC bridgeは未使用。Todo同時更新の追加MCP/API競合テスト、より広い既存回帰suiteは未実行。現在差分は未commitで親の通常確認・commit/push・review待ち。

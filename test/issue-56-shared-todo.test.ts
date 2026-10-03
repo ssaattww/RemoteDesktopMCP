@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -28,8 +28,9 @@ async function harness() {
   const service = new RemoteDesktopService(config);
   const audits: Array<{ event: string; fields: Record<string, unknown> }> = [];
   let auditFailure: Error | undefined;
+  let auditFailureEvents: Set<string> | undefined;
   service.audit = async (event, fields) => {
-    if (auditFailure) throw auditFailure;
+    if (auditFailure && (!auditFailureEvents || auditFailureEvents.has(event))) throw auditFailure;
     audits.push({ event, fields });
   };
 
@@ -50,7 +51,20 @@ async function harness() {
     };
   }
 
-  return { service, audits, connect, setAuditFailure(error?: Error) { auditFailure = error; }, async close() { await service.close(); } };
+  return { service, audits, connect, setAuditFailure(error?: Error, events?: string[]) { auditFailure = error; auditFailureEvents = events ? new Set(events) : undefined; }, async close() { await service.close(); } };
+}
+
+function seedProcess(service: RemoteDesktopService, values: { id?: string; sessionId: string; user?: string; state?: "running" | "terminating" | "finished"; output?: string }) {
+  const internals = service as unknown as { processes: Map<string, unknown>; currentProcessOwners: Map<string, string>; dc: { currentGeneration(): string; generation?: string; client?: unknown } };
+  const generation = "issue-56-process-generation";
+  internals.dc.generation = generation;
+  internals.dc.client = { close: async () => undefined };
+  const id = values.id ?? "owned-process-issue-56";
+  const pid = 4242;
+  const user = values.user ?? "owner@example.test";
+  internals.processes.set(id, { id, sessionId: values.sessionId, user, generation, pid, state: values.state ?? "running", output: values.output ?? "cached process output", cursor: 0 });
+  if (values.state !== "finished") internals.currentProcessOwners.set(`local:${generation}:${pid}`, id);
+  return { id, pid, generation, internals };
 }
 
 async function consoleHarness() {
@@ -244,6 +258,82 @@ test("stale process status returns the cached snapshot without reading Desktop C
   }
 });
 
+test("process kill is owner scoped, serializes duplicates, retries terminating after two seconds, and rejects finished processes", async () => {
+  const originalNow = performance.now.bind(performance);
+  let monotonicNow = originalNow();
+  performance.now = () => monotonicNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  const other = await h.connect("other@example.test");
+  let releaseFirst!: (value: string) => void;
+  let signalFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+  let terminateCalls = 0;
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "kill retry test" });
+    const sessionId = String(opened.session_id);
+    const wrongSession = await owner.call("session_open", { working_directory: process.cwd(), purpose: "other process session" });
+    const processFixture = seedProcess(h.service, { sessionId });
+    h.service.cfg.processAdapter = {
+      async start() { return ""; },
+      async read() { return ""; },
+      async terminate() {
+        terminateCalls += 1;
+        if (terminateCalls === 1) {
+          signalFirst();
+          return new Promise<string>((resolve) => { releaseFirst = resolve; });
+        }
+        return "Successfully initiated termination of session";
+      },
+      async sessions() { return `PID: ${processFixture.pid}`; },
+    };
+    await assert.rejects(owner.call("process_kill", { session_id: String(wrongSession.session_id), node_id: "local", process_id: processFixture.id }), /session|Process/i);
+    await assert.rejects(other.call("process_kill", { session_id: sessionId, node_id: "local", process_id: processFixture.id }), /session|Process/i);
+    const first = owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: processFixture.id });
+    await firstStarted;
+    const concurrent = owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: processFixture.id });
+    releaseFirst("Successfully initiated termination of session");
+    const pair = await Promise.allSettled([first, concurrent]);
+    assert.equal(pair.filter((entry) => entry.status === "fulfilled").length, 1, "the process lock and throttle must admit one concurrent termination request");
+    assert.equal(pair.filter((entry) => entry.status === "rejected").length, 1);
+    assert.equal(terminateCalls, 1);
+    monotonicNow += 2_000;
+    const retried = await owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: processFixture.id });
+    assert.equal(retried.state, "terminating");
+    assert.equal(terminateCalls, 2);
+    const item = h.service.processes.get(processFixture.id)! as unknown as { state: string };
+    item.state = "finished";
+    await assert.rejects(owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: processFixture.id }), /Process/i);
+    assert.equal(terminateCalls, 2);
+  } finally {
+    performance.now = originalNow;
+    await owner.close();
+    await other.close();
+    await h.close();
+  }
+});
+
+test("accepted process kill remains successful with an applied warning when its event audit fails", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "kill audit failure" });
+    const sessionId = String(opened.session_id);
+    const fixture = seedProcess(h.service, { sessionId });
+    let terminateCalls = 0;
+    h.service.cfg.processAdapter = { async start() { return ""; }, async read() { return ""; }, async terminate() { terminateCalls += 1; return "Successfully initiated termination of session"; }, async sessions() { return `PID: ${fixture.pid}`; } };
+    h.setAuditFailure(new Error("kill audit unavailable"), ["process.kill_requested"]);
+    const result = await owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: fixture.id });
+    assert.equal(result.state, "terminating");
+    assert.equal(result.audit_warning, true);
+    assert.equal(result.applied, true);
+    assert.equal(terminateCalls, 1);
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
 test("Todo updates remain available when audit storage fails and report the committed state", async () => {
   const h = await harness();
   const owner = await h.connect("owner@example.test");
@@ -282,6 +372,64 @@ test("session close completes when its audit write fails and reports the applied
   }
 });
 
+test("transfer cancellation performs owner cleanup when its audit write fails", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  const other = await h.connect("other@example.test");
+  const temp = await mkdtemp(path.join(tmpdir(), "rdmcp-issue-56-cancel-"));
+  const snapshot = path.join(temp, "snapshot");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "transfer cancel audit test" });
+    const sessionId = String(opened.session_id);
+    const wrongSession = await owner.call("session_open", { working_directory: process.cwd(), purpose: "wrong transfer session" });
+    const transferId = "owned-transfer-issue-56";
+    await writeFile(snapshot, "private transfer snapshot");
+    (h.service.transfers as unknown as Map<string, unknown>).set(transferId, { id: transferId, direction: "download", sessionId, nodeId: "local", rootId: "root", target: snapshot, snapshot, size: 24, sha256: "", offset: 0, touched: Date.now(), state: "active" });
+    await assert.rejects(owner.call("file_transfer_cancel", { session_id: String(wrongSession.session_id), transfer_id: transferId }), /Transfer/i);
+    await assert.rejects(other.call("file_transfer_cancel", { session_id: sessionId, transfer_id: transferId }), /session/i);
+    await access(snapshot);
+    h.setAuditFailure(new Error("audit unavailable"), ["transfer.cancel"]);
+    const cancelled = await owner.call("file_transfer_cancel", { session_id: sessionId, transfer_id: transferId });
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(cancelled.audit_warning, true);
+    assert.equal(cancelled.applied, true);
+    assert.equal((h.service.transfers.get(transferId) as unknown as { state: string }).state, "cancelled");
+    await assert.rejects(access(snapshot));
+  } finally {
+    await owner.close();
+    await other.close();
+    await h.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("emergency stop persists the stop and cleans session resources when audit storage fails", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  const stopDataDir = await mkdtemp(path.join(tmpdir(), "rdmcp-issue-56-stop-"));
+  try {
+    await protectPrivateDirectory(stopDataDir);
+    h.service.cfg.dataDir = stopDataDir;
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "emergency stop audit test" });
+    const sessionId = String(opened.session_id);
+    const snapshot = path.join(stopDataDir, "active.snapshot");
+    await writeFile(snapshot, "cleanup me");
+    const transferId = "stop-cancel-transfer-issue-56";
+    (h.service.transfers as unknown as Map<string, unknown>).set(transferId, { id: transferId, direction: "download", sessionId, nodeId: "local", rootId: "root", target: snapshot, snapshot, size: 10, sha256: "", offset: 0, touched: Date.now(), state: "active" });
+    h.service.cfg.processAdapter = { async start() { return ""; }, async read() { return ""; }, async terminate() { return ""; }, async sessions() { return "[]"; } };
+    h.setAuditFailure(new Error("audit unavailable"));
+    const stopped = await h.service.stopUserExecution("owner@example.test");
+    assert.equal(stopped.stopped, true);
+    assert.equal(h.service.sessions.get(sessionId)?.state, "closed");
+    assert.equal((h.service.transfers.get(transferId) as unknown as { state: string }).state, "cancelled");
+    await assert.rejects(access(snapshot));
+  } finally {
+    await owner.close();
+    await h.close();
+    await rm(stopDataDir, { recursive: true, force: true });
+  }
+});
+
 test("a failed gate audit prevents dispatching an ordinary side effect", async () => {
   const h = await harness();
   const owner = await h.connect("owner@example.test");
@@ -298,6 +446,92 @@ test("a failed gate audit prevents dispatching an ordinary side effect", async (
     await assert.rejects(owner.call("process_start", { session_id: String(opened.session_id), node_id: "local", command: "echo side effect", timeout_ms: 1000 }), /TODO_GATE_AUDIT_UNAVAILABLE/);
     assert.equal(started, 0);
   } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("common wrapper keeps ordinary gate audit failures fail closed and reports post-audit results truthfully", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  let starts = 0;
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "wrapper audit phases" });
+    const sessionId = String(opened.session_id);
+    seedProcess(h.service, { sessionId });
+    h.service.cfg.processAdapter = { async start() { starts += 1; return "PID 9"; }, async read() { return ""; }, async terminate() { return ""; }, async sessions() { return "[]"; } };
+    h.setAuditFailure(new Error("start audit unavailable"), ["operation.started"]);
+    await assert.rejects(owner.call("process_start", { session_id: sessionId, node_id: "local", command: "echo gated", timeout_ms: 1000 }), /TODO_GATE_AUDIT_UNAVAILABLE/);
+    assert.equal(starts, 0, "pre-handler audit failure must prevent the side effect");
+    h.setAuditFailure(new Error("receipt audit unavailable"), ["operation.received"]);
+    await assert.rejects(owner.call("process_start", { session_id: sessionId, node_id: "local", command: "echo unreceived", timeout_ms: 1000 }), /TODO_GATE_AUDIT_UNAVAILABLE/);
+    assert.equal(starts, 0, "failed receipt audit must also prevent an enabled gated operation");
+    h.setAuditFailure(new Error("post audit unavailable"), ["operation.succeeded"]);
+    const listed = await owner.call("node_list", { session_id: sessionId });
+    assert.equal(listed.audit_warning, true);
+    assert.equal(listed.applied, true);
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("common wrapper marks a completed safe cleanup applied when pre and post audit writes fail", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "safe wrapper result semantics" });
+    const sessionId = String(opened.session_id);
+    h.setAuditFailure(new Error("wrapper audit unavailable"), ["operation.received", "operation.started", "operation.succeeded"]);
+    const closed = await owner.call("session_close", { session_id: sessionId });
+    assert.equal(closed.closed, true);
+    assert.equal(closed.audit_warning, true);
+    assert.equal(closed.applied, true, "the response must say cleanup was applied despite missing wrapper audit records");
+    assert.equal(h.service.sessions.get(sessionId)?.state, "closed");
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("ordinary side effect failures after dispatch return an unknown applied state without retry", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  let dispatches = 0;
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "unknown outcome semantics" });
+    h.service.cfg.processAdapter = { async start() { dispatches += 1; throw new Error("adapter lost response after dispatch"); }, async read() { return ""; }, async terminate() { return ""; }, async sessions() { return "[]"; } };
+    h.setAuditFailure(new Error("completion audit unavailable"), ["operation.failed"]);
+    await assert.rejects(owner.call("process_start", { session_id: String(opened.session_id), node_id: "local", command: "echo possibly started", timeout_ms: 1000 }), /TODO_OPERATION_OUTCOME_UNKNOWN.*unknown/);
+    assert.equal(dispatches, 1, "an uncertain operation must not be automatically retried");
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
+test("clock rollback and unavailable monotonic time fail closed and record the anomaly reason", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  let monotonicNow = originalNow();
+  let wallNow = originalWallNow();
+  performance.now = () => monotonicNow;
+  Date.now = () => wallNow;
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "clock failure cases" });
+    const sessionId = String(opened.session_id);
+    monotonicNow += 10;
+    wallNow -= 1;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE/);
+    assert.ok(h.audits.some((entry) => entry.event === "todo.clock_anomaly" && entry.fields.reason === "clock_anomaly"));
+    performance.now = () => Number.NaN;
+    await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE/);
+    assert.ok(h.audits.some((entry) => entry.event === "todo.clock_anomaly" && entry.fields.reason === "clock_unavailable"));
+  } finally {
+    performance.now = originalNow;
+    Date.now = originalWallNow;
     await owner.close();
     await h.close();
   }
