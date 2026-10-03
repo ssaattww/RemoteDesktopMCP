@@ -87,3 +87,61 @@
 - 保留: ProcessAdapter fixtureはtimeout code -32001の共通結果を検証したが、実Desktop Commander adapter/network timeout mappingは未検証。
 - NREV-56-01のfixtureはtodo.gate_allowedの故障も設定するものの、processRead例外は当該監査を発行しない。したがって検証した監査障害はoperation.received。これは現在のsafe exception経路の明示的挙動。
 - 次の対応: 親がrun 37157521297の最終jobと失敗診断を確定する。原因が製品コードなら新HEADを対象に修正検証する。CI evidenceが成功または原因解消を示したらこのincompleteを更新する。実DC timeoutは利用可能な実環境で別途検証する。
+
+## 2026-10-03 CI修正の同一reviewer検証
+
+### 対象と独立性
+
+- レビュー種別: NREV closure後のCI修正に限定したfix verification。過去の4709fc6判定は削除・上書きせず、その時点でincompleteだった履歴として保持する。
+- 今回target HEAD: 84a3abb6a7a043f30694d0079bd6db5cc6421a19。parent: 4709fc61c297232008ce3ae164bf1548ed62ab37。branch: feature/issue-56-shared-todo。作業treeはclean。HEADと親をrev-parseで確認し、target差分はtest/issue-56-shared-todo.test.ts、reports/issue-56-implementation-20261003203851.md、本レポートのみ。src/production code変更なし。
+- reviewer identityは/root/issue56_normal_reviewerで継続。元指定profile gpt-6-luna / medium / fork noneを保持。runtime profileと実効roleは観測不能のままであり、null/unknownを維持して推測しない。
+- 範囲はCI失敗再現・テスト時計/境界修正・SDK timeout fixture・検証証拠・新HEADのCI状態に限る。前回のNREV-56-01〜03 finding IDsとmedium severityを保持し、再分類なし。
+
+### 確認結果
+
+- CI失敗再現: 親のCI診断記録はrun 37157521297のUbuntu失敗がprocess kill owner-scoped testのretry箇所だけと記録。元のclock固定値123.45で式(123.45 + 2000) - 123.45が1999.9999999999998になることをローカル算術でも確認した。厳密な2秒未満比較で2000ms retryがthrottleされるため、製品codeではなくfloating-point test fixtureが原因という説明と一致する。
+- 境界修正: テスト時計を整数10000に固定し、1999msではretryを拒否、さらに1ms経過した2000ms境界でretryを許可する。productionの2秒制限やsrc/index.tsは変更されていない。
+- timeout fixture: test/issue-56-shared-todo.test.tsのDesktop Commander SDK request timeout testはMCP SDK Client/McpServerとInMemoryTransportで遅延requestを行い、実SDK RequestTimeout error code -32001を確認する。そのerrorをサービスのDesktop Commander call boundaryへ注入し、process_kill wrapperでtermination_unconfirmed=true、audit_warning=true、applied=unknown、dispatch 1回を検証する。これはSDK error codeとサービスwrapperの組成fixtureであり、実Desktop Commander adapter、実子プロセス、実ネットワークtimeoutを実行した証拠ではない。
+- テスト/品質証拠: 親のHEAD一致記録によるとfocused Issue #56 23/23、timeout fixture 1/1、npm run lint exit 0（Markdown 106 files / 0 issues、design-term lint含む）、npm run check exit 0、npm run build exit 0、npm test exit 0（166 total / 155 pass / 11 skip / 0 fail）。レビューでは再実行していない。これらのローカル検証記録は84a3abbに結び付けられている。
+- 既存NREV closureの保持: NREV-56-01 (medium) closed、NREV-56-02 (medium) closed、NREV-56-03 (medium) closed。今回の差分はテスト/報告のみでproduction pathを変えず、該当findingを再開する証拠はない。
+- 新たなfindingなし。Severity reclassificationなし。
+
+### 今回のカバレッジ処置
+
+- CI failure reproduction / deterministic retry test clock / 1999ms deny / 2000ms allow: checked_no_finding（原因を再現値と比較演算に結び付け、整数時計と明示境界assertionを確認）。
+- SDK in-memory RequestTimeout code -32001 / timeout applied unknown / no redispatch: checked_no_finding（SDK-generated timeout errorを用いた実compositionを確認）。
+- production source unchanged / 2-second production throttle unchanged: checked_no_finding。
+- prior NREV-56-01〜03 identities and severities: checked_no_finding（全件closed mediumを保持）。
+- target HEAD local lint/check/build/focused/full npm test evidence: checked_no_finding（提示された実行記録を照合。自ら再実行したとは主張しない）。
+- New exact-HEAD GitHub CI: held（run 37159591840起動済み、Ubuntu success、Windows 3 shardのtest実行中）。
+- Real Desktop Commander subprocess/network timeout: held（fixture外）。
+- 未探索: なし。
+
+### 新targetのCI状態と判定
+
+- 新HEADに紐付くGitHub Actions run 37159591840を読み取り確認。直近の取得時点でUbuntu jobはlint/typecheck/build/test全てsuccess。Windows shard 1/3・2/3・3/3はtypecheck/build success後、test実行中。workflow run全体はin_progressで最終結果ではない。
+- 旧run 37157521297のjobsを再取得: Ubuntu test failure、Windows shards 1/3・2/3・3/3すべてsuccess。旧runは既知の再現可能なfloating-point test fixture失敗を含むため新target CIの代替にしない。
+- 84a3abbのコード・focused evidenceから新しいfindingはないが、新run未完了のため今回のverdictも暫定的にincompleteとする。新runの結果が判明した時点でCI証拠を更新する。
+
+### Completeness matrix（CI修正follow-up）
+
+| 対象 | 必要対応 | production/test pathと組成fixture | focused/CI evidence | disposition |
+| --- | --- | --- | --- | --- |
+| 旧CI失敗の再現修正 | floating-point test timeを避け、境界直前拒否と境界許可を決定的に検証 | process_kill retry test、整数clock 10000、1999ms deny後2000ms allow。production source unchanged | 親提供の旧run diagnosisと今回のtest diff、および算術式の実値を照合 | closed |
+| SDK timeout fixture | SDK実エラーcode -32001を生成し、wrapperでunknown/警告/一回dispatchを証明 | Client + McpServer + InMemoryTransport遅延fixtureから得たtimeout errorをDesktop Commander call boundaryへ注入 | timeout fixture 1/1 passの親提供記録。実DC/subprocess/network経路は未検証 | fixture scopeでclosed、実環境はheld |
+| 新target CI | 84a3abb一致runの全job結論を確認 | run 37159591840 | 読み取り時点でin_progress、Ubuntu success、Windows 3 shardのtest実行中（typecheck/build success） | held |
+| NREV-56-01〜03 | ID/severityを維持して過去閉鎖所見をcarry forward | 前回matrixのproduction paths/composition tests。今回差分はtest/reportのみ | 前回検証済み。今回production変更なし | 全件closed、medium維持 |
+
+### 残るリスクと次の対応
+
+- 新run 37159591840はレビュー時点で実行中。Ubuntuはsuccess、Windows 3 shardはtest実行中であり、最終job結論と新HEAD CI全体の結果は未確認。親が同runを追跡し、失敗があれば診断と別targetのbounded reviewを判断する。
+- SDKのin-memory fixtureはSDK RequestTimeout実値を確かめるが、Desktop Commander外部transportが同じエラーへ写像するかは検証しない。実DC subprocess/network timeoutは未検証。
+- 次の対応: 新runが全job完了した後、CI結果を本報告へ追記し、成功を確認できた場合に限り今回incompleteを最終判定へ更新する。
+
+## 親による2回目CI失敗の診断・修正
+
+- 対象: run `37159591840` のWindows shard 2/3。failure logはGitHub workflow-job logs connectorで取得。UbuntuおよびWindows shard 1/3・3/3はsuccess。head 84a3abbのsame-reviewer finding closureはNREV-56-01〜03 closed、medium維持、新コードfindingなし。総合verdictはCI未完了によりincompleteだった。
+- 診断: `test/regressions.test.ts:933` のNR003/NR004 portable process testが、自然終了後の`process.exit` auditを最大1.5秒（30回×50ms）だけ待っていた。runでは52 tests中51 passし、当該assertionだけ失敗。製品のprocess watcher code pathに対する新たなfindingではなく、Windows shard負荷と固定短期待機の競合。
+- 修正: test-only poll budgetを最大10秒（200回×50ms）に変更。status/output polling fallbackなし。Production codeは変更していない。
+- 修正後ローカル証拠: 該当NR003/NR004 focused commandは2/2 pass。lint、check、buildもexit 0。full `npm test` は166 tests / 155 pass / 11 skipped / 0 failed。
+- 次段階: 親は新しいheadをpushし、同一reviewerの再確認と新head CIの全job完了後に判定を更新する。実Desktop Commander subprocess/network timeout自体は未検証であり、SDK in-memory RequestTimeout fixtureでの境界検証との区別を保つ。

@@ -134,3 +134,12 @@
 - timeout fixture: SDK in-memory transportで実際の `RequestTimeout` error code `-32001` を発生させ、process killのDesktop Commander既定呼び出し境界に渡す安全fixtureを追加。タイムアウト後はtermination unconfirmed・`applied: unknown`、dispatch一回のみを確認。実Desktop Commander子プロセスや実ネットワーク障害は起動していない。
 - 最終ローカル検証: Issue #56 focused 23/23 pass、timeout fixture 1/1 pass、`npm run lint` exit 0（Markdown 106 files / 0 issues、design-term lint含む）、`npm run check` exit 0、`npm run build` exit 0、`npm test` exit 0（166 tests / 155 pass / 11 skip / 0 fail）。
 - 次段階: 現在の差分をpushした後、同一reviewerの修正確認、新HEADのGitHub CI、最終reviewを待つ。実DC外部transport timeoutは未検証のまま区別する。
+
+## 親によるWindows CI待機不足の診断・修正
+
+- 次の対象CI: run `37159591840`、PR merge-check SHA `6d7ecb1e6f1669e444d387837f507c39d29b59bd`（head `84a3abb` をmain `bfe3793` と合成）。UbuntuとWindows shard 1/3・3/3は成功。Windows shard 2/3だけtestが失敗。
+- 失敗箇所: `test/regressions.test.ts:933` の NR003/NR004テストで、自然終了プロセスの `process.exit` auditをstatus/output pollingなしに待つassertion。Windows run logではこのsubtest以外の51 testsがpassし、当該assertionは `natural exit must be audited without process status/output polling` で失敗。
+- 原因と修正: 自然終了childは150msでexit、service watcherは250ms周期だが、testのaudit polling上限が30×50ms=1.5sだけだった。Windows shardの重い実行下では期限内にwatcher結果が届かないため、production codeを変えず、test-only上限を200×50ms=10sに拡張。fallbackとしてのstatus/output pollingは追加していない。
+- focused証拠: `node --import tsx --test --test-name-pattern='NR003 and NR004: searches return every page' test/regressions.test.ts` exit 0（2 tests pass）。
+- 84a3abbからの全体再検証: lint exit 0（Markdown 106 files / 0 issues、design terms含む）、check exit 0、build exit 0、full `npm test` exit 0（166 tests / 155 pass / 11 skip / 0 fail、duration 133742ms）。
+- 次段階: test-onlyの追加差分を新commit/pushし、同一reviewerに修正確認を依頼、新head GitHub CIの全platform/shard結果を確認する。前の失敗runは修正対象外コードのテストwait budget不足として区別する。
