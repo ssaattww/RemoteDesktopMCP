@@ -347,6 +347,14 @@ export class RemoteDesktopService {
     const session = this.sessions.get(sessionId);
     return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
   }
+  async resolveSessionWorkingDirectory(supplied: string): Promise<string | undefined> {
+    try {
+      const resolved = await realpath(supplied);
+      if (!(await lstat(resolved)).isDirectory()) return undefined;
+      await access(resolved, constants.X_OK);
+      return resolved;
+    } catch { return undefined; }
+  }
   async updateSessionMetadata(user: string, sessionId: string, input: unknown) {
     const fail = (status: number, error: string, extra: { currentVersion?: number } = {}) => ({ ok: false as const, status, error, ...extra });
     if (!isRecord(input)) return fail(400, "invalid_request");
@@ -358,21 +366,18 @@ export class RemoteDesktopService {
     const hasPurpose = Object.hasOwn(input, "purpose");
     if (!hasWorkingDirectory && !hasPurpose) return fail(400, "invalid_request");
 
-    return this.processLock.run(() => this.executionStateLock.run(async () => {
-      const session = this.sessions.get(sessionId);
-      if (!session || session.user !== user || session.state !== "active" || session.expires <= Date.now() || this.executionStateFor(user).stopped) return fail(404, "session_unavailable");
-      if (session.version !== input.expectedVersion) return fail(409, "version_conflict", { currentVersion: session.version });
-
+    return this.processLock.run(async () => {
+      const available = (session: Session | undefined) => Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now() && !this.executionStateFor(user).stopped);
+      const initial = this.sessions.get(sessionId);
+      if (!available(initial)) return fail(404, "session_unavailable");
+      if (initial!.version !== input.expectedVersion) return fail(409, "version_conflict", { currentVersion: initial!.version });
       let workingDirectory: string | undefined;
       if (hasWorkingDirectory) {
         if (typeof input.workingDirectory !== "string") return fail(400, "invalid_working_directory");
         const supplied = input.workingDirectory.trim();
         if (!supplied || supplied.length > 4096 || !path.isAbsolute(supplied)) return fail(400, "invalid_working_directory");
-        try {
-          workingDirectory = await realpath(supplied);
-          if (!(await lstat(workingDirectory)).isDirectory()) return fail(400, "invalid_working_directory");
-          await access(workingDirectory, constants.X_OK);
-        } catch { return fail(400, "invalid_working_directory"); }
+        workingDirectory = await this.resolveSessionWorkingDirectory(supplied);
+        if (!workingDirectory) return fail(400, "invalid_working_directory");
       }
       let purpose: string | undefined;
       if (hasPurpose) {
@@ -380,32 +385,39 @@ export class RemoteDesktopService {
         purpose = input.purpose.trim();
         if (!purpose || purpose.length > 200) return fail(400, "invalid_purpose");
       }
-      if (session.state !== "active" || session.expires <= Date.now() || this.executionStateFor(user).stopped) return fail(404, "session_unavailable");
-      if (session.version !== input.expectedVersion) return fail(409, "version_conflict", { currentVersion: session.version });
-
-      const changedFields: string[] = [];
-      if (workingDirectory !== undefined && workingDirectory !== session.workingDirectory) changedFields.push("workingDirectory");
-      if (purpose !== undefined && purpose !== session.purpose) changedFields.push("purpose");
-      if (!changedFields.length) return { ok: true as const, session_id: session.id, working_directory: session.workingDirectory, purpose: session.purpose, version: session.version, changedFields };
-
-      const previous = { workingDirectory: session.workingDirectory, purpose: session.purpose, version: session.version, touched: session.touched, expires: session.expires };
-      if (workingDirectory !== undefined) session.workingDirectory = workingDirectory;
-      if (purpose !== undefined) session.purpose = purpose;
-      session.version++;
-      session.touched = Date.now();
-      session.expires = session.touched + SESSION_TTL;
+      const committed = await this.executionStateLock.run(async () => {
+        const session = this.sessions.get(sessionId);
+        if (!available(session)) return { result: fail(404, "session_unavailable") };
+        if (session!.version !== input.expectedVersion) return { result: fail(409, "version_conflict", { currentVersion: session!.version }) };
+        const target = session!;
+        const changedFields: string[] = [];
+        if (workingDirectory !== undefined && workingDirectory !== target.workingDirectory) changedFields.push("workingDirectory");
+        if (purpose !== undefined && purpose !== target.purpose) changedFields.push("purpose");
+        if (!changedFields.length) return { result: { ok: true as const, session_id: target.id, working_directory: target.workingDirectory, purpose: target.purpose, version: target.version, changedFields } };
+        const previous = { workingDirectory: target.workingDirectory, purpose: target.purpose, version: target.version, touched: target.touched, expires: target.expires };
+        if (workingDirectory !== undefined) target.workingDirectory = workingDirectory;
+        if (purpose !== undefined) target.purpose = purpose;
+        target.version++;
+        target.touched = Date.now();
+        target.expires = target.touched + SESSION_TTL;
+        return { target, previous, changedFields, result: { ok: true as const, session_id: target.id, working_directory: target.workingDirectory, purpose: target.purpose, version: target.version, changedFields } };
+      });
+      if (!committed.target || !committed.previous) return committed.result;
       try {
-        await this.audit("session.metadata.updated", { user, sessionId: session.id, previousVersion: previous.version, version: session.version, changedFields });
+        await this.audit("session.metadata.updated", { user, sessionId: committed.target.id, previousVersion: committed.previous.version, version: committed.target.version, changedFields: committed.changedFields });
       } catch {
-        session.workingDirectory = previous.workingDirectory;
-        session.purpose = previous.purpose;
-        session.version = previous.version;
-        session.touched = previous.touched;
-        session.expires = previous.expires;
+        await this.executionStateLock.run(async () => {
+          if (this.sessions.get(sessionId) !== committed.target || committed.target.version !== committed.previous.version + 1) return;
+          committed.target.workingDirectory = committed.previous.workingDirectory;
+          committed.target.purpose = committed.previous.purpose;
+          committed.target.version = committed.previous.version;
+          committed.target.touched = committed.previous.touched;
+          committed.target.expires = committed.previous.expires;
+        });
         return fail(503, "update_unavailable");
       }
-      return { ok: true as const, session_id: session.id, working_directory: session.workingDirectory, purpose: session.purpose, version: session.version, changedFields };
-    }));
+      return committed.result;
+    });
   }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
     if (this.userOwnsActiveSession(user, sessionId)) return true;

@@ -48,6 +48,7 @@ class FakeElement {
   querySelector<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return override as T;
+    if (selector === "form[data-session-edit]") return (this.children.flatMap((child) => [child, ...child.children]).find((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) ?? null) as T | null;
     if (selector === "h2") return (this.children.find((child) => child.tagName === "h2") ?? null) as T | null;
     if (selector === ".process-block") return (this.children.find((child) => child.className === "process-block") ?? null) as T | null;
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
@@ -97,7 +98,7 @@ test("session metadata editor uses the authenticated PATCH contract and preserve
   const directory = { value: "C:/old" };
   const purpose = { value: "Old purpose" };
   const output = { textContent: "" };
-  const button = { disabled: false };
+  const button = { disabled: false, addEventListener: () => undefined };
   const directoryCell = { textContent: "C:/old" };
   const purposeCell = { textContent: "Old purpose" };
   const row = { querySelector: (selector: string) => selector === "[data-session-directory]" ? directoryCell : purposeCell };
@@ -110,14 +111,15 @@ test("session metadata editor uses the authenticated PATCH contract and preserve
     closest: () => row,
   };
   const requests: Array<{ url: string; init: { method: string; headers: Record<string, string>; body: string } }> = [];
+  let patchCount = 0;
   runInNewContext(userConsoleClientScript, {
     document: { querySelectorAll: () => [form], getElementById: () => null },
     encodeURIComponent,
     fetch: async (url: string, init: { method: string; headers: Record<string, string>; body: string }) => {
       requests.push({ url, init });
-      return requests.length === 1
-        ? response(200, { version: 4, working_directory: "C:/canonical", purpose: "New purpose" })
-        : response(409, { error: "version_conflict" });
+      if (init.method !== "PATCH") return response(200, { sessions: [{ session_id: "owned/session", active: true, version: 5, working_directory: "C:/latest", purpose: "Latest purpose" }] });
+      patchCount++;
+      return patchCount === 1 ? response(200, { version: 4, working_directory: "C:/canonical", purpose: "New purpose" }) : response(409, { error: "version_conflict" });
     },
   });
   assert.ok(handler);
@@ -135,8 +137,98 @@ test("session metadata editor uses the authenticated PATCH contract and preserve
   await handler({ preventDefault() {} });
   assert.equal(form.dataset.version, "4");
   assert.equal(purpose.value, "Unsaved conflicting input");
-  assert.match(output.textContent, /別の更新があります/);
+  assert.match(output.textContent, /競合しました/);
   assert.equal(button.disabled, false);
+});
+
+test("session metadata editor keeps typing made while a save is pending", async () => {
+  const directory = { value: "C:/old" };
+  const purpose = { value: "Submitted purpose" };
+  const output = { textContent: "" };
+  const form = {
+    dataset: { sessionEdit: "session-1", version: "1" },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : purpose },
+    addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
+    querySelector: (selector: string) => selector === "output" ? output : button,
+    closest: () => row,
+  };
+  const button = { disabled: false, addEventListener: () => undefined };
+  const row = { querySelector: () => ({ textContent: "" }) };
+  let release!: (value: ReturnType<typeof response>) => void;
+  let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null }, encodeURIComponent,
+    fetch: () => new Promise<ReturnType<typeof response>>((resolve) => { release = resolve; }),
+  });
+  assert.ok(handler);
+  const saving = handler({ preventDefault() {} });
+  purpose.value = "Typed while waiting";
+  release(response(200, { version: 2, working_directory: "C:/old", purpose: "Submitted purpose" }));
+  await saving;
+  assert.equal(purpose.value, "Typed while waiting");
+  assert.equal(form.dataset.version, "2");
+  assert.match(output.textContent, /未保存/);
+});
+
+test("version conflicts load the latest values and require an explicit re-edit choice", async () => {
+  const directory = { value: "C:/draft" }; const purpose = { value: "Draft purpose" };
+  const output = { textContent: "" }; const summary = { textContent: "" }; const conflict = { hidden: true };
+  const keepDraft = { clickHandler: undefined as (() => void) | undefined, addEventListener: (_: string, handler: () => void) => { keepDraft.clickHandler = handler; } };
+  const useLatest = { clickHandler: undefined as (() => void) | undefined, addEventListener: (_: string, handler: () => void) => { useLatest.clickHandler = handler; } };
+  const submitButton = { disabled: false };
+  const row = { querySelector: () => ({ textContent: "" }) };
+  let submit: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  let patchCalls = 0;
+  const form = {
+    dataset: { sessionEdit: "session-1", version: "1" },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : purpose },
+    addEventListener: (_: string, handler: (event: { preventDefault(): void }) => Promise<void>) => { submit = handler; },
+    querySelector: (selector: string) => selector === "output" ? output : selector === "[data-session-conflict]" ? conflict : selector === "[data-session-conflict-summary]" ? summary : selector.includes("keep-draft") ? keepDraft : selector.includes("use-latest") ? useLatest : submitButton,
+    closest: () => row,
+  };
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null }, encodeURIComponent,
+    fetch: async (_url: string, init?: { method?: string }) => {
+      if (init?.method === "PATCH") { patchCalls++; return response(409, { error: "version_conflict" }); }
+      return response(200, { sessions: [{ session_id: "session-1", active: true, version: 2, working_directory: "C:/latest", purpose: "Latest purpose" }] });
+    },
+  });
+  assert.ok(submit);
+  await submit({ preventDefault() {} });
+  assert.equal(patchCalls, 1, "a conflict must never trigger an automatic retry");
+  assert.equal(conflict.hidden, false);
+  assert.match(summary.textContent, /C:\/latest.*Latest purpose/);
+  assert.equal(directory.value, "C:/draft");
+  keepDraft.clickHandler?.();
+  assert.equal(form.dataset.version, "2");
+  assert.equal(directory.value, "C:/draft");
+  assert.equal(conflict.hidden, true);
+  await submit({ preventDefault() {} });
+  assert.equal(patchCalls, 2);
+  useLatest.clickHandler?.();
+  assert.equal(form.dataset.version, "2");
+  assert.equal(directory.value, "C:/latest");
+  assert.equal(purpose.value, "Latest purpose");
+});
+
+test("console state refresh does not replace an existing session editor", async () => {
+  const sessionForm = new FakeElement("form");
+  sessionForm.dataset = { sessionEdit: "session-1", version: "1" };
+  const sessionRow = new FakeElement("tr"); sessionRow.append(sessionForm);
+  const sessionRows = new FakeElement("tbody"); sessionRows.append(sessionRow);
+  let refresh = 0;
+  const ui = boot(async (url) => {
+    if (new URL(url, "http://local.test").pathname === "/api/console-state") {
+      refresh++;
+      return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [{ session_id: "session-1", working_directory: "C:/new", purpose: "new", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 2 }] });
+    }
+    throw new Error("unexpected request");
+  }, [], { "session-rows": sessionRows });
+  await settle();
+  assert.equal(refresh, 1);
+  assert.equal(sessionRows.children[0], sessionRow);
+  assert.equal(sessionRow.children[0], sessionForm);
+  ui.sources[0]?.close();
 });
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {

@@ -26,18 +26,41 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
 
 function clientBootstrap(): void {
   document.querySelectorAll<HTMLFormElement>("[data-session-edit]").forEach((form) => {
+    const conflict = form.querySelector<HTMLElement>("[data-session-conflict]");
+    const conflictSummary = form.querySelector<HTMLElement>("[data-session-conflict-summary]");
+    const directory = form.elements.namedItem("workingDirectory") as HTMLInputElement | null;
+    const purpose = form.elements.namedItem("purpose") as HTMLInputElement | null;
+    const applyLatest = (keepDraft: boolean) => {
+      const version = Number(form.dataset.latestVersion);
+      if (!Number.isSafeInteger(version) || !directory || !purpose) return;
+      if (!keepDraft) {
+        directory.value = form.dataset.latestDirectory ?? directory.value;
+        purpose.value = form.dataset.latestPurpose ?? purpose.value;
+        const row = form.closest("tr");
+        const directoryCell = row?.querySelector<HTMLElement>("[data-session-directory]");
+        const purposeCell = row?.querySelector<HTMLElement>("[data-session-purpose]");
+        if (directoryCell) directoryCell.textContent = directory.value;
+        if (purposeCell) purposeCell.textContent = purpose.value;
+      }
+      form.dataset.version = String(version);
+      if (conflict) conflict.hidden = true;
+      const output = form.querySelector<HTMLElement>("output");
+      if (output) output.textContent = keepDraft ? "自分の入力を残しました。内容を確認して保存してください。" : "最新値を取り込みました。内容を確認して保存してください。";
+    };
+    form.querySelector<HTMLButtonElement>('[data-session-conflict-action="keep-draft"]')?.addEventListener("click", () => applyLatest(true));
+    form.querySelector<HTMLButtonElement>('[data-session-conflict-action="use-latest"]')?.addEventListener("click", () => applyLatest(false));
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const sessionId = form.dataset.sessionEdit;
       const csrf = (form.elements.namedItem("csrf") as HTMLInputElement | null)?.value ?? "";
-      const directory = form.elements.namedItem("workingDirectory") as HTMLInputElement | null;
-      const purpose = form.elements.namedItem("purpose") as HTMLInputElement | null;
       const status = form.querySelector("output");
       const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
       const expectedVersion = Number(form.dataset.version);
       if (!sessionId || !directory || !purpose || !Number.isSafeInteger(expectedVersion)) return;
       if (button) button.disabled = true;
       if (status) status.textContent = "保存中…";
+      const submittedDirectory = directory.value;
+      const submittedPurpose = purpose.value;
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
           method: "PATCH",
@@ -47,18 +70,34 @@ function clientBootstrap(): void {
         });
         const result = await response.json() as { error?: string; version?: number; working_directory?: string; purpose?: string };
         if (!response.ok || result.version === undefined || result.working_directory === undefined || result.purpose === undefined) {
-          if (status) status.textContent = response.status === 409 ? "別の更新があります。入力を確認して再編集してください。" : response.status === 404 ? "編集できるセッションではありません。" : result.error === "unsupported_field" ? "URL・題名の編集はまだ利用できません。" : "保存できませんでした。入力内容を確認してください。";
+          if (response.status === 409) {
+            try {
+              const latestResponse = await fetch("/api/console-state", { credentials: "same-origin", headers: { Accept: "application/json" } });
+              const latestState = await latestResponse.json() as { sessions?: Array<{ session_id: string; active: boolean; version?: number; working_directory?: string; purpose?: string }> };
+              const latest = latestState.sessions?.find((session) => session.session_id === sessionId && session.active && Number.isSafeInteger(session.version));
+              if (latest) {
+                form.dataset.latestVersion = String(latest.version);
+                form.dataset.latestDirectory = latest.working_directory ?? "";
+                form.dataset.latestPurpose = latest.purpose ?? "";
+                if (conflictSummary) conflictSummary.textContent = `サーバーの最新値（版 ${latest.version}）: 作業ディレクトリ ${latest.working_directory ?? "—"} · 用途 ${latest.purpose ?? "—"}`;
+                if (conflict) conflict.hidden = false;
+                if (status) status.textContent = "版が競合しました。自分の入力を再編集するか、最新値を取り込んでください。";
+              } else if (status) status.textContent = "競合後の最新状態を取得できませんでした。入力は保持しています。";
+            } catch { if (status) status.textContent = "競合後の最新状態を取得できませんでした。入力は保持しています。"; }
+          } else if (status) status.textContent = response.status === 404 ? "編集できるセッションではありません。" : result.error === "unsupported_field" ? "URL・題名の編集はまだ利用できません。" : "保存できませんでした。入力内容を確認してください。";
           return;
         }
         form.dataset.version = String(result.version);
-        directory.value = result.working_directory;
-        purpose.value = result.purpose;
+        const addedDirectoryInput = directory.value !== submittedDirectory;
+        const addedPurposeInput = purpose.value !== submittedPurpose;
+        if (!addedDirectoryInput) directory.value = result.working_directory;
+        if (!addedPurposeInput) purpose.value = result.purpose;
         const row = form.closest("tr");
         const directoryCell = row?.querySelector<HTMLElement>("[data-session-directory]");
         const purposeCell = row?.querySelector<HTMLElement>("[data-session-purpose]");
         if (directoryCell) directoryCell.textContent = result.working_directory;
         if (purposeCell) purposeCell.textContent = result.purpose;
-        if (status) status.textContent = "保存しました。";
+        if (status) status.textContent = addedDirectoryInput || addedPurposeInput ? "保存しました。追加の入力は未保存です。" : "保存しました。";
       } catch {
         if (status) status.textContent = "通信できませんでした。入力内容は保持しています。";
       } finally {
@@ -470,21 +509,25 @@ function clientBootstrap(): void {
       if (updated) updated.textContent = timeText(state.updatedAt);
       const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
       if (sessionRows && state.sessions) {
-        const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
-        sessionRows.replaceChildren();
-        if (!visibleSessions.length) {
-          const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 7;
-          cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
-        } else for (const session of visibleSessions) {
-          const row = sessionRows.insertRow();
-          const linkCell = row.insertCell(); const link = document.createElement("a");
-          link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
-          addCell(row, timeText(session.created_at));
-          addCell(row, timeText(session.last_used_at ?? session.created_at));
-          addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
-          addCell(row, session.purpose ?? "—");
-          addCell(row, session.session_id);
-          addCell(row, session.working_directory ?? "—");
+        const hasServerRenderedEditor = sessionRows.querySelector("form[data-session-edit]") !== null;
+        if (state.stopped || !hasServerRenderedEditor) {
+          const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
+          sessionRows.replaceChildren();
+          if (!visibleSessions.length) {
+            const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 8;
+            cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
+          } else for (const session of visibleSessions) {
+            const row = sessionRows.insertRow();
+            const linkCell = row.insertCell(); const link = document.createElement("a");
+            link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
+            addCell(row, timeText(session.created_at));
+            addCell(row, timeText(session.last_used_at ?? session.created_at));
+            addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
+            addCell(row, session.purpose ?? "—");
+            addCell(row, session.session_id);
+            addCell(row, session.working_directory ?? "—");
+            addCell(row, "—");
+          }
         }
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
