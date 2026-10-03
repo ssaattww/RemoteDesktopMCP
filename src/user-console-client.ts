@@ -573,13 +573,17 @@ function clientBootstrap(): void {
         const focusedRow = focusedElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null;
         const focusedSessionId = focusedRow?.dataset.sessionId;
         const selection = window.getSelection();
-        const selectionRow = selection && !selection.isCollapsed ? (selection.anchorNode as Node | null)?.parentElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null : null;
-        const selectionFocusRow = selection && !selection.isCollapsed ? (selection.focusNode as Node | null)?.parentElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null : null;
-        const textOffset = (row: HTMLTableRowElement, node: Node, offset: number) => {
-          const range = document.createRange(); range.selectNodeContents(row); range.setEnd(node, offset); return range.toString().length;
+        const selectionPoint = (node: Node | null, offset: number) => {
+          const cell = (node?.parentElement?.closest("td") ?? null) as HTMLTableCellElement | null;
+          const row = (cell?.closest("tr[data-session-id]") ?? null) as HTMLTableRowElement | null;
+          if (!node || !cell || !row || !sessionRows.contains(node)) return undefined;
+          const cellIndex = Array.prototype.indexOf.call(row.cells, cell) as number;
+          if (cellIndex < 0) return undefined;
+          const range = document.createRange(); range.selectNodeContents(cell); range.setEnd(node, offset);
+          return { sessionId: row.dataset.sessionId ?? "", cellIndex, cellText: cell.textContent ?? "", offset: range.toString().length };
         };
-        const savedSelection = selection && selectionRow && selectionFocusRow === selectionRow && sessionRows.contains(selection.anchorNode) && sessionRows.contains(selection.focusNode)
-          ? { sessionId: selectionRow.dataset.sessionId ?? "", anchor: textOffset(selectionRow, selection.anchorNode!, selection.anchorOffset), focus: textOffset(selectionRow, selection.focusNode!, selection.focusOffset) }
+        const savedSelection = selection && !selection.isCollapsed && selection.anchorNode && selection.focusNode
+          ? { text: selection.toString(), anchor: selectionPoint(selection.anchorNode, selection.anchorOffset), focus: selectionPoint(selection.focusNode, selection.focusOffset) }
           : undefined;
         const visibleRows = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")];
         const anchorRow = visibleRows.find((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > 0 && rect.top < window.innerHeight; });
@@ -607,25 +611,47 @@ function clientBootstrap(): void {
           if (!savedSelection) restoredRow?.querySelector("a")?.focus();
         }
         if (savedSelection && selection) {
-          const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === savedSelection.sessionId);
-          if (restoredRow) {
-            const locate = (target: number) => {
-              const walker = document.createTreeWalker(restoredRow, 4);
-              let remaining = target;
-              let text = walker.nextNode();
-              let last: Node | null = null;
-              while (text) {
-                last = text;
-                const length = text.textContent?.length ?? 0;
-                if (remaining <= length) return { node: text, offset: remaining };
-                remaining -= length; text = walker.nextNode();
-              }
-              return last ? { node: last, offset: last.textContent?.length ?? 0 } : undefined;
-            };
-            const anchor = locate(savedSelection.anchor); const focus = locate(savedSelection.focus);
-            if (anchor && focus && selection.setBaseAndExtent) selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
-            else if (anchor && focus) { const range = document.createRange(); range.setStart(anchor.node, anchor.offset); range.setEnd(focus.node, focus.offset); selection.removeAllRanges(); selection.addRange(range); }
+          const locate = (point: NonNullable<typeof savedSelection.anchor>) => {
+            if (!point) return undefined;
+            const row = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((candidate) => candidate.dataset.sessionId === point.sessionId);
+            const cell = row?.cells[point.cellIndex];
+            // Restore only if the exact endpoint cell survives unchanged; otherwise clear rather than select different text.
+            if (!cell || cell.textContent !== point.cellText) return undefined;
+            const walker = document.createTreeWalker(cell, 4);
+            let remaining = point.offset;
+            let text = walker.nextNode();
+            let last: Node | null = null;
+            while (text) {
+              last = text;
+              const length = text.textContent?.length ?? 0;
+              if (remaining <= length) return { node: text, offset: remaining };
+              remaining -= length; text = walker.nextNode();
+            }
+            return last ? { node: last, offset: last.textContent?.length ?? 0 } : undefined;
+          };
+          const anchor = savedSelection.anchor && locate(savedSelection.anchor);
+          const focus = savedSelection.focus && locate(savedSelection.focus);
+          let restored = false;
+          if (anchor && focus) {
+            if (selection.setBaseAndExtent) {
+              selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+              restored = selection.toString() === savedSelection.text;
+            } else if (selection.collapse && selection.extend) {
+              selection.collapse(anchor.node, anchor.offset);
+              selection.extend(focus.node, focus.offset);
+              restored = selection.toString() === savedSelection.text;
+            } else {
+              const anchorRange = document.createRange(); anchorRange.setStart(anchor.node, anchor.offset); anchorRange.collapse(true);
+              const focusRange = document.createRange(); focusRange.setStart(focus.node, focus.offset); focusRange.collapse(true);
+              const backwards = anchorRange.compareBoundaryPoints(0, focusRange) > 0;
+              const range = document.createRange();
+              range.setStart(backwards ? focus.node : anchor.node, backwards ? focus.offset : anchor.offset);
+              range.setEnd(backwards ? anchor.node : focus.node, backwards ? anchor.offset : focus.offset);
+              selection.removeAllRanges(); selection.addRange(range);
+              restored = selection.toString() === savedSelection.text;
+            }
           }
+          if (!restored) selection.removeAllRanges();
         }
         const restoredAnchor = scrollAnchor && [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === scrollAnchor.sessionId);
         if (restoredAnchor) {

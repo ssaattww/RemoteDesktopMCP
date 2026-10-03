@@ -56,9 +56,10 @@ class FakeElement {
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     return null;
   }
-  closest<T extends FakeElement>(selector: string) { let current: FakeElement | null = this; while (current) { if (selector === "tr[data-session-id]" && current.tagName === "tr" && current.dataset.sessionId !== undefined) return current as T; if (current.closestNodes.has(selector)) return current.closestNodes.get(selector) as T; current = current.parentElement; } return null; }
+  closest<T extends FakeElement>(selector: string) { let current: FakeElement | null = this; while (current) { if (selector === "tr[data-session-id]" && current.tagName === "tr" && current.dataset.sessionId !== undefined) return current as T; if (selector === "td" && current.tagName === "td") return current as T; if (current.closestNodes.has(selector)) return current.closestNodes.get(selector) as T; current = current.parentElement; } return null; }
   contains(node: FakeElement | null) { let current = node; while (current) { if (current === this) return true; current = current.parentElement; } return false; }
   getBoundingClientRect() { return this.rect; }
+  get cells() { return this.children.filter((child) => child.tagName === "td"); }
 }
 
 class FakeEventSource {
@@ -107,7 +108,7 @@ function response(status: number, body: unknown) {
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
-function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; setBaseAndExtent: (...args: unknown[]) => void; removeAllRanges: () => void; addRange: () => void } } = {}) {
+function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; toString: () => string; setBaseAndExtent?: (...args: unknown[]) => void; collapse?: (node: FakeElement, offset: number) => void; extend?: (node: FakeElement, offset: number) => void; removeAllRanges: () => void; addRange: (...args: unknown[]) => void } } = {}) {
   FakeEventSource.instances = [];
   const root = new FakeElement(); root.dataset = { sessionId, newestCursor: initialItems[0]?.cursor ?? "c0", oldestCursor: initialItems.at(-1)?.cursor ?? "c-older", hasMoreOlder: String(initialItems.length > 0), initialItems: JSON.stringify(initialItems) };
   const status = new FakeElement();
@@ -118,7 +119,9 @@ function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType
   const windowListeners = new Map<string, (event?: unknown) => void>();
   const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: (name: string, listener: (event?: unknown) => void) => windowListeners.set(name, listener), scrollTo: () => { scrollCalls += 1; }, scrollBy: () => { scrollCalls += 1; }, getSelection: () => options.selection ?? ({ toString: () => "", isCollapsed: true }) };
   const documentListeners = new Map<string, (event?: unknown) => void>();
-  const documentStub = { hidden: options.hidden ?? false, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), createRange: () => { let endpoint: FakeElement | null = null; let offset = 0; return { selectNodeContents: () => undefined, setEnd: (node: FakeElement, at: number) => { endpoint = node; offset = at; }, setStart: () => undefined, toString: () => "x".repeat(offset), } as unknown as Range; }, createTreeWalker: (rootNode: FakeElement) => { const nodes: FakeElement[] = []; const visit = (element: FakeElement) => { if (element.textContent) { const textNode = new FakeElement("#text"); textNode.textContent = element.textContent; textNode.parentElement = element; nodes.push(textNode); } for (const child of element.children) visit(child); }; for (const child of rootNode.children) visit(child); let index = 0; return { nextNode: () => nodes[index++] ?? null }; }, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
+  const createTreeWalker = (rootNode: FakeElement) => { const nodes: FakeElement[] = []; const visit = (element: FakeElement) => { if (element.textContent && element.children.length === 0) { const textNode = new FakeElement("#text"); textNode.textContent = element.textContent; textNode.parentElement = element; nodes.push(textNode); } for (const child of element.children) visit(child); }; visit(rootNode); let index = 0; return { nextNode: () => nodes[index++] ?? null }; };
+  const createRange = () => { let startNode: FakeElement | null = null; let startOffset = 0; let endNode: FakeElement | null = null; let endOffset = 0; const compare = (left: FakeElement | null, leftOffset: number, right: FakeElement | null, rightOffset: number) => { if (!left || !right) return 0; const leftRow = left.closest<FakeElement>("tr[data-session-id]"); const rightRow = right.closest<FakeElement>("tr[data-session-id]"); const rowOrder = (leftRow?.dataset.sessionId ?? "").localeCompare(rightRow?.dataset.sessionId ?? ""); if (rowOrder) return rowOrder; const leftCell = left.closest<FakeElement>("td"); const rightCell = right.closest<FakeElement>("td"); const cellOrder = (leftRow?.cells.indexOf(leftCell!) ?? 0) - (rightRow?.cells.indexOf(rightCell!) ?? 0); return cellOrder || leftOffset - rightOffset; }; const range = { selectNodeContents: () => undefined, setEnd: (node: FakeElement, at: number) => { endNode = node; endOffset = at; }, setStart: (node: FakeElement, at: number) => { startNode = node; startOffset = at; }, collapse: () => { endNode = startNode; endOffset = startOffset; }, compareBoundaryPoints: (_how: number, other: typeof range) => compare(startNode, startOffset, other.startContainer, other.startOffset), get startContainer() { return startNode; }, get startOffset() { return startOffset; }, get endContainer() { return endNode; }, get endOffset() { return endOffset; }, toString: () => "x".repeat(endOffset) }; return range as unknown as Range; };
+  const documentStub = { hidden: options.hidden ?? false, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), createRange, createTreeWalker, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
   const clock = options.clock;
   const ClockDate = clock ? class extends Date { constructor(value?: string | number) { super(value ?? clock.now); } static now() { return clock.now; } } : Date;
   runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock ? clock.setTimeout : setTimeout, clearTimeout: clock ? clock.clearTimeout : clearTimeout });
@@ -886,16 +889,103 @@ test("a late initial state response cannot overwrite newer state from an SSE ref
 test("session row redraw restores its text selection and visible scroll anchor", async () => {
   const rows = new FakeElement("tbody");
   const oldRow = new FakeElement("tr"); oldRow.dataset.sessionId = "session-1"; oldRow.rect = { top: 20, bottom: 40, left: 0, right: 100 };
-  const cell = new FakeElement("td"); const oldText = new FakeElement("#text"); oldText.textContent = "session text"; cell.append(oldText); oldRow.append(cell); rows.append(oldRow);
+  const values = ["詳細を見る", "2026-10-01", "2026-10-01", "有効", "test", "session-1", "C:/work"];
+  for (const value of values) { const cell = new FakeElement("td"); cell.textContent = value; const text = new FakeElement("#text"); text.textContent = value; cell.append(text); oldRow.append(cell); }
+  rows.append(oldRow);
+  const oldText = oldRow.cells[4]!.children[0]!;
   let restored: unknown[] | undefined;
-  const selection = { anchorNode: oldText, focusNode: oldText, anchorOffset: 2, focusOffset: 6, isCollapsed: false, setBaseAndExtent: (...args: unknown[]) => { restored = args; }, removeAllRanges: () => undefined, addRange: () => undefined };
+  const selection = { anchorNode: oldText, focusNode: oldText, anchorOffset: 1, focusOffset: 3, isCollapsed: false, toString: () => "es", setBaseAndExtent: (...args: unknown[]) => { restored = args; }, removeAllRanges: () => undefined, addRange: () => undefined };
   const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
     ? response(200, { ...emptyState, sessions: [{ session_id: "session-1", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "test", working_directory: "C:/work" }] })
     : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
   await settle(); await settle();
   assert.ok(restored, "the selected text endpoints should be rebound to the recreated row");
   assert.equal((restored![0] as FakeElement).tagName, "#text");
-  assert.equal(restored![1], 2);
-  assert.equal(restored![3], 1, "the focus endpoint is restored at the same row-relative character offset across cells");
+  assert.equal((restored![0] as FakeElement).parentElement, (restored![2] as FakeElement).parentElement, "same-cell endpoints stay attached to their original cell");
+  assert.equal(restored![1], 1);
+  assert.equal(restored![3], 3);
   assert.equal(ui.scrollCalls, 1, "the same visible session row keeps its viewport position");
+});
+
+test("session row redraw preserves forward and reverse selections spanning two rows", async () => {
+  for (const direction of ["forward", "reverse"] as const) {
+    const rows = new FakeElement("tbody");
+    const rowNodes = ["session-a", "session-b"].map((id) => { const row = new FakeElement("tr"); row.dataset.sessionId = id; for (const value of ["詳細を見る", "2026-10-01", "2026-10-03", "有効", "test", id, "C:/work"]) { const cell = new FakeElement("td"); cell.textContent = value; const text = new FakeElement("#text"); text.textContent = value; cell.append(text); row.append(cell); } rows.append(row); return row; });
+    const start = { node: rowNodes[0]!.cells[5]!.children[0]!, offset: 1 };
+    const end = { node: rowNodes[1]!.cells[5]!.children[0]!, offset: 4 };
+    let restored: unknown[] | undefined;
+    const selection = { anchorNode: direction === "forward" ? start.node : end.node, focusNode: direction === "forward" ? end.node : start.node, anchorOffset: direction === "forward" ? start.offset : end.offset, focusOffset: direction === "forward" ? end.offset : start.offset, isCollapsed: false, toString: () => "a-b", setBaseAndExtent: (...args: unknown[]) => { restored = args; }, removeAllRanges: () => undefined, addRange: () => undefined };
+    const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+      ? response(200, { ...emptyState, sessions: ["session-a", "session-b"].map((session_id) => ({ session_id, created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "test", working_directory: "C:/work" })) })
+      : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+    await settle(); await settle();
+    assert.ok(restored, `${direction} selection endpoints spanning separate session rows should be restored`);
+    assert.equal((restored![0] as FakeElement).closest("tr[data-session-id]")?.dataset.sessionId, direction === "forward" ? "session-a" : "session-b");
+    assert.equal((restored![2] as FakeElement).closest("tr[data-session-id]")?.dataset.sessionId, direction === "forward" ? "session-b" : "session-a");
+    assert.equal(ui.scrollCalls, 0);
+  }
+});
+
+test("reverse selection fallback preserves endpoints when setBaseAndExtent is unavailable", async () => {
+  for (const fallback of ["collapse-extend", "range"] as const) {
+    const rows = new FakeElement("tbody");
+    for (const id of ["session-a", "session-b"]) { const row = new FakeElement("tr"); row.dataset.sessionId = id; for (const value of ["詳細を見る", "date", "access", "有効", "test", id, "C:/work"]) { const cell = new FakeElement("td"); cell.textContent = value; const text = new FakeElement("#text"); text.textContent = value; cell.append(text); row.append(cell); } rows.append(row); }
+    const anchor = rows.children[1]!.cells[5]!.children[0]!; const focus = rows.children[0]!.cells[5]!.children[0]!;
+    let collapsed: [FakeElement, number] | undefined; let extended: [FakeElement, number] | undefined; let addedRange: Range | undefined;
+    const selectionBase = { anchorNode: anchor, focusNode: focus, anchorOffset: 4, focusOffset: 1, isCollapsed: false, toString: () => "a-b", removeAllRanges: () => undefined, addRange: (range: Range) => { addedRange = range; } };
+    const selection = fallback === "collapse-extend" ? { ...selectionBase, collapse: (node: FakeElement, offset: number) => { collapsed = [node, offset]; }, extend: (node: FakeElement, offset: number) => { extended = [node, offset]; } } : selectionBase;
+    const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+      ? response(200, { ...emptyState, sessions: ["session-a", "session-b"].map((session_id) => ({ session_id, created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "test", working_directory: "C:/work" })) })
+      : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+    await settle(); await settle();
+    if (fallback === "collapse-extend") {
+      assert.equal(collapsed?.[0].closest("tr[data-session-id]")?.dataset.sessionId, "session-b", "the original reverse anchor remains the anchor");
+      assert.equal(collapsed?.[1], 4);
+      assert.equal(extended?.[0].closest("tr[data-session-id]")?.dataset.sessionId, "session-a", "the original reverse focus remains the focus");
+      assert.equal(extended?.[1], 1);
+    } else {
+      assert.equal((addedRange?.startContainer as FakeElement | null)?.closest("tr[data-session-id]")?.dataset.sessionId, "session-a", "Range start is normalized to the earlier DOM endpoint");
+      assert.equal(addedRange?.startOffset, 1);
+      assert.equal((addedRange?.endContainer as FakeElement | null)?.closest("tr[data-session-id]")?.dataset.sessionId, "session-b", "Range end is normalized to the later DOM endpoint");
+      assert.equal(addedRange?.endOffset, 4);
+    }
+    assert.equal(ui.scrollCalls, 0);
+  }
+});
+
+test("session selection stays attached to its cell when text in preceding cells changes", async () => {
+  const rows = new FakeElement("tbody"); const row = new FakeElement("tr"); row.dataset.sessionId = "session-cell";
+  const values = ["link", "old date", "old access", "active", "purpose", "session-cell", "old directory"];
+  for (const value of values) { const cell = new FakeElement("td"); cell.textContent = value; const text = new FakeElement("#text"); text.textContent = value; cell.append(text); row.append(cell); }
+  rows.append(row);
+  const idText = row.cells[5]!.children[0]!; let restored: unknown[] | undefined; let clearCount = 0;
+  const selection = { anchorNode: idText, focusNode: idText, anchorOffset: 3, focusOffset: 7, isCollapsed: false, toString: () => "sion", setBaseAndExtent: (...args: unknown[]) => { restored = args; }, removeAllRanges: () => { clearCount += 1; }, addRange: () => undefined };
+  const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+    ? response(200, { ...emptyState, sessions: [{ session_id: "session-cell", created_at: "2026-10-02T00:00:00Z", last_used_at: "2026-10-03T00:00:00Z", state: "active", active: true, purpose: "a much longer changed purpose", working_directory: "C:/new-directory" }] })
+    : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+  await settle(); await settle();
+  assert.ok(restored, `the exact endpoint cell should be restored (clear=${clearCount})`);
+  const restoredCell = (restored![0] as FakeElement).closest("td");
+  assert.equal((restoredCell?.parentElement as FakeElement | null)?.cells.indexOf(restoredCell!), 5, "a longer purpose in an earlier cell must not redirect selection into that cell");
+  assert.equal(restored![1], 3);
+  assert.equal(restored![3], 7);
+  assert.equal(ui.scrollCalls, 0);
+});
+
+test("changed or removed selection targets are cleared instead of moved to different text", async () => {
+  for (const changed of [true, false]) {
+    const rows = new FakeElement("tbody"); const row = new FakeElement("tr"); row.dataset.sessionId = "session-target";
+    for (const value of ["link", "date", "access", "active", "original purpose", "session-target", "directory"]) { const cell = new FakeElement("td"); cell.textContent = value; const text = new FakeElement("#text"); text.textContent = value; cell.append(text); row.append(cell); }
+    rows.append(row);
+    const target = row.cells[4]!.children[0]!; let clearCount = 0; let restoreCount = 0;
+    const selection = { anchorNode: target, focusNode: target, anchorOffset: 2, focusOffset: 7, isCollapsed: false, toString: () => "iginal", setBaseAndExtent: () => { restoreCount += 1; }, removeAllRanges: () => { clearCount += 1; }, addRange: () => undefined };
+    const sessions = changed ? [{ session_id: "session-target", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "replacement purpose", working_directory: "directory" }] : [];
+    const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+      ? response(200, { ...emptyState, sessions })
+      : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+    await settle(); await settle();
+    assert.equal(restoreCount, 0, "a changed or missing target must not be rebound to unrelated characters");
+    assert.equal(clearCount, 1, "an unrestorable range is explicitly cleared");
+    assert.equal(ui.scrollCalls, 0);
+  }
 });
