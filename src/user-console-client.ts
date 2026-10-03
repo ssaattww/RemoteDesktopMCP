@@ -1,4 +1,5 @@
 export type ConsoleLogItem = { id: string; cursor: string; event: Record<string, unknown> };
+import { mapCuiResponse } from "./cui-output.js";
 
 export function chronologicalPage(items: ConsoleLogItem[]): ConsoleLogItem[] {
   // /api/logs returns pages newest first. `after` pages are deliberately
@@ -24,7 +25,7 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
   };
 }
 
-function clientBootstrap(): void {
+function clientBootstrap(mapCuiResponse: typeof import("./cui-output.js").mapCuiResponse): void {
   const consoleRoot = document.getElementById("log-console");
   if (!consoleRoot) return;
   const root = consoleRoot;
@@ -39,6 +40,12 @@ function clientBootstrap(): void {
   const status = document.getElementById("log-status");
   const newButton = document.getElementById("log-new-button") as HTMLButtonElement | null;
   const olderButton = document.getElementById("log-older-button") as HTMLButtonElement | null;
+  const cuiPanel = document.getElementById("cui-json-panel");
+  const cuiOutput = document.getElementById("cui-json-output");
+  const cuiStatus = document.getElementById("cui-json-status");
+  const cuiRefresh = document.getElementById("cui-json-refresh") as HTMLButtonElement | null;
+  const cuiLogin = document.getElementById("cui-json-login") as HTMLAnchorElement | null;
+  const logoutForm = document.getElementById("user-logout");
   const eventSourceFactory = (url: string) => new EventSource(url);
   let appliedCursor = root.dataset.newestCursor ?? "";
   let oldestCursor = root.dataset.oldestCursor ?? "";
@@ -463,6 +470,72 @@ function clientBootstrap(): void {
       }
     } catch { /* Keep the last successful state visible. */ }
   };
+  let cuiGeneration = 0;
+  let cuiController: AbortController | undefined;
+  let cuiBusy = false;
+  let cuiEnded = false;
+  const clearCuiPanel = (message: string, endSession = false, showLogin = false) => {
+    cuiGeneration += 1;
+    cuiController?.abort();
+    cuiController = undefined;
+    cuiBusy = false;
+    if (cuiOutput) cuiOutput.textContent = "";
+    if (cuiStatus) cuiStatus.textContent = message;
+    cuiEnded = endSession;
+    if (cuiRefresh) cuiRefresh.disabled = endSession;
+    if (cuiLogin) cuiLogin.hidden = !showLogin;
+  };
+  const sessionForPanel = () => cuiPanel?.dataset.sessionId ?? "";
+  const fetchCuiJson = async () => {
+    if (!cuiPanel || !cuiOutput || !cuiStatus || !cuiRefresh || cuiBusy || cuiEnded) return;
+    const selectedSession = sessionForPanel();
+    if (selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
+    const currentGeneration = ++cuiGeneration;
+    const controller = new AbortController();
+    cuiController = controller;
+    cuiBusy = true;
+    cuiOutput.textContent = "";
+    cuiStatus.textContent = "読込中";
+    cuiRefresh.disabled = true;
+    if (cuiLogin) cuiLogin.hidden = true;
+    const stateQuery = new URLSearchParams();
+    const logQuery = new URLSearchParams({ limit: "200" });
+    if (selectedSession) { stateQuery.set("session_id", selectedSession); logQuery.set("session_id", selectedSession); }
+    const stateUrl = "/api/console-state" + (stateQuery.size ? "?" + stateQuery.toString() : "");
+    try {
+      const [stateResponse, logsResponse] = await Promise.all([
+        fetch(stateUrl, { credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal }),
+        fetch("/api/logs?" + logQuery.toString(), { credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal }),
+      ]);
+      if (currentGeneration !== cuiGeneration) return;
+      if (selectedSession !== sessionForPanel() || selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
+      if (stateResponse.status === 401 || logsResponse.status === 401) { clearCuiPanel("認証が切れました。再ログインしてください。", true, true); return; }
+      if (stateResponse.status === 404 || logsResponse.status === 404) { clearCuiPanel("対象が見つかりません。"); return; }
+      if (!stateResponse.ok || !logsResponse.ok) throw new Error("request failed");
+      const [rawState, rawLogs] = await Promise.all([stateResponse.json(), logsResponse.json()]);
+      if (currentGeneration !== cuiGeneration || controller.signal.aborted || cuiEnded) return;
+      if (selectedSession !== sessionForPanel() || selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
+      const result = mapCuiResponse(rawState, rawLogs, selectedSession);
+      if (currentGeneration !== cuiGeneration || controller.signal.aborted || cuiEnded) return;
+      if (selectedSession !== sessionForPanel() || selectedSession !== (root.dataset.sessionId ?? "")) { clearCuiPanel("セッション選択が変わりました。画面を再読み込みしてください。"); return; }
+      cuiOutput.textContent = JSON.stringify(result.model, null, 2);
+      const count = result.model.sessions.length + result.model.operations.length + result.model.logs.length;
+      cuiStatus.textContent = result.truncated ? "一部のみ表示（各一覧200件まで）" : count === 0 ? "表示できる項目はありません。" : "取得しました。";
+    } catch {
+      if (currentGeneration !== cuiGeneration) return;
+      clearCuiPanel("JSONを取得できませんでした。再試行してください。");
+    } finally {
+      if (currentGeneration === cuiGeneration) {
+        cuiBusy = false;
+        cuiController = undefined;
+        if (cuiRefresh) { cuiRefresh.disabled = cuiEnded; cuiRefresh.textContent = "再取得"; }
+      }
+    }
+  };
+  cuiRefresh?.addEventListener("click", () => { void fetchCuiJson(); });
+  logoutForm?.addEventListener("submit", () => clearCuiPanel("ログアウトしました。", true));
+  window.addEventListener("pagehide", () => clearCuiPanel("画面遷移のため表示を消去しました。"));
+
   function restartEvents() {
     if (connection) connection.close();
     const currentGeneration = ++generation;
@@ -493,8 +566,8 @@ function clientBootstrap(): void {
       if (pendingCount || pendingOverflow) { updateLogState("pending"); showPending(); }
       else if (logState !== "refreshing") { updateLogState("current"); showPending(); }
     });
-    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); void resync(); });
-    source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); });
+    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); clearCuiPanel("ログの再同期が必要です。再取得してください。"); void resync(); });
+    source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); clearCuiPanel("認証が切れました。再ログインしてください。", true, true); });
     source.addEventListener("heartbeat", () => { if (generation === currentGeneration && source.readyState === EventSource.OPEN) { connectionState = "connected"; setStatus(); } });
   }
 
@@ -540,10 +613,11 @@ function clientBootstrap(): void {
     if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 120) void loadOlder();
   }, { passive: true });
   setStatus(); showPending();
+  if (cuiRefresh) cuiRefresh.textContent = "JSONを取得";
   void refreshState();
   restartEvents();
 }
 
 // tsx/esbuild decorates function expressions with __name during tests. Define
 // the harmless helper in the emitted browser program as well as in tsc output.
-export const userConsoleClientScript = `const __name=(value)=>value;(${clientBootstrap.toString()})();`;
+export const userConsoleClientScript = `const __name=(value)=>value;(${clientBootstrap.toString()})(${mapCuiResponse.toString()});`;

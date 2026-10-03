@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import test from "node:test";
@@ -271,6 +271,10 @@ test("user console authenticates the principal, applies CSRF checks, and hides a
     const cookie = `rdmcp_user=${loginCookie}`;
     const page = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
     assert.match(page, /RDMCP User Console/);
+    assert.match(page, /id="cui-json-panel" data-session-id=""/);
+    assert.match(page, /id="cui-json-refresh"/);
+    assert.match(page, /id="cui-json-output"/);
+    assert.match(page, /id="user-logout"/);
     assert.match(page, /own-connection/);
     assert.match(page, /セッション一覧/);
     assert.match(page, /operation-rejected-open/);
@@ -282,6 +286,7 @@ test("user console authenticates the principal, applies CSRF checks, and hides a
     assert.doesNotMatch(page, /other-connection|PID 555/);
     assert.doesNotMatch(page, /operation-other|secret-other\.txt|spoofed-operation|foreign secret|spoofed-session|other owner's secret/);
     const detail = await (await fetch(`${base}/user/sessions/own-connection`, { headers: { cookie } })).text();
+    assert.match(detail, /id="cui-json-panel" data-session-id="own-connection"/);
     assert.match(detail, /operation-own|file_read/);
     assert.match(detail, /succeeded|1000 ms/);
     assert.match(detail, /operation-open|9:01:01/);
