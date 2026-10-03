@@ -384,11 +384,14 @@ export class RemoteDesktopService {
     const session = this.sessions.get(sessionId);
     return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
   }
+  checkSessionWorkingDirectoryAccess(directory: string): Promise<void> {
+    return access(directory, constants.X_OK);
+  }
   async resolveSessionWorkingDirectory(supplied: string): Promise<string | undefined> {
     try {
       const resolved = await realpath(supplied);
       if (!(await lstat(resolved)).isDirectory()) return undefined;
-      await access(resolved, constants.X_OK);
+      await this.checkSessionWorkingDirectoryAccess(resolved);
       return resolved;
     } catch { return undefined; }
   }

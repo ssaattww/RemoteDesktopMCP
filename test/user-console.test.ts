@@ -381,6 +381,30 @@ test("Issue 48: session metadata edits require owner and CSRF, compare versions,
     assert.equal(current.working_directory, f.base);
     assert.equal(current.purpose, "Updated purpose");
     assert.equal(current.version, 2);
+    const directoryAccessService = f.service as unknown as { checkSessionWorkingDirectoryAccess?: (directory: string) => Promise<void> };
+    const originalDirectoryAccess = directoryAccessService.checkSessionWorkingDirectoryAccess;
+    let checkedDirectory = "";
+    directoryAccessService.checkSessionWorkingDirectoryAccess = async (directory) => {
+      checkedDirectory = directory;
+      const denied = new Error("EACCES: execute permission denied") as NodeJS.ErrnoException;
+      denied.code = "EACCES";
+      throw denied;
+    };
+    try {
+      const denied = await update(String(owned.session_id), { expectedVersion: 2, workingDirectory: f.root, purpose: "Must remain unchanged" });
+      assert.equal(denied.status, 400, "an X_OK access denial rejects the metadata PATCH");
+      assert.deepEqual(await denied.json(), { error: "invalid_working_directory" });
+      assert.equal(checkedDirectory, f.root, "the access check receives the resolved requested directory");
+      const deniedState = await (await fetch(`${base}/api/console-state`, { headers: { cookie } })).json() as typeof state;
+      const unchanged = deniedState.sessions.find((session) => session.session_id === owned.session_id);
+      assert.ok(unchanged);
+      assert.equal(unchanged.working_directory, current.working_directory);
+      assert.equal(unchanged.purpose, current.purpose);
+      assert.equal(unchanged.version, current.version);
+    } finally {
+      if (originalDirectoryAccess) directoryAccessService.checkSessionWorkingDirectoryAccess = originalDirectoryAccess;
+      else delete directoryAccessService.checkSessionWorkingDirectoryAccess;
+    }
     await writeFile(`${f.base}/not-a-directory`, "file");
     assert.equal((await update(String(owned.session_id), { expectedVersion: 2, workingDirectory: `${f.base}/not-a-directory` })).status, 400);
     const audit = f.service.auditEntriesForConsole().find((event) => event.event === "session.metadata.updated");
