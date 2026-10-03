@@ -2,10 +2,10 @@
 
 ## タスク
 
-- 目的: Issue 45 / PR #52 の通常レビュー。URL取得の安全境界、セッション認可/秘匿、画面表示、共有API、設計とテストを確認する。
-- タスク種別: 初回通常レビュー。
-- reviewed HEAD: `ed5527bddf5b50dcd7c214649af3b93e2096198d`。
-- PR base merge-base: `ed698f1031e9aafb88d4aa0fa6252636ea2df742`。
+- 目的: Issue 45 / PR #52 の current-main 統合後の通常レビュー。URL取得の安全境界、セッション認可/秘匿、画面表示、共有API、設計、PR50/51/60統合とテストを確認する。
+- タスク種別: current-main統合後の再通常レビュー / fix-verification cycle。
+- initial normal-review HEAD: `d9fc3b3bf8c9f057f02678e728468b3552648c99`; fix-verification HEAD: `b03c72b8d9772805c766aada607f016801539402`。
+- PR base: current `main` `bfe3793309e09acdd180ffe22a4e4a81e87fc668`。
 
 ## sub-agentを使う理由
 
@@ -13,8 +13,8 @@
 
 ## 対象範囲
 
-- 対象: PR #52 の全差分9パスと直接依存。特に URL 正規化、IPv4/IPv6 special-use deny、DNS answer validation と pinned address、redirect と HTTPS downgrade、HTTP agent/header、期限/最大同時数、HTML title parsing、stale lease/owner guard、audit/log秘匿、session close/expiry cleanup、session_open/session_list、console API/static/dynamic rendering、PR54 `SessionLink` API契約。
-- 基準: Issue 45、`doc/design/session-external-links.md`、当初設計HEAD `8f6c7de9a17ffb451093234c669a67b0a2ca17ae`、PR #52。
+- 対象: current main からの Issue45 差分16パスと直接依存。特に URL 正規化、IPv4/IPv6 special-use deny、DNS answer validation と pinned address、redirect と HTTPS downgrade、HTTP agent/header、期限/最大同時数、HTML title parsing、stale lease/owner guard、audit/log秘匿、session close/expiry cleanup、session_open/session_list、console API/static/dynamic rendering、PR54/Issue48 `SessionLink` API契約、および PR50/51/60 の main 統合。
+- 基準: Issue 45、`doc/design/session-external-links.md`、PR #52 current main merge-base range。
 
 ## 対象外
 
@@ -43,36 +43,38 @@
 
 ## 実行コマンド
 
-- `git status --short` — clean at review start.
-- `git rev-parse HEAD` — `ed5527bddf5b50dcd7c214649af3b93e2096198d`.
-- `git diff --name-status ed698f1031e9aafb88d4aa0fa6252636ea2df742...HEAD` — enumerated all 14 paths.
-- `git diff --stat ed698f1031e9aafb88d4aa0fa6252636ea2df742...HEAD` and targeted full-source review of changed implementation, design, tests, package scripts, and supplied implementation/test evidence.
-- No tests were run during review; reviewed the committed test/validation evidence. This exact reviewed HEAD is local-only and has not been pushed. The GitHub branch currently stops at `0a39da5e27ec25179d2cfe8b214bb55cdac26f4e`; no GitHub CI run matches either this review HEAD or the currently pushed candidate, and historical runs use unrelated SHAs.
+- `git status --short` — clean at review start; only this report was edited during review.
+- `git rev-parse HEAD` — `d9fc3b3bf8c9f057f02678e728468b3552648c99`.
+- `git diff --name-status bfe3793309e09acdd180ffe22a4e4a81e87fc668...HEAD` — enumerated all 16 changed paths.
+- `git diff --stat bfe3793309e09acdd180ffe22a4e4a81e87fc668...HEAD`, source/test/design review, and `git diff --check bfe3793309e09acdd180ffe22a4e4a81e87fc668...HEAD` (passed).
+- No tests were run by reviewer; validation evidence was inspected in `reports/issue-45-main-integration-verification-20261003.md` and `reports/issue-45-test-evidence-20261003211318.md`.
 
 ## 対象ファイル
 
-- Reviewed identity: HEAD `ed5527bddf5b50dcd7c214649af3b93e2096198d`; base `ed698f1031e9aafb88d4aa0fa6252636ea2df742`; range `ed698f1031e9aafb88d4aa0fa6252636ea2df742...ed5527bddf5b50dcd7c214649af3b93e2096198d`.
-- Reviewer: normal review worker, independent of implementation as delegated; no nested agents.
-- All 14 changed paths reviewed: `doc/design/session-external-links.md`, `package.json`, `reports/issue-45-implementation-20261003211318.md`, `reports/issue-45-review-summary-20261003211416.md`, `reports/issue-45-test-evidence-20261003211318.md`, `src/index.ts`, `src/session-links.ts`, `src/user-console-client.ts`, `src/user-console.ts`, `tasks/phases-status.md`, `tasks/tasks-status.md`, `test/session-links.integration.test.ts`, `test/session-links.test.ts`, `test/user-console-client.test.ts`.
-- Also inspected direct dependencies and integration boundaries in `src/index.ts`, `src/user-console.ts`, `src/user-console-client.ts`, `package.json`, the design and test evidence reports, and PR54 `SessionLink` interface defined in `src/session-links.ts`.
+- Reviewed identity: HEAD `d9fc3b3bf8c9f057f02678e728468b3552648c99`; base `bfe3793309e09acdd180ffe22a4e4a81e87fc668`; range `bfe3793309e09acdd180ffe22a4e4a81e87fc668...d9fc3b3bf8c9f057f02678e728468b3552648c99`.
+- Reviewer: normal review worker, continuing prior normal review; no nested agents. This is a new current-main review/fix-verification cycle, not independent final review.
+- All 16 changed paths reviewed: `doc/design/session-external-links.md`, `package.json`, `reports/issue-45-implementation-20261003211318.md`, `reports/issue-45-independent-final-review-20261003212419.md`, `reports/issue-45-main-integration-verification-20261003.md`, `reports/issue-45-review-summary-20261003211416.md`, `reports/issue-45-test-evidence-20261003211318.md`, `src/index.ts`, `src/session-links.ts`, `src/user-console-client.ts`, `src/user-console.ts`, `tasks/phases-status.md`, `tasks/tasks-status.md`, `test/session-links.integration.test.ts`, `test/session-links.test.ts`, `test/user-console-client.test.ts`.
+- PR54/Issue48 `SessionLink` contract, PR50 relative/exact session time disclosure, PR51 auto-refresh and selection preservation, and PR60 process context were reviewed in source, tests, and the integration report. Main functionality remains present in merged source; the required finding below concerns how the new link event interacts with PR51's explicit pause control.
 
 ## 指摘事項
 
-- 指摘なし。Required findings: none. No finding IDs were created.
-- Coverage dispositions: requirement/design and scope `checked_no_finding`; SSRF parsing, IPv4/IPv6 deny policy, mixed DNS answer rejection, pinned address, redirect revalidation and downgrade checks `checked_no_finding`; credential/header/log secrecy `checked_no_finding`; owner/auth checks, fetch lease/revision stale-result suppression, notification scope `checked_no_finding`; title parsing, bounds and deadlines `checked_no_finding`; close/expiry cleanup ordering under audit errors `checked_no_finding`; static/dynamic UI escaping and `target=_blank` protections `checked_no_finding`; direct dependencies/API compatibility/tests/reports/tracking `checked_no_finding`.
-- Held (non-blocking): exact-HEAD GitHub CI, including Windows shards, is absent; no real-browser visual test was performed. These do not indicate a code defect in inspected evidence, but remain validation gaps.
-- Unexplored/blocked: none material to the scoped source review. Platform-specific behavior beyond supplied Linux evidence remains unverified.
+- **ISSUE45-NR-001 — P2 (medium), initially required; closed on fix verification.** Original location: `src/user-console-client.ts:936` at reviewed HEAD `d9fc3b3bf8c9f057f02678e728468b3552648c99`. The `session-link-updated` handler then called `refreshState()` regardless of the session-list auto-refresh toggle, bypassing the user's pause setting and the Issue45 design. Required actions: gate the event-triggered state refresh on auto-refresh being enabled and add a disabled-toggle regression while retaining enabled behavior. Fix verification at HEAD `b03c72b8d9772805c766aada607f016801539402` confirms both actions; current source line 936 checks `generation === currentGeneration && autoEnabled()` before calling `refreshState()`. Focused enabled and paused tests both pass (2/2 supplied evidence).
+- No other required findings. SSRF validation, full deny policy as implemented, DNS mixed-answer rejection and pinning, redirect revalidation/downgrade, credentials and logs, owner authorization, revision leases/stale results, expiry/close cleanup, title bounds/deadlines, API surface, and safe HTML/client rendering: `checked_no_finding`.
+- Main integration coverage: PR50 session time disclosures retained; PR51 automatic refresh, list-selection preservation/deferment, and focus restoration retained; PR60 process purpose/command context preserved by state rendering. The event path's pause-control regression is the specific issue above.
+- Held: exact-HEAD GitHub CI has not yet been started; treat as held validation, not a code finding. No other blocked evidence identified.
+- Unexplored: no material scoped source area. The supplied Chromium headless evidence does not establish physical device or speech-output behavior, which was not requested as a gate.
 
 ## 結果
 
-- Verdict: `pass_with_held` — no required finding; current-HEAD remote CI and visual browser confirmation remain held.
-- Supplied validation evidence reports `npm test` (122 tests, 111 passed, 11 skipped, 0 failed), `npm run check`, `npm run lint`, and `npm run build` all succeeded on the implementation content represented by this HEAD. These commands were not rerun during review.
-- No exact-HEAD GitHub CI run is available. This review target is local-only; older runs at other SHAs do not validate it.
-- No explicit severity reclassification; no finding completeness matrix applies because there are no findings.
-- No implementation, design, task-tracking, or product edits were made. Only child-owned sections of this pre-existing report were filled. `reserved_report_paths`: none. `report_attestation_allowed`: false (this is a normal review, not an independent-final-review attestation).
+- Fix-verification verdict: `pass_with_held` for finding closure. The sole finding ISSUE45-NR-001 is closed; its source severity remains P2 (no reclassification).
+- Reviewed closure identity: exact HEAD `b03c72b8d9772805c766aada607f016801539402`; base `bfe3793309e09acdd180ffe22a4e4a81e87fc668`. The target source is unchanged during this review.
+- Direct fix evidence: `src/user-console-client.ts:936` gates the SSE state refresh on `autoEnabled()` as well as event generation. The existing enabled-event regression retains state-only refresh and safe URL/title rendering. New paused-event regression verifies no additional `/api/console-state` request, no log-page fetch, and no automatic redraw. Parent-supplied execution evidence reports the regression was Red before the fix, then enabled/paused tests pass 2/2.
+- Supplied post-fix full validation: `npm test` 158 total, 147 passed, 0 failed, 11 platform skips; `npm run check`, `npm run lint`, and `npm run build` pass. Reviewer did not rerun commands.
+- Exact-HEAD GitHub CI has not been started; the prior `d9fc3b3` CI is stale for this fix. This remains held validation, not a code finding. No new finding was identified in direct side effects.
+- Finding completeness matrix for ISSUE45-NR-001: (1) gate notification refresh when paused — implemented at `src/user-console-client.ts:936`, verified by source inspection; (2) focused paused-toggle regression with enabled case retained — implemented at `test/user-console-client.test.ts:377-425`, supplied focused execution 2/2 pass. All required actions complete.
+- No product or task-tracking edits were made. Only the review report was updated. `reserved_report_paths`: none. `report_attestation_allowed`: false.
 
 ## リスク
 
-- Local validation is Linux-only evidence; Windows behavior is not established. Obtain matching exact-HEAD CI before treating that gate as satisfied.
-- Actual browser visual testing was not performed. The supplied implementation report identifies the owner console cases to inspect in a browser; generated HTML and client-state assertions are not a visual substitute.
-- Reported prior local validation is tied to this implementation content per the evidence report, but remote CI absence remains explicit; do not claim exact-HEAD CI passed.
+- The pause-setting bypass is fixed and its finding closed at the reviewed closure HEAD.
+- CI is pending on exact closure HEAD; the reported browser evidence is headless at a 390px viewport, not a physical handset or speech-output test.
