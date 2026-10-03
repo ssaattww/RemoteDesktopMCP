@@ -38,6 +38,7 @@
 | F03 | P4 | 単一 PC の Tailscale Funnel と ChatGPT 公開接続検証 | F01,F01a,F01b,F01c | M | 実際の公開経路から認証と操作、再起動後の接続を確認 | 公開起動済み。HTTPSの認証案内と未認証401確認、ChatGPT実操作を利用者へ依頼中 |
 | F04 | P4 | 公開接続の通常・独立レビュー | F01a,F01b,F01c | M | Sol / high で公開用変更を確認し、F03 の実運用結果と未検証事項を区別 | 通常10件解消後、3ffd783の独立レビューで追加3件。F01dで対応し同じ独立担当へ限定確認 |
 | T09 | P4 | Issue #55: 長時間実行プロセスの目的・コマンド表示 | T08 | M | 設計レビュー、Red/Green、所有者・認可・マスク回帰、Windows実画面確認手順と証拠、Draft PR | 設計レビューpass。通常reviewのNR55-1/2はfix-verification pass_with_held。最新全体試験120件中109成功・skip 11・失敗0、lint/build成功。FA780実画面・画像証拠とDraft更新・push待ち |
+| T10 | P5 | P1 Issue #46: User Console 自動更新と選択保持 | なし | M | 一覧と交差するlive Rangeの間は破壊的更新を保留し、解除後に最新状態を反映。`pagehide` / 認証失効で保留破棄。PR #50日時表示とPR #60の長時間process context/active-firstを併存。通常・独立レビューと統合後CIを完了 | 当初実装・通常fix verification・独立レビュー・FA780実画面9ケースと旧HEAD CIは成功。PR #60取り込みでpackage.json、client、test、trackingの競合を検出し、両featureを維持して通常統合中。旧attestationの有効性は撤回。統合後の通常レビュー、同じ独立reviewerの差分確認、exact-head CI待ち。PR #51未マージ |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。

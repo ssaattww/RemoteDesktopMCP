@@ -37,12 +37,19 @@ function clientBootstrap(): void {
   type LogPage = { items: LogItem[]; newestCursor: string; oldestCursor: string; hasMoreOlder: boolean; hasMoreNewer: boolean };
   type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
   type LogState = "current" | "pending" | "refreshing" | "resync-required";
+  type ConsoleState = {
+    stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
+    sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
+    running?: Array<{ operation_id: string; connection_id: string; label: string; status: string; purpose?: string; command?: string }>;
+  };
   const sessionId = root.dataset.sessionId ?? "";
   const operationRows = document.getElementById("operation-rows") as HTMLTableSectionElement | null;
   const processDetails = document.getElementById("process-details");
   const status = document.getElementById("log-status");
   const newButton = document.getElementById("log-new-button") as HTMLButtonElement | null;
   const olderButton = document.getElementById("log-older-button") as HTMLButtonElement | null;
+  const autoRefresh = document.getElementById("auto-refresh") as HTMLInputElement | null;
+  const listPage = !sessionId && Boolean(autoRefresh);
   const eventSourceFactory = (url: string) => new EventSource(url);
   let appliedCursor = root.dataset.newestCursor ?? "";
   let oldestCursor = root.dataset.oldestCursor ?? "";
@@ -64,6 +71,11 @@ function clientBootstrap(): void {
   const baselineProcesses = new Map<string, { session: string; process: string; start?: Record<string, unknown>; events: Array<Record<string, unknown>> }>();
   const liveProcesses = new Map<string, { purpose: string; command: string; status: string }>();
   let connection: EventSource | undefined;
+  let pageLeft = false;
+  let pageGeneration = 0;
+  let authenticationEnded = false;
+  let manualGeneration = 0;
+  let manualController: AbortController | undefined;
   let generation = 0;
   let storeGeneration = 0;
   let connectionState: ConnectionState = "connecting";
@@ -72,6 +84,51 @@ function clientBootstrap(): void {
   let pendingOverflow = false;
   let gapCount = 0;
   const pageLimit = 200;
+  let autoGeneration = 0;
+  let autoTimer: ReturnType<typeof setTimeout> | undefined;
+  let autoBusy = false;
+  let autoPending = false;
+  let manualPending = false;
+  let noticeGeneration = 0;
+  let stateRequestGeneration = 0;
+  let statePending = false;
+  let deferredConsoleState: ConsoleState | undefined;
+  let resyncPending = false;
+  let pageHidden = document.hidden;
+  let autoController: AbortController | undefined;
+  let lastAutomaticCycleAt = Number.NEGATIVE_INFINITY;
+  const autoEnabled = () => Boolean(listPage && autoRefresh?.checked && !pageHidden && !pageLeft && !authenticationEnded);
+  const readsAllowed = () => !authenticationEnded && !pageLeft;
+  const cancelAutomatic = () => { autoGeneration += 1; if (autoTimer !== undefined) clearTimeout(autoTimer); autoTimer = undefined; autoController?.abort(); };
+  function stopAuthentication() {
+    if (authenticationEnded) return;
+    authenticationEnded = true;
+    deferredConsoleState = undefined;
+    cancelAutomatic();
+    manualPending = false;
+    manualGeneration += 1;
+    manualController?.abort();
+    generation += 1;
+    pageGeneration += 1;
+    if (connection) connection.close();
+    connectionState = "disconnected";
+    if (autoRefresh) autoRefresh.disabled = true;
+    if (newButton) newButton.disabled = true;
+    if (olderButton) olderButton.disabled = true;
+    if (status) status.textContent = "認証またはアクセス権を確認してください。再読み込み後に再認証できます。";
+  }
+  const isAuthenticationFailure = (response: Response) => {
+    if (response.status !== 401 && response.status !== 403) return false;
+    stopAuthentication();
+    return true;
+  };
+  const scheduleAutomatic = () => {
+    if (!autoEnabled() || autoBusy || autoTimer !== undefined || !(autoPending || statePending || resyncPending)) return;
+    const generationAtSchedule = autoGeneration;
+    const wait = Math.max(0, 2000 - (Date.now() - lastAutomaticCycleAt));
+    if (wait === 0) { void automaticCycle(); return; }
+    autoTimer = setTimeout(() => { autoTimer = undefined; if (generationAtSchedule === autoGeneration) void automaticCycle(); }, wait);
+  };
 
   const query = (name: string, value: string) => name + "=" + encodeURIComponent(value);
   const apiPath = (path: string) => path + (sessionId ? "?" + query("session_id", sessionId) : "");
@@ -163,14 +220,19 @@ function clientBootstrap(): void {
     if (Number.isNaN(date.getTime())) return "—";
     return new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "medium", hourCycle: "h23" }).format(date) + " JST";
   };
-  const appendSessionTimeCell = (row: HTMLTableRowElement, value: unknown, sessionId: string, kind: "created" | "last-access", open: boolean) => {
+  const addCell = (row: HTMLTableRowElement, value: unknown) => {
+    const cell = row.insertCell();
+    cell.textContent = String(value ?? "—");
+    return cell;
+  };
+  const appendSessionTimeCell = (row: HTMLTableRowElement, value: unknown, id: string, kind: "created" | "last-access", open: boolean) => {
     const cell = row.insertCell();
     cell.className = "session-time-cell";
     const display = formatSessionTime(value);
     if (!display) { cell.textContent = "—"; return undefined; }
     const details = document.createElement("details");
     details.className = "session-time";
-    details.dataset.sessionId = sessionId;
+    details.dataset.sessionId = id;
     details.dataset.sessionTime = kind;
     details.open = open;
     const summary = document.createElement("summary");
@@ -186,11 +248,6 @@ function clientBootstrap(): void {
     details.append(exact);
     cell.append(details);
     return details;
-  };
-  const addCell = (row: HTMLTableRowElement, value: unknown) => {
-    const cell = row.insertCell();
-    cell.textContent = String(value ?? "—");
-    return cell;
   };
   const operationStatus = (event: Record<string, unknown>) => typeof event.status === "string" ? event.status : typeof event.event === "string" && event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(event.event) ? event.event.slice("operation.".length) : "running";
   const renderOperations = () => {
@@ -389,25 +446,31 @@ function clientBootstrap(): void {
     showPending();
   };
   const fetchPage = async (params: URLSearchParams): Promise<{ response: Response; page?: LogPage }> => {
+    if (!readsAllowed()) throw new Error("read stopped");
     if (sessionId) params.set("session_id", sessionId);
     const response = await fetch("/api/logs?" + params.toString(), { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!readsAllowed()) throw new Error("read stopped");
+    if (isAuthenticationFailure(response)) return { response };
     if (!response.ok) return { response };
-    return { response, page: await response.json() as LogPage };
+    const page = await response.json() as LogPage;
+    if (!readsAllowed()) throw new Error("read stopped");
+    return { response, page };
   };
   const applyNewLogs = async () => {
-    if (logState === "refreshing") return;
+    if (!readsAllowed() || logState === "refreshing") return;
     const startCursor = displayNewestCursor || appliedCursor;
     updateLogState("refreshing");
     const fetched: LogItem[] = [];
     let cursor = startCursor;
     let newest = startCursor;
     const operationGeneration = storeGeneration;
+    const screenGeneration = pageGeneration;
     try {
       while (true) {
         const params = new URLSearchParams({ limit: String(pageLimit) });
         if (cursor) params.set("after", cursor);
         const result = await fetchPage(params);
-        if (operationGeneration !== storeGeneration) return;
+        if (!readsAllowed() || operationGeneration !== storeGeneration || screenGeneration !== pageGeneration) return;
         if (result.response.status === 409) { await resync(); return; }
         if (!result.response.ok || !result.page) throw new Error("logs request failed");
         const page = result.page;
@@ -418,6 +481,7 @@ function clientBootstrap(): void {
         if (!page.hasMoreNewer || !page.items.length || page.newestCursor === cursor) break;
         cursor = page.newestCursor;
       }
+      if (!readsAllowed() || screenGeneration !== pageGeneration) return;
       commitItems(fetched, "newer");
       appliedCursor = newest;
       root.dataset.newestCursor = newest;
@@ -426,15 +490,97 @@ function clientBootstrap(): void {
       void refreshState();
       updateLogState("current");
     } catch {
+      if (authenticationEnded) return;
       updateLogState("pending");
       void refreshState();
     }
   };
+  async function automaticCycle(manual = false) {
+    if (authenticationEnded || (!manual && !autoEnabled()) || autoBusy) return;
+    const expected = manual ? manualGeneration : autoGeneration;
+    lastAutomaticCycleAt = Date.now();
+    const noticesAtStart = noticeGeneration;
+    const controller = new AbortController();
+    if (manual) manualController = controller; else autoController = controller;
+    autoBusy = true;
+    const current = () => expected === (manual ? manualGeneration : autoGeneration) && !pageLeft && !authenticationEnded && (manual || autoEnabled()) && !controller.signal.aborted;
+    let needsState = statePending;
+    try {
+      if (resyncPending) {
+        const response = await fetch("/api/logs?limit=" + pageLimit, { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
+        if (!current()) return;
+        if (isAuthenticationFailure(response)) return;
+        if (!response.ok) throw new Error("resync failed");
+        const page = await response.json() as LogPage;
+        if (!current()) return;
+        commitItems(chronological(page.items), "replace");
+        if (!current()) return;
+        appliedCursor = page.newestCursor; oldestCursor = page.oldestCursor; hasMoreOlder = page.hasMoreOlder;
+        root.dataset.newestCursor = appliedCursor; root.dataset.oldestCursor = oldestCursor; root.dataset.hasMoreOlder = String(hasMoreOlder);
+        pendingCount = 0; pendingOverflow = false; resyncPending = false;
+        autoPending = noticeGeneration !== noticesAtStart;
+        if (!autoPending) showPending();
+        needsState = true; statePending = true;
+        restartEvents();
+      } else if (autoPending) {
+        let cursor = appliedCursor;
+        let completed = false;
+        for (let pageNumber = 0; pageNumber < 5; pageNumber += 1) {
+          const params = new URLSearchParams({ limit: String(pageLimit), after: cursor });
+          const response = await fetch("/api/logs?" + params, { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
+          if (!current()) return;
+          if (isAuthenticationFailure(response)) return;
+          if (response.status === 409) { resyncPending = true; break; }
+          if (!response.ok) throw new Error("logs request failed");
+          const page = await response.json() as LogPage;
+          if (!current()) return;
+          if (!Array.isArray(page.items)) throw new Error("invalid logs response");
+          commitItems(chronological(page.items), "newer");
+          if (!current()) return;
+          cursor = page.newestCursor || cursor;
+          appliedCursor = cursor; root.dataset.newestCursor = cursor;
+          needsState = true; statePending = true;
+          if (!page.hasMoreNewer || !page.items.length || cursor === params.get("after")) { completed = true; break; }
+        }
+        if (completed && noticeGeneration === noticesAtStart) { autoPending = false; pendingCount = 0; pendingOverflow = false; showPending(); }
+        else if (completed) autoPending = true;
+      }
+      if (needsState) {
+        const stateRequest = ++stateRequestGeneration;
+        const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
+        if (!current() || stateRequest !== stateRequestGeneration) return;
+        if (isAuthenticationFailure(response)) return;
+        if (!response.ok) throw new Error("state request failed");
+        const state = await response.json();
+        if (!current() || stateRequest !== stateRequestGeneration) return;
+        statePending = false;
+        await refreshStateFrom(state);
+        if (!current()) return;
+      }
+      updateLogState(autoPending || resyncPending || statePending ? "pending" : "current");
+    } catch {
+      if (current()) { autoPending = autoPending || pendingCount > 0 || pendingOverflow; statePending = needsState || statePending; updateLogState("pending"); }
+    } finally {
+      if (autoController === controller) autoController = undefined;
+      if (manualController === controller) manualController = undefined;
+      autoBusy = false;
+      if (!readsAllowed()) manualPending = false;
+      else if (manualPending) {
+        manualPending = false;
+        autoPending = true;
+        statePending = true;
+        void automaticCycle(true);
+      } else scheduleAutomatic();
+    }
+  }
   async function resync() {
+    if (!readsAllowed()) return;
+    const screenGeneration = pageGeneration;
     updateLogState("resync-required");
     const params = new URLSearchParams({ limit: String(pageLimit) });
     try {
       const result = await fetchPage(params);
+      if (!readsAllowed() || screenGeneration !== pageGeneration) return;
       if (!result.response.ok || !result.page) throw new Error("resync failed");
       commitItems(chronological(result.page.items), "replace");
       appliedCursor = result.page.newestCursor;
@@ -448,18 +594,22 @@ function clientBootstrap(): void {
       restartEvents();
       void refreshState();
       updateLogState("current");
-    } catch { updateLogState("pending"); void refreshState(); }
+    } catch {
+      if (authenticationEnded) return;
+      updateLogState("pending");
+      void refreshState();
+    }
   }
   const chronological = (pageItems: LogItem[]) => [...pageItems].reverse();
   const loadOlder = async () => {
-    if (!hasMoreOlder || !oldestCursor || olderButton?.disabled) return;
+    if (!readsAllowed() || !hasMoreOlder || !oldestCursor || olderButton?.disabled) return;
     if (olderButton) { olderButton.disabled = true; olderButton.textContent = "取得中…"; }
     const before = oldestCursor;
     const operationGeneration = storeGeneration;
     try {
       const params = new URLSearchParams({ limit: String(pageLimit), before });
       const result = await fetchPage(params);
-      if (operationGeneration !== storeGeneration) return;
+      if (!readsAllowed() || operationGeneration !== storeGeneration) return;
       if (result.response.status === 409) { await resync(); return; }
       if (!result.response.ok || !result.page) throw new Error("older logs request failed");
       commitItems(chronological(result.page.items), "older");
@@ -468,18 +618,108 @@ function clientBootstrap(): void {
       root.dataset.oldestCursor = oldestCursor;
       root.dataset.hasMoreOlder = String(hasMoreOlder);
       if (olderButton) olderButton.hidden = !hasMoreOlder;
-    } catch { if (status) status.textContent = "過去のログを取得できませんでした。再試行してください。"; }
-    finally { if (olderButton) { olderButton.disabled = false; olderButton.textContent = "過去のログを読み込む"; } }
+    } catch { if (!authenticationEnded && status) status.textContent = "過去のログを取得できませんでした。再試行してください。"; }
+    finally { if (olderButton) { olderButton.disabled = authenticationEnded; olderButton.textContent = "過去のログを読み込む"; } }
   };
-  const refreshState = async () => {
+  const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
+  let relativeUpdateInterval: number | undefined;
+  let secondsUpdateInterval: number | undefined;
+  let futureBoundaryTimeout: number | undefined;
+  const isSecondDisplay = (value: string | null) => /^\d+秒(?:前|後)$/.test(value ?? "");
+  const sessionRelativeElements = () => sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? [];
+  const syncSessionSecondUpdates = () => {
+    const hasSecondDisplay = Array.from(sessionRelativeElements()).some((relative) => isSecondDisplay(relative.textContent));
+    if (hasSecondDisplay && secondsUpdateInterval === undefined) {
+      secondsUpdateInterval = window.setInterval(updateSessionSecondTimes, 1_000);
+    } else if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionFutureBoundary = () => {
+    if (futureBoundaryTimeout !== undefined) {
+      window.clearTimeout(futureBoundaryTimeout);
+      futureBoundaryTimeout = undefined;
+    }
+    const now = Date.now();
+    let nearestDelay: number | undefined;
+    for (const relative of sessionRelativeElements()) {
+      const timestamp = Date.parse(relative.dateTime);
+      const remaining = timestamp - now;
+      if (!Number.isFinite(timestamp) || remaining < 60_000) continue;
+      const delay = Math.min(remaining - 59_999, 2_147_483_647);
+      if (nearestDelay === undefined || delay < nearestDelay) nearestDelay = delay;
+    }
+    if (nearestDelay !== undefined) {
+      futureBoundaryTimeout = window.setTimeout(() => {
+        futureBoundaryTimeout = undefined;
+        updateSessionRelativeTimes();
+      }, nearestDelay);
+    }
+  };
+  const updateSessionRelativeTimes = () => {
+    for (const relative of sessionRelativeElements()) {
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+    }
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const updateSessionSecondTimes = () => {
+    let hasSecondDisplay = false;
+    for (const relative of sessionRelativeElements()) {
+      if (!isSecondDisplay(relative.textContent)) continue;
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+      if (isSecondDisplay(next)) hasSecondDisplay = true;
+    }
+    if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionTimeUpdates = () => {
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const stopSessionRelativeUpdates = () => {
+    if (relativeUpdateInterval !== undefined) window.clearInterval(relativeUpdateInterval);
+    if (secondsUpdateInterval !== undefined) window.clearInterval(secondsUpdateInterval);
+    if (futureBoundaryTimeout !== undefined) window.clearTimeout(futureBoundaryTimeout);
+    relativeUpdateInterval = undefined;
+    secondsUpdateInterval = undefined;
+    futureBoundaryTimeout = undefined;
+  };
+  const startSessionRelativeUpdates = () => {
+    if (!sessionRows || relativeUpdateInterval !== undefined) return;
+    updateSessionRelativeTimes();
+    relativeUpdateInterval = window.setInterval(updateSessionRelativeTimes, 60_000);
+  };
+  if (sessionRows) {
+    window.addEventListener("pagehide", stopSessionRelativeUpdates);
+    window.addEventListener("pageshow", startSessionRelativeUpdates);
+    startSessionRelativeUpdates();
+  }
+  const selectionIntersectsSessionRows = () => {
+    if (!sessionRows) return false;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    const anchorInside = Boolean(selection.anchorNode && sessionRows.contains(selection.anchorNode as Node));
+    const focusInside = Boolean(selection.focusNode && sessionRows.contains(selection.focusNode as Node));
+    // Selections wholly owned by the list can use the existing endpoint rebinding.
+    if (anchorInside && focusInside) return false;
     try {
-      const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
-      if (!response.ok) return;
-      const state = await response.json() as {
-        stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
-        sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
-        running?: Array<{ operation_id: string; connection_id: string; label: string; status: string; purpose?: string; command?: string }>;
-      };
+      const range = typeof selection.getRangeAt === "function" && (selection.rangeCount === undefined || selection.rangeCount > 0)
+        ? selection.getRangeAt(0) : undefined;
+      if (range?.intersectsNode) return range.intersectsNode(sessionRows);
+    } catch { /* Use endpoint containment when an implementation cannot inspect this range. */ }
+    return anchorInside !== focusInside;
+  };
+  const refreshStateFrom = async (state: ConsoleState) => {
+      if (state.sessions && selectionIntersectsSessionRows()) {
+        deferredConsoleState = state;
+        return;
+      }
       if (state.running) {
         liveProcesses.clear();
         for (const operation of state.running) if (operation.label === "process") liveProcesses.set(processKey(operation.connection_id, operation.operation_id), { purpose: operation.purpose ?? "", command: operation.command ?? "", status: operation.status });
@@ -493,16 +733,39 @@ function clientBootstrap(): void {
       if (active) active.textContent = String(state.activeSessions);
       if (running) running.textContent = String(state.runningProcesses);
       if (updated) updated.textContent = timeText(state.updatedAt);
-      const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
       if (sessionRows && state.sessions) {
+        const focusedElement = document.activeElement as HTMLElement | null;
+        const focusedRow = focusedElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null;
+        const focusedSessionId = focusedRow?.dataset.sessionId;
+        const selection = window.getSelection();
+        const selectionPoint = (node: Node | null, offset: number) => {
+          const cell = (node?.parentElement?.closest("td") ?? null) as HTMLTableCellElement | null;
+          const row = (cell?.closest("tr[data-session-id]") ?? null) as HTMLTableRowElement | null;
+          if (!node || !cell || !row || !sessionRows.contains(node)) return undefined;
+          const cellIndex = Array.prototype.indexOf.call(row.cells, cell) as number;
+          if (cellIndex < 0) return undefined;
+          const range = document.createRange(); range.selectNodeContents(cell); range.setEnd(node, offset);
+          return { sessionId: row.dataset.sessionId ?? "", cellIndex, cellText: cell.textContent ?? "", offset: range.toString().length };
+        };
+        const savedSelection = (() => {
+          if (!selection || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) return undefined;
+          const anchor = selectionPoint(selection.anchorNode, selection.anchorOffset);
+          const focus = selectionPoint(selection.focusNode, selection.focusOffset);
+          // Only selections wholly owned by session rows are managed during this redraw.
+          if (!anchor || !focus) return undefined;
+          return { text: selection.toString(), anchor, focus };
+        })();
+        const visibleRows = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")];
+        const anchorRow = visibleRows.find((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > 0 && rect.top < window.innerHeight; });
+        const scrollAnchor = anchorRow ? { sessionId: anchorRow.dataset.sessionId ?? "", top: anchorRow.getBoundingClientRect().top } : undefined;
+        const priorScrollY = window.scrollY;
         const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
         const savedOpenByKey = new Map<string, boolean>();
         let focusedTimeKey: string | undefined;
         for (const details of sessionRows.querySelectorAll<HTMLDetailsElement>("details[data-session-time]")) {
           const key = JSON.stringify([details.dataset.sessionId ?? "", details.dataset.sessionTime ?? ""]);
           savedOpenByKey.set(key, details.open);
-          const summary = details.querySelector("summary");
-          if (summary && document.activeElement === summary) focusedTimeKey = key;
+          if (details.querySelector("summary") === document.activeElement) focusedTimeKey = key;
         }
         const restoredSummaries = new Map<string, HTMLElement>();
         sessionRows.replaceChildren();
@@ -511,6 +774,7 @@ function clientBootstrap(): void {
           cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
         } else for (const session of visibleSessions) {
           const row = sessionRows.insertRow();
+          row.dataset.sessionId = session.session_id;
           const linkCell = row.insertCell(); const link = document.createElement("a");
           link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
           const createdKey = JSON.stringify([session.session_id, "created"]);
@@ -526,7 +790,61 @@ function clientBootstrap(): void {
           addCell(row, session.session_id);
           addCell(row, session.working_directory ?? "—");
         }
+        if (focusedSessionId) {
+          const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === focusedSessionId);
+          if (!selection || selection.isCollapsed) restoredRow?.querySelector("a")?.focus();
+        }
         if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
+        if (savedSelection && selection) {
+          const locate = (point: NonNullable<typeof savedSelection.anchor>) => {
+            if (!point) return undefined;
+            const row = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((candidate) => candidate.dataset.sessionId === point.sessionId);
+            const cell = row?.cells[point.cellIndex];
+            // Restore only if the exact endpoint cell survives unchanged; otherwise clear rather than select different text.
+            if (!cell || cell.textContent !== point.cellText) return undefined;
+            const walker = document.createTreeWalker(cell, 4);
+            let remaining = point.offset;
+            let text = walker.nextNode();
+            let last: Node | null = null;
+            while (text) {
+              last = text;
+              const length = text.textContent?.length ?? 0;
+              if (remaining <= length) return { node: text, offset: remaining };
+              remaining -= length; text = walker.nextNode();
+            }
+            return last ? { node: last, offset: last.textContent?.length ?? 0 } : undefined;
+          };
+          const anchor = savedSelection.anchor && locate(savedSelection.anchor);
+          const focus = savedSelection.focus && locate(savedSelection.focus);
+          let restored = false;
+          if (anchor && focus) {
+            if (selection.setBaseAndExtent) {
+              selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+              restored = selection.toString() === savedSelection.text;
+            } else if (selection.collapse && selection.extend) {
+              selection.collapse(anchor.node, anchor.offset);
+              selection.extend(focus.node, focus.offset);
+              restored = selection.toString() === savedSelection.text;
+            } else {
+              const anchorRange = document.createRange(); anchorRange.setStart(anchor.node, anchor.offset); anchorRange.collapse(true);
+              const focusRange = document.createRange(); focusRange.setStart(focus.node, focus.offset); focusRange.collapse(true);
+              const backwards = anchorRange.compareBoundaryPoints(0, focusRange) > 0;
+              const range = document.createRange();
+              range.setStart(backwards ? focus.node : anchor.node, backwards ? focus.offset : anchor.offset);
+              range.setEnd(backwards ? anchor.node : focus.node, backwards ? anchor.offset : focus.offset);
+              selection.removeAllRanges(); selection.addRange(range);
+              restored = selection.toString() === savedSelection.text;
+            }
+          }
+          if (!restored) selection.removeAllRanges();
+        }
+        const restoredAnchor = scrollAnchor && [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === scrollAnchor.sessionId);
+        if (restoredAnchor) {
+          const delta = restoredAnchor.getBoundingClientRect().top - scrollAnchor.top;
+          if (delta) window.scrollBy(0, delta);
+        } else if (window.scrollY !== priorScrollY) {
+          window.scrollTo(window.scrollX, priorScrollY);
+        }
         syncSessionTimeUpdates();
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
@@ -552,6 +870,24 @@ function clientBootstrap(): void {
         if (table) table.hidden = state.running.length === 0;
         if (empty) empty.hidden = state.running.length !== 0;
       }
+  };
+  document.addEventListener("selectionchange", () => {
+    if (!deferredConsoleState || !readsAllowed() || selectionIntersectsSessionRows()) return;
+    const latest = deferredConsoleState;
+    deferredConsoleState = undefined;
+    void refreshStateFrom(latest);
+  });
+  const refreshState = async () => {
+    if (!readsAllowed()) return;
+    const screenGeneration = pageGeneration;
+    const stateRequest = ++stateRequestGeneration;
+    try {
+      const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (isAuthenticationFailure(response)) return;
+      if (!response.ok || !readsAllowed() || screenGeneration !== pageGeneration || stateRequest !== stateRequestGeneration) return;
+      const state = await response.json();
+      if (!readsAllowed() || screenGeneration !== pageGeneration || stateRequest !== stateRequestGeneration) return;
+      await refreshStateFrom(state);
     } catch { /* Keep the last successful state visible. */ }
   };
   function restartEvents() {
@@ -581,15 +917,58 @@ function clientBootstrap(): void {
       pendingCount = firstNotice ? amount : Math.min(1000, pendingCount + amount);
       firstNotice = false;
       pendingOverflow = Boolean(data.overflow) || pendingCount >= 1000;
-      if (pendingCount || pendingOverflow) { updateLogState("pending"); showPending(); }
+      if (pendingCount || pendingOverflow) { noticeGeneration += 1; updateLogState("pending"); showPending(); if (autoEnabled()) { autoPending = true; scheduleAutomatic(); } }
       else if (logState !== "refreshing") { updateLogState("current"); showPending(); }
     });
-    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); void resync(); });
-    source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); });
+    source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); if (listPage) { resyncPending = true; autoPending = true; if (autoEnabled()) scheduleAutomatic(); else updateLogState("resync-required"); } else void resync(); });
+    source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; stopAuthentication(); });
     source.addEventListener("heartbeat", () => { if (generation === currentGeneration && source.readyState === EventSource.OPEN) { connectionState = "connected"; setStatus(); } });
   }
 
-  newButton?.addEventListener("click", () => { void applyNewLogs(); });
+  newButton?.addEventListener("click", () => {
+    if (authenticationEnded || pageLeft) return;
+    if (!listPage) { void applyNewLogs(); return; }
+    if (autoBusy) {
+      if (manualController) return;
+      manualPending = true;
+      autoPending = true;
+      statePending = true;
+      return;
+    }
+    autoPending = true; statePending = true;
+    void automaticCycle(true);
+  });
+  autoRefresh?.addEventListener("change", () => {
+    if (!autoRefresh.checked) { cancelAutomatic(); return; }
+    if (pendingCount || pendingOverflow || resyncPending) autoPending = true;
+    scheduleAutomatic();
+  });
+  document.addEventListener("visibilitychange", () => {
+    pageHidden = document.hidden;
+    if (pageHidden) cancelAutomatic();
+    else { if (pendingCount || pendingOverflow || resyncPending) autoPending = true; scheduleAutomatic(); }
+  });
+  window.addEventListener("pagehide", () => {
+    pageLeft = true;
+    deferredConsoleState = undefined;
+    pageGeneration += 1;
+    cancelAutomatic();
+    manualPending = false;
+    manualGeneration += 1;
+    manualController?.abort();
+    generation += 1;
+    if (connection) connection.close();
+  });
+  window.addEventListener("pageshow", (raw: Event) => {
+    if (!(raw as PageTransitionEvent).persisted || authenticationEnded) return;
+    pageLeft = false;
+    pageGeneration += 1;
+    pageHidden = document.hidden;
+    generation += 1;
+    if (listPage) { autoPending = true; statePending = true; }
+    restartEvents();
+    scheduleAutomatic();
+  });
   olderButton?.addEventListener("click", () => { void loadOlder(); });
   if (processDetails) {
     const hint = document.getElementById("log-pull-hint");
@@ -630,85 +1009,6 @@ function clientBootstrap(): void {
     if (!hasMoreOlder || !oldestCursor || (olderButton && olderButton.disabled)) return;
     if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 120) void loadOlder();
   }, { passive: true });
-  const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
-  let relativeUpdateInterval: number | undefined;
-  let secondsUpdateInterval: number | undefined;
-  let futureBoundaryTimeout: number | undefined;
-  const isSecondDisplay = (value: string | null) => /^\d+秒(?:前|後)$/.test(value ?? "");
-  const sessionRelativeElements = () => sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? [];
-  const updateSessionRelativeTimes = () => {
-    for (const relative of sessionRelativeElements()) {
-      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
-      if (relative.textContent !== next) relative.textContent = next;
-    }
-    syncSessionSecondUpdates();
-    syncSessionFutureBoundary();
-  };
-  const updateSessionSecondTimes = () => {
-    let hasSecondDisplay = false;
-    for (const relative of sessionRelativeElements()) {
-      if (!isSecondDisplay(relative.textContent)) continue;
-      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
-      if (relative.textContent !== next) relative.textContent = next;
-      if (isSecondDisplay(next)) hasSecondDisplay = true;
-    }
-    if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
-      window.clearInterval(secondsUpdateInterval);
-      secondsUpdateInterval = undefined;
-    }
-  };
-  const syncSessionSecondUpdates = () => {
-    const hasSecondDisplay = Array.from(sessionRelativeElements()).some((relative) => isSecondDisplay(relative.textContent));
-    if (hasSecondDisplay && secondsUpdateInterval === undefined) {
-      secondsUpdateInterval = window.setInterval(updateSessionSecondTimes, 1_000);
-    } else if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
-      window.clearInterval(secondsUpdateInterval);
-      secondsUpdateInterval = undefined;
-    }
-  };
-  const syncSessionFutureBoundary = () => {
-    if (futureBoundaryTimeout !== undefined) {
-      window.clearTimeout(futureBoundaryTimeout);
-      futureBoundaryTimeout = undefined;
-    }
-    const now = Date.now();
-    let nearestDelay: number | undefined;
-    for (const relative of sessionRelativeElements()) {
-      const timestamp = Date.parse(relative.dateTime);
-      const remaining = timestamp - now;
-      if (!Number.isFinite(timestamp) || remaining < 60_000) continue;
-      const delay = Math.min(remaining - 59_999, 2_147_483_647);
-      if (nearestDelay === undefined || delay < nearestDelay) nearestDelay = delay;
-    }
-    if (nearestDelay !== undefined) {
-      futureBoundaryTimeout = window.setTimeout(() => {
-        futureBoundaryTimeout = undefined;
-        updateSessionRelativeTimes();
-      }, nearestDelay);
-    }
-  };
-  const syncSessionTimeUpdates = () => {
-    syncSessionSecondUpdates();
-    syncSessionFutureBoundary();
-  };
-  const stopSessionRelativeUpdates = () => {
-    if (relativeUpdateInterval !== undefined) window.clearInterval(relativeUpdateInterval);
-    if (secondsUpdateInterval !== undefined) window.clearInterval(secondsUpdateInterval);
-    if (futureBoundaryTimeout !== undefined) window.clearTimeout(futureBoundaryTimeout);
-    relativeUpdateInterval = undefined;
-    secondsUpdateInterval = undefined;
-    futureBoundaryTimeout = undefined;
-  };
-  const startSessionRelativeUpdates = () => {
-    if (!sessionRows || relativeUpdateInterval !== undefined) return;
-    updateSessionRelativeTimes();
-    relativeUpdateInterval = window.setInterval(updateSessionRelativeTimes, 60_000);
-  };
-  if (sessionRows) {
-    window.addEventListener("pagehide", stopSessionRelativeUpdates);
-    window.addEventListener("pageshow", startSessionRelativeUpdates);
-    startSessionRelativeUpdates();
-  }
   setStatus(); showPending();
   void refreshState();
   restartEvents();

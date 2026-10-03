@@ -1,0 +1,124 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: fix_verification
+  generated_at: 2026-10-03T11:07:12+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #46 / PR #51"
+task_id: user-console-auto-refresh-review
+branch: issue46-user-console-auto-refresh-design
+base_ref: main
+
+target:
+  reviewed_head: f347fa4ff93f17bc9134120d0511e4ff57e1768f
+  previous_reviewed_head: 11367c321838d8900c0068d441a05b2dea569e64
+  base_head: ed698f1031e9aafb88d4aa0fa6252636ea2df742
+  worktree_clean_before_report: true
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  os: Windows
+  working_directory: C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-pr51-review
+  session_id: Fhv2TnwO4KaczJ-_CrqgIJYpIKS1u5h8rkl2XnMN2fc
+
+verdict: fail
+
+findings:
+  - id: RDMCP-PR51-REV-001
+    severity: Medium
+    origin: review
+    status: open
+    summary: Most list-internal selection and scroll restoration is fixed, but a selection crossing the session-list boundary is not preserved because one endpoint is omitted before sessionRows.replaceChildren() removes its live Range endpoint; the fake-DOM boundary test does not model that mutation.
+  - id: RDMCP-PR51-REV-002
+    severity: Low
+    origin: review
+    status: closed
+    summary: OFF mode now explains that automatic reflection stops and manual refresh remains available, with server-rendering coverage.
+  - id: RDMCP-PR51-REV-003
+    severity: Medium
+    origin: review
+    status: closed
+    summary: Shared state request generation now rejects stale /api/console-state results, including the original reverse-completion race regression case.
+  - id: RDMCP-PR51-REV-004
+    severity: Low
+    origin: review
+    status: closed
+    summary: The design now consistently requires regression tests before product implementation and success verification after implementation.
+
+held_conditions:
+  - id: RDMCP-PR51-HOLD-001
+    status: held
+    summary: PR #50 is still open/draft; if it lands first, rebase PR #51 and verify timestamp details open/focus state together with automatic refresh on the resulting main.
+    related_pr: 50
+    related_head: 3a5bb524a23317a950f8b1cb09483b141bbc8fca
+    related_head_checked_at: 2026-10-03T11:05:47+09:00
+    related_head_note: Integration remains a held condition because PR #50 is not present in the current PR #51 base.
+
+validation:
+  local:
+    diff_check: pass
+    focused_user_console_client_tests: "not rerun by reviewer: tsx absent from review and base worktrees"
+    implementation_reported_client_tests: "33 pass / 0 fail at f347fa4ff93f17bc9134120d0511e4ff57e1768f"
+    inline_code_review: pass
+    browser_dom_probe: "not used as evidence: Edge headless exited 0 but dump-dom stdout/stderr were empty"
+  ci:
+    policy: exact_head_only
+    run_id: 37087482904
+    head_sha: f347fa4ff93f17bc9134120d0511e4ff57e1768f
+    event: pull_request
+    conclusion: success
+    jobs:
+      ubuntu: success
+      windows_1_of_3: success
+      windows_2_of_3: success
+      windows_3_of_3: success
+    diagnostics_steps_succeeded: true
+
+diagnostic_workflow:
+  path: .github/workflows/lint.yml
+  change_required: false
+  captures:
+    - test results
+    - stdout
+    - stderr
+    - environment information
+  upload_policy: always
+
+fix_verification:
+  previous_reviewed_head: 11367c321838d8900c0068d441a05b2dea569e64
+  reviewed_head: f347fa4ff93f17bc9134120d0511e4ff57e1768f
+  completeness_matrix:
+    - finding_id: RDMCP-PR51-REV-001
+      required_action: Preserve text selection and visible position through session-row updates.
+      production_path: src/user-console-client.ts:576-640
+      composition_fixture: test/user-console-client.test.ts:889-1018
+      focused_evidence: "partial: internal/cross-row selection cases are covered, but the boundary-crossing fixture does not model live Range mutation during replaceChildren; remains open"
+    - finding_id: RDMCP-PR51-REV-002
+      required_action: Explain that OFF mode uses manual refresh.
+      production_path: src/user-console.ts:262
+      composition_fixture: test/user-console.test.ts:139
+      focused_evidence: closed
+    - finding_id: RDMCP-PR51-REV-003
+      required_action: Prevent stale console-state responses from overwriting newer state.
+      production_path: src/user-console-client.ts:481-487,700-706
+      composition_fixture: test/user-console-client.test.ts:866
+      focused_evidence: closed
+    - finding_id: RDMCP-PR51-REV-004
+      required_action: Make TDD order consistent.
+      production_path: doc/design/user-console-auto-refresh.md:84,107
+      composition_fixture: doc/design/user-console-auto-refresh.md:84,107
+      focused_evidence: closed
+
+scope_notes:
+  - No product implementation, design, test, or workflow code was changed by the reviewer.
+  - No merge was performed.
+  - PR #50 compatibility is a held integration condition because that sibling feature is not present in the current PR #51 base.
+  - RDMCP process PATH did not provide rg; tracked-file searches used git grep after the rg failure.
+
+next_steps:
+  - Fix RDMCP-PR51-REV-001 for selections crossing the session-list boundary and add regression coverage that models live Range mutation during DOM replacement.
+  - If PR #50 lands first, rebase PR #51 and resolve RDMCP-PR51-HOLD-001 while preserving timestamp details open/focus behavior.
+  - Validate only CI runs whose headSha exactly matches the new PR current HEAD.
+  - Re-review RDMCP-PR51-REV-001 with the same Medium severity.
