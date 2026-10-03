@@ -7,6 +7,7 @@ import { createApp, RemoteDesktopService, type RuntimeConfig } from "../src/inde
 import { hashPassword } from "../src/hash-password.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { performance } from "node:perf_hooks";
 import { protectPrivateDirectory } from "../src/private-storage.js";
 
@@ -319,7 +320,7 @@ test("owned process status and output survive receipt-audit failure in fresh and
 
 test("process kill is owner scoped, serializes duplicates, retries terminating after two seconds, and rejects finished processes", async () => {
   const originalNow = performance.now.bind(performance);
-  let monotonicNow = originalNow();
+  let monotonicNow = 10_000;
   performance.now = () => monotonicNow;
   const h = await harness();
   const owner = await h.connect("owner@example.test");
@@ -356,7 +357,10 @@ test("process kill is owner scoped, serializes duplicates, retries terminating a
     assert.equal(pair.filter((entry) => entry.status === "fulfilled").length, 1, "the process lock and throttle must admit one concurrent termination request");
     assert.equal(pair.filter((entry) => entry.status === "rejected").length, 1);
     assert.equal(terminateCalls, 1);
-    monotonicNow += 2_000;
+    monotonicNow += 1_999;
+    await assert.rejects(owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: processFixture.id }), /throttled/i);
+    assert.equal(terminateCalls, 1, "a retry at 1999ms must remain throttled");
+    monotonicNow += 1;
     const retried = await owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: processFixture.id });
     assert.equal(retried.state, "terminating");
     assert.equal(terminateCalls, 2);
@@ -432,6 +436,54 @@ test("process kill preserves applied certainty across internal and common audit 
       await owner.close();
       await h.close();
     }
+  }
+});
+
+test("Desktop Commander SDK request timeout stays unknown through the default process kill path", async () => {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "issue-56-timeout-fixture", version: "1" });
+  const server = new McpServer({ name: "issue-56-timeout-fixture", version: "1" });
+  server.registerTool("slow_fixture", { description: "Safe in-memory timeout fixture", inputSchema: {} }, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { content: [{ type: "text", text: "completed after timeout" }] };
+  });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  let timeoutError: unknown;
+  try {
+    await client.callTool({ name: "slow_fixture", arguments: {} }, undefined, { timeout: 10 });
+  } catch (error) {
+    timeoutError = error;
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await Promise.all([client.close(), server.close()]);
+  }
+  assert.ok(timeoutError instanceof Error, "the SDK must reject the in-memory request on timeout");
+  assert.equal((timeoutError as Error & { code?: unknown }).code, -32001, "the SDK timeout error code must match the Desktop Commander path");
+
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  let terminateCalls = 0;
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "SDK timeout mapping" });
+    const sessionId = String(opened.session_id);
+    const fixture = seedProcess(h.service, { sessionId, id: "sdk-timeout-process" });
+    const internals = h.service as unknown as { dc: { call(name: string, args: Record<string, unknown>, timeout: number): Promise<string> } };
+    internals.dc.call = async (name, args, timeout) => {
+      terminateCalls += 1;
+      assert.equal(name, "force_terminate");
+      assert.deepEqual(args, { pid: fixture.pid });
+      assert.equal(timeout, 2_000);
+      throw timeoutError;
+    };
+    h.setAuditFailure(new Error("termination audit unavailable"), ["process.termination_unconfirmed"]);
+    const result = await owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: fixture.id });
+    assert.equal(result.termination_unconfirmed, true);
+    assert.equal(result.audit_warning, true);
+    assert.equal(result.applied, "unknown");
+    assert.equal(terminateCalls, 1, "a timed out Desktop Commander request must not be retried");
+  } finally {
+    await owner.close();
+    await h.close();
   }
 });
 

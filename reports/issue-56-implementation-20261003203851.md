@@ -125,3 +125,12 @@
 - 統合後全体テスト: `npm test` exit `0`。165 tests、154 pass、11 skip、0 fail、duration 135242 ms。出力は `/tmp/rdmcp-issue56-merge-test.log` に保存。
 - 統合後品質確認: `npm run lint` exit `0`（ESLint、markdownlint 105 files/0 issues、design terms）、`npm run check` exit `0`、`npm run build` exit `0`。
 - この報告追記時点ではmain merge commitはまだpending。統合後の通常reviewer finding closure verificationとPR #61 mergeability確認も未完了。
+
+## 親によるCI失敗診断・修正
+
+- 失敗run: `37157521297`（HEAD `4709fc61c297232008ce3ae164bf1548ed62ab37`）。Windows 3 shardは成功し、Ubuntuは `process kill is owner scoped, serializes duplicates, retries terminating after two seconds, and rejects finished processes` の1件のみ失敗。CI job logはretryを `Process termination request is throttled.` として記録。
+- 再現: 浮動小数時計の固定値 `123.45` では `(123.45 + 2_000) - 123.45` が `1999.9999999999998` となり、既存のstrict `< 2_000` ガード下でfocusedテストが同じthrottled failureになることを確認した。
+- 修正: テストclockを整数 `10_000` に固定し、`1_999ms` の拒否とその1ms後（`2_000ms`）の許可を別々にassert。productionの2秒制限は変更していない。
+- timeout fixture: SDK in-memory transportで実際の `RequestTimeout` error code `-32001` を発生させ、process killのDesktop Commander既定呼び出し境界に渡す安全fixtureを追加。タイムアウト後はtermination unconfirmed・`applied: unknown`、dispatch一回のみを確認。実Desktop Commander子プロセスや実ネットワーク障害は起動していない。
+- 最終ローカル検証: Issue #56 focused 23/23 pass、timeout fixture 1/1 pass、`npm run lint` exit 0（Markdown 106 files / 0 issues、design-term lint含む）、`npm run check` exit 0、`npm run build` exit 0、`npm test` exit 0（166 tests / 155 pass / 11 skip / 0 fail）。
+- 次段階: 現在の差分をpushした後、同一reviewerの修正確認、新HEADのGitHub CI、最終reviewを待つ。実DC外部transport timeoutは未検証のまま区別する。
