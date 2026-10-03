@@ -19,6 +19,8 @@ test("Issue 45 links and Issue 55 session-relative times coexist in the owner co
   try {
     await api.call("session_open", { url: "https://example.com/task", title: "Review document" });
     await api.call("session_open", { title: "<Unlinked title>" });
+    const longTitle = "A long session link title ".repeat(7).trim();
+    await api.call("session_open", { url: "https://example.com/long-title", title: longTitle });
     const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
     assert.equal(login.status, 303);
     const token = /rdmcp_user=([^;,]+)/u.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
@@ -29,6 +31,8 @@ test("Issue 45 links and Issue 55 session-relative times coexist in the owner co
     assert.match(html, /<th[^>]*>リンク<\/th>/u, "the low-priority link column remains in the table");
     assert.match(html, /<a class="session-external-link"[^>]*href="https:\/\/example\.com\/task"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>Review document<\/a>/u);
     assert.match(html, /<span class="session-external-title">&lt;Unlinked title&gt;<\/span>/u, "title-only metadata is escaped and inert");
+    assert.match(html, /<td class="session-external-link-cell" style="text-align:right;font-size:\.9em;color:#777"><a class="session-external-link"[^>]*>A long session link title/u, "external link stays in its right-aligned low-priority cell");
+    assert.match(html, /@media\(max-width:600px\)\{[^<]*th,td\{padding:7px;white-space:nowrap\}[^<]*\.session-list td\.session-external-link-cell\{white-space:normal;overflow-wrap:anywhere;min-width:8em\}/u, "only the narrow-screen external-link cell is allowed to wrap and retains readable width");
   } finally {
     await api.close();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
