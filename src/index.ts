@@ -594,7 +594,10 @@ export class RemoteDesktopService {
       todo.lastGateMono = mono; todo.lastGateWall = wall;
       if (todo.clockAnomaly) return { stale: true, reason: "clock_anomaly", lastUpdatedAt: todo.lastUpdatedAt };
       if (!todo.enabled) return { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
-      if (todo.version > 0 && todo.lastTodoUpdatedMono === null) return { stale: true, reason: "updated_timestamp_missing", lastUpdatedAt: todo.lastUpdatedAt };
+      if (todo.version > 0 && (typeof todo.lastTodoUpdatedMono !== "number" || !Number.isFinite(todo.lastTodoUpdatedMono) || todo.lastTodoUpdatedMono < 0 || todo.lastTodoUpdatedMono > mono)) {
+        todo.clockAnomaly = true;
+        return { stale: true, reason: "updated_timestamp_invalid", lastUpdatedAt: todo.lastUpdatedAt };
+      }
       const base = Math.max(todo.lastTodoUpdatedMono ?? todo.enabledAtMono, todo.enabledAtMono);
       return mono - base >= TODO_GRACE_MS ? { stale: true, reason: "todo_stale", lastUpdatedAt: todo.lastUpdatedAt } : { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
     });
@@ -1110,17 +1113,17 @@ export class RemoteDesktopService {
       const gateSession = typeof record.session_id === "string" ? this.sessions.get(record.session_id) : undefined;
       const processReadException = ["process_status", "process_output"].includes(toolName) && safeException;
       if ((!safeException || processReadException) && gateSession?.user === user && gateSession.state === "active" && gateSession.expires > Date.now()) {
-        if (receivedAuditFailed && gateSession.todo.enabled) return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } }));
+        if (receivedAuditFailed && gateSession.todo.enabled && !processReadException) return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } }));
         const decision = await this.todoGate(gateSession);
         if (decision.stale) {
           if (processReadException) executionOperation.todoStale = true;
-          if (decision.reason === "clock_anomaly" || decision.reason === "clock_unavailable") await this.audit("todo.clock_anomaly", { user, sessionId: gateSession.id, version: gateSession.todo.version, reason: decision.reason }).catch(() => undefined);
+          if (decision.reason === "clock_anomaly" || decision.reason === "clock_unavailable" || decision.reason === "updated_timestamp_invalid") await this.audit("todo.clock_anomaly", { user, sessionId: gateSession.id, version: gateSession.todo.version, reason: decision.reason }).catch(() => undefined);
           if (!processReadException) {
             await this.audit("todo.gate_denied", { user, sessionId: gateSession.id, version: gateSession.todo.version, operation: toolName, reason: decision.reason }).catch(() => undefined);
             return failure(JSON.stringify({ error: { code: "TODO_STALE", reason: decision.reason, last_updated_at: decision.lastUpdatedAt, action: "作業一覧を開いて更新してから操作を再実行してください。" } }));
           }
         }
-        if (!decision.stale && gateSession.todo.enabled) {
+        if (!decision.stale && gateSession.todo.enabled && !processReadException) {
           try { await this.audit("todo.gate_allowed", { user, sessionId: gateSession.id, version: gateSession.todo.version, operation: toolName }); }
           catch { return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } })); }
           gated = true;
@@ -1146,7 +1149,11 @@ export class RemoteDesktopService {
           || (toolName === "todo_enforcement_set" && typeof body.enabled === "boolean")
           || (toolName === "file_transfer_cancel" && body.cancelled === true)
           || (toolName === "process_kill" && body.state === "terminating" && body.rejected !== true);
-        return result({ ...body, audit_warning: true, ...(body.applied === undefined && (gated || appliedByTool) ? { applied: true } : {}) });
+        const appliedResult = body.applied !== undefined ? {}
+          : toolName === "process_kill" && body.termination_unconfirmed === true ? { applied: "unknown" as const }
+          : toolName === "process_kill" && body.rejected === true ? { applied: false }
+          : gated || appliedByTool ? { applied: true } : {};
+        return result({ ...body, audit_warning: true, ...appliedResult });
       }
       return result(body);
     } catch (error) {

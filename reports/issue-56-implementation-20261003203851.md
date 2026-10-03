@@ -75,6 +75,14 @@
 - 時計異常追加確認: `performance.now()` NaN、wall-clock rollback、clock audit reasonは`clock_unavailable`/`clock_anomaly`それぞれ拒否・監査。case focused exit `0`、1/1 pass。
 - phase最終focused regression: `tsx --test test/issue-56-shared-todo.test.ts` exit `0`、20 tests / 20 pass / 0 fail。stdoutにpass行と集計、stderr空。
 - phase最終型検査: `tsc -p tsconfig.json --noEmit` exit `0`、stdout/stderr空。
+- NREV fix-follow-up開始: branch `feature/issue-56-shared-todo`, HEAD `2b5945fdb2cac2e0bec422c61ca683bc111e967a`、worktree clean。Skill経路は`implementation-executor`→`implementation-worker`、TDDは承認レビュー所見ごと。node_modulesはlock SHA一致済みsiblingから一時symlinkし、install/updateなし。
+- NREV-56-01 Red: `tsx --test --test-name-pattern='owned process status and output survive receipt' test/issue-56-shared-todo.test.ts` exit `1`。安全例外のowner/sessionが一致したstatus/outputも、`operation.received`および`todo.gate_allowed`監査故障時に`TODO_GATE_AUDIT_UNAVAILABLE/applied:false`で拒否される仕様assertion path。stdoutに当該MCPエラー、stderr空。Green同focused command exit `0`、1/1 pass（内側4ケース: status/output × fresh/stale）。Freshは各toolでdownstream read 1回、staleはread 0でcached output。両方`audit_warning:true`を返す。
+- NREV-56-02 Red: `--test-name-pattern='versioned Todos reject every nonfinite'` exit `1`。version>0 timestamp undefinedで通常操作のstale拒否がなく`Missing expected rejection` assertion failure。Green同focused command exit `0`、1/1 pass。値matrix `undefined`, `null`, `NaN`, `+Infinity`, `-Infinity`, string, negative finite, future finite`をそれぞれfail-closed・`todo.clock_anomaly(reason=updated_timestamp_invalid)`で監査し、各回Todo update後に通常操作を再許可。version0/nullの初期正常挙動も同テストで再確認。
+- NREV-56-03 Red: `--test-name-pattern='process kill preserves applied certainty'` exit `1`。timeout/rejectedのcommon `operation.succeeded`監査故障合成でrejectedが`applied`未指定（期待false）になるassertion failure。Green同focused command exit `0`、1/1 pass。accepted/rejected/timed_out × internal/common audit failure、さらにtimeout internal+common同時failureの7 case matrixをproduction MCP wrapper経由で確認。accepted=true、rejected=false、timeout=unknownを維持し、全case terminate dispatchは1回のみ。
+- NREV focused最終: `tsx --test test/issue-56-shared-todo.test.ts` exit `0`、23 tests / 23 pass / 0 fail。stdoutに23件passと集計、stderr空。
+- NREV型検査: `tsc -p tsconfig.json --noEmit` exit `0`、stdout/stderr空。
+- NREV Markdown lint: `node scripts/lint-markdown.mjs` exit `0`、stdout `markdownlint: 87 file(s), 0 issue(s)`、stderr空。
+- NREV design terms lint: `node scripts/check-markdown-whitelist.mjs --files doc/design/shared-todo-and-stale-update-gate.md` exit `0`、stdout/stderr空。
 
 ## 対象ファイル
 
@@ -85,6 +93,8 @@
 - follow-up変更: `test/issue-56-shared-todo.test.ts`（clock anomaly/reset、OFF/ON grace、timestamp欠落、stale process cache、session close audit failure、Todo UI form CSRF/conflict/owner integration）。
 - 第2 follow-up変更: `src/index.ts`（`process_kill` terminating再要求を2秒単調時計throttle付きで直列受付、finished拒否、process kill内部監査warningとknown/unknown applied表現、transfer cancel audit warning、固定安全操作の共通wrapper warning応答、普通ゲート操作の`operation.received`監査故障fail-closed）。
 - 第2 follow-up変更: `test/issue-56-shared-todo.test.ts`（sync barrier付きkill重複要求・retry/owner境界、kill/transfer/session cleanup audit failure、emergency stop全audit故障cleanup、wrapper pre/post/unknown、clock rollback/monotonic unavailable）。
+- NREV-56-01〜03変更: `src/index.ts`（status/output例外はreceiptおよびgate-allowed監査故障でも継続してwarning、version>0のtimestamp有限性/範囲validation、process kill timeoutのunknownをcommon post-audit wrapperで保持しknown rejectをfalseにする）。
+- NREV-56-01〜03変更: `test/issue-56-shared-todo.test.ts`（fresh/stale status/output × receipt/gate audit故障の4実経路、8個timestamp破損値と回復、process kill accepted/rejected/timeout × internal/common audit故障の7組成ケース）。
 - レポート: 本節以降のchild-owned sectionsを更新。Dispatch profile節は編集していない。
 
 ## 指摘事項
@@ -95,11 +105,14 @@
 - process_killは`processLock`で直列化し、running/terminating owner processを限定、terminating再要求は単調時計2秒未満で拒否、2秒後許可、finished状態は拒否。termination handler後の監査失敗は拒否ではなくwarningと結果の確度（known accepted=true, known rejected=false, timeout=unknown）を返す。
 - transfer cancelはowner/session一致後に状態遷移、cleanup、terminal記録を行い、イベント監査失敗は`audit_warning`/`applied:true`として返す。Emergency Stopは監査故障を理由にprocess/session/transfer cleanupを中断しないことをテスト。
 - wrapperの`operation.received` / `operation.started`失敗時、Todo gate有効な普通操作はdispatch前に`TODO_GATE_AUDIT_UNAVAILABLE/applied:false`で止める。固定例外は処理を継続し、後監査欠落時に処理別の適用結果を返す。通常操作がdispatch後に失敗し結果を確定できない場合は`TODO_OPERATION_OUTCOME_UNKNOWN/applied:"unknown"`で自動再試行を避ける。
+- NREV-56-01: status/outputのsafe exceptionはfresh時も`todo.gate_allowed` auditを必須とせず、受信記録故障は結果の`audit_warning`へ反映。stale時は引き続き保存済みsnapshotのみ返す。普通のTodo-gated process_startは同じreceipt failureでfail-closedのまま。
+- NREV-56-02: enforcementが有効でTodo version>0の場合、timestampはfinite nonnegative numberであり現在単調時刻を超えないことを検証。不正値はlatched clock anomalyとして監査・拒否し、Todo updateのみ解除。enforcement offとversion0/null基準は既定意味を保持。
+- NREV-56-03:共通wrapperはprocess killの明示applied結果を優先する。termination_unconfirmedはcommon success audit失敗でも`unknown`、rejectedは`false`、acceptedは`true`を維持。
 
 ## 結果
 
-- 結果: 有効RedからTodo/MCP/API/UI、時計、監査、safe exception経路を拡充。第2 follow-upでprocess kill直列化/2秒throttle/retry、transfer cancelとEmergency Stop cleanupの監査故障継続、wrapper pre/post監査失敗のapplied true/false/unknown semanticsを追加。phase focused 20/20、TypeScript `--noEmit`成功。未commitで親管理のcommit/push・通常review待ち。
+- 結果: 有効RedからTodo/MCP/API/UI、時計、監査、safe exception経路を拡充。第2 follow-upでkill再試行、transfer/Emergency Stop cleanup、wrapper fail-closed/unknown semanticsを追加。NREV-56-01〜03は各Red→Green後に、safe status/outputのreceipt障害、timestamp破損、kill certaintyのwrapper compositionを修正。NREV focused 23/23、tsc・Markdown lint・design terms lint成功。親所有のcommit/push・same-reviewer verification待ち。
 
 ## リスク
 
-- 未解決: process kill timeout outcomeの実際のadapter異常系におけるunknown表示は直接まだ検証していない（コードでは`applied:"unknown"`を設定）。Emergency Stop persistence自体の失敗時は安全側で停止状態を維持し例外返却するため、返却/運用UIの故障提示までは未検証。複数接続からの実network raceは同期barrier付きin-memory MCP raceで代替検証し、実DC bridgeは未使用。Todo同時更新の追加MCP/API競合テスト、より広い既存回帰suiteは未実行。現在差分は未commitで親の通常確認・commit/push・review待ち。
+- 未解決: Desktop Commander本物のtransport timeoutはこの環境で再現せず、adapter mockに既知のtimeout code `-32001`を設定してproduction wrapper compositionを確認。実bridge/実network timeout mappingは未検証として保持。Emergency Stop persistence自体の失敗提示、より広い既存回帰suiteも未実行。現在差分は未commitで親の通常確認・commit/push・review待ち。

@@ -223,6 +223,32 @@ test("a versioned Todo with a missing monotonic update time is stale until updat
   }
 });
 
+test("versioned Todos reject every nonfinite or invalid update timestamp and recover only by updating", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "invalid timestamp matrix" });
+    const sessionId = String(opened.session_id);
+    await owner.call("node_list", { session_id: sessionId });
+    let updated = await owner.call("todo_update", { session_id: sessionId, expected_version: 0, changes: [{ op: "add", text: "timestamp baseline" }] });
+    const todo = h.service.sessions.get(sessionId)!.todo as unknown as { lastTodoUpdatedMono: unknown };
+    const invalidValues: unknown[] = [undefined, null, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "invalid", -1, Number.MAX_VALUE];
+    for (const [index, invalid] of invalidValues.entries()) {
+      todo.lastTodoUpdatedMono = invalid;
+      const auditCount = h.audits.length;
+      await assert.rejects(owner.call("node_list", { session_id: sessionId }), /TODO_STALE/);
+      assert.ok(h.audits.slice(auditCount).some((entry) => entry.event === "todo.clock_anomaly" && entry.fields.reason === "updated_timestamp_invalid"), `invalid value at index ${index} must be audited`);
+      const current = await owner.call("todo_get", { session_id: sessionId });
+      updated = await owner.call("todo_update", { session_id: sessionId, expected_version: Number(current.version), changes: [{ op: "add", text: `recovery ${index}` }] });
+      assert.equal(updated.version, Number(current.version) + 1);
+      await owner.call("node_list", { session_id: sessionId });
+    }
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
 test("stale process status returns the cached snapshot without reading Desktop Commander", async () => {
   const originalNow = performance.now.bind(performance);
   const originalWallNow = Date.now.bind(Date);
@@ -255,6 +281,39 @@ test("stale process status returns the cached snapshot without reading Desktop C
     Date.now = originalWallNow;
     await owner.close();
     await h.close();
+  }
+});
+
+test("owned process status and output survive receipt-audit failure in fresh and stale states", async () => {
+  const originalNow = performance.now.bind(performance);
+  const originalWallNow = Date.now.bind(Date);
+  for (const toolName of ["process_status", "process_output"] as const) {
+    for (const stale of [false, true]) {
+      let monotonicNow = originalNow();
+      let wallNow = originalWallNow();
+      performance.now = () => monotonicNow;
+      Date.now = () => wallNow;
+      const h = await harness();
+      const owner = await h.connect("owner@example.test");
+      let reads = 0;
+      try {
+        const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: `${toolName} receipt audit failure` });
+        const sessionId = String(opened.session_id);
+        const fixture = seedProcess(h.service, { sessionId, id: `${toolName}-${stale ? "stale" : "fresh"}` });
+        h.service.cfg.processAdapter = { async start() { return ""; }, async read() { reads += 1; return "fresh downstream output"; }, async terminate() { return ""; }, async sessions() { return `PID: ${fixture.pid}`; } };
+        if (stale) { monotonicNow += 300_000; wallNow += 300_000; }
+        h.setAuditFailure(new Error("receipt audit unavailable"), ["operation.received", "todo.gate_allowed"]);
+        const result = await owner.call(toolName, { session_id: sessionId, node_id: "local", process_id: fixture.id });
+        assert.equal(result.audit_warning, true, `${toolName} must disclose the missing receipt audit`);
+        assert.equal(result.output, stale ? "cached process output" : "fresh downstream output");
+        assert.equal(reads, stale ? 0 : 1, `${toolName} should read fresh output only before the Todo deadline`);
+      } finally {
+        performance.now = originalNow;
+        Date.now = originalWallNow;
+        await owner.close();
+        await h.close();
+      }
+    }
   }
 });
 
@@ -331,6 +390,48 @@ test("accepted process kill remains successful with an applied warning when its 
   } finally {
     await owner.close();
     await h.close();
+  }
+});
+
+test("process kill preserves applied certainty across internal and common audit failure combinations", async () => {
+  const cases = [
+    { outcome: "accepted", failure: "internal", event: "process.kill_requested", applied: true, state: "terminating" },
+    { outcome: "accepted", failure: "common", event: "operation.succeeded", applied: true, state: "terminating" },
+    { outcome: "rejected", failure: "internal", event: "process.kill_rejected", applied: false, state: "running" },
+    { outcome: "rejected", failure: "common", event: "operation.succeeded", applied: false, state: "running" },
+    { outcome: "timed_out", failure: "internal", event: "process.termination_unconfirmed", applied: "unknown", state: "terminating" },
+    { outcome: "timed_out", failure: "common", event: "operation.succeeded", applied: "unknown", state: "terminating" },
+    { outcome: "timed_out", failure: "both", event: ["process.termination_unconfirmed", "operation.succeeded"], applied: "unknown", state: "terminating" },
+  ] as const;
+  for (const entry of cases) {
+    const h = await harness();
+    const owner = await h.connect("owner@example.test");
+    let terminateCalls = 0;
+    try {
+      const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: `kill certainty ${entry.outcome} ${entry.failure}` });
+      const sessionId = String(opened.session_id);
+      const fixture = seedProcess(h.service, { sessionId, id: `kill-${entry.outcome}-${entry.failure}` });
+      h.service.cfg.processAdapter = {
+        async start() { return ""; },
+        async read() { return ""; },
+        async terminate() {
+          terminateCalls += 1;
+          if (entry.outcome === "accepted") return "Successfully initiated termination of session";
+          if (entry.outcome === "rejected") return "Termination was rejected";
+          throw Object.assign(new Error("termination request timed out"), { code: -32001 });
+        },
+        async sessions() { return `PID: ${fixture.pid}`; },
+      };
+      h.setAuditFailure(new Error("kill audit unavailable"), Array.isArray(entry.event) ? [...entry.event] : [entry.event]);
+      const result = await owner.call("process_kill", { session_id: sessionId, node_id: "local", process_id: fixture.id });
+      assert.equal(result.state, entry.state, `${entry.outcome}/${entry.failure} state`);
+      assert.equal(result.audit_warning, true, `${entry.outcome}/${entry.failure} warning`);
+      assert.equal(result.applied, entry.applied, `${entry.outcome}/${entry.failure} applied semantics`);
+      assert.equal(terminateCalls, 1, `${entry.outcome}/${entry.failure} must not redispatch`);
+    } finally {
+      await owner.close();
+      await h.close();
+    }
   }
 });
 
