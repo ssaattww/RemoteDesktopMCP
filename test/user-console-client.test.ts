@@ -57,7 +57,7 @@ class FakeElement {
     if (selector.startsWith(".process-block")) return this.children.filter((child) => child.className === "process-block" && (!selector.includes("data-events-json") || child.dataset.eventsJson !== undefined)) as T[];
     if (selector.startsWith("tr[data-event-json]")) return this.children.filter((child) => child.tagName === "tr" && child.dataset.eventJson !== undefined) as T[];
     const descendants = this.allDescendants();
-    if (selector === "form[data-session-edit]") return descendants.filter((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) as T[];
+    if (selector === "form[data-session-edit]" || selector === "[data-session-edit]") return descendants.filter((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) as T[];
     if (selector === "details[data-session-time]") return descendants.filter((child) => child.tagName === "details" && child.dataset.sessionTime !== undefined) as T[];
     if (selector === "time[data-session-relative]") return descendants.filter((child) => child.tagName === "time" && child.dataset.sessionRelative !== undefined) as T[];
     return [] as T[];
@@ -108,7 +108,7 @@ function response(status: number, body: unknown) {
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
-function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", initialNow = Date.now()) {
+function boot(fetchImpl: (url: string, init?: { method?: string }) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", initialNow = Date.now()) {
   FakeEventSource.instances = [];
   FakeElement.activeElement = null;
   let clockNow = initialNow;
@@ -212,6 +212,81 @@ test("session metadata editor keeps typing made while a save is pending", async 
   assert.match(output.textContent, /未保存/);
 });
 
+test("a state snapshot started before a successful save cannot restore its older session version", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const row = new FakeElement("tr"); sessionRows.append(row);
+  const directoryCell = new FakeElement("td"); directoryCell.dataset.sessionDirectory = "true"; row.append(directoryCell);
+  const purposeCell = new FakeElement("td"); purposeCell.dataset.sessionPurpose = "true"; row.append(purposeCell);
+  const editorCell = new FakeElement("td"); row.append(editorCell);
+  const disclosure = new FakeElement("details"); editorCell.append(disclosure);
+  const summary = new FakeElement("summary"); disclosure.append(summary);
+  const form = new FakeElement("form"); form.dataset = { sessionEdit: "session-1", version: "1" }; disclosure.append(form);
+  const directory = new FakeElement("input"); directory.value = "C:/new";
+  const purpose = new FakeElement("input"); purpose.value = "New purpose";
+  const csrf = new FakeElement("input"); csrf.value = "csrf";
+  Object.assign(form, { elements: { namedItem: (name: string) => name === "csrf" ? csrf : name === "workingDirectory" ? directory : purpose } });
+  const output = new FakeElement("output"); const submitButton = new FakeElement("button");
+  form.queries.set("output", output); form.queries.set("button[type=submit]", submitButton);
+  row.queries.set("[data-session-directory]", directoryCell); row.queries.set("[data-session-purpose]", purposeCell);
+  let releaseRefresh!: (value: ReturnType<typeof response>) => void;
+  let refreshCount = 0;
+  let patchFinished = false;
+  const ui = boot(async (url, init) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") {
+      if (refreshCount++ === 0) return new Promise((resolve) => { releaseRefresh = resolve; });
+      return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [
+        { session_id: "session-1", working_directory: "C:/stale", purpose: "Stale purpose", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 1 },
+      ] });
+    }
+    if (request.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (request.pathname === "/api/sessions/session-1" && init?.method === "PATCH") { patchFinished = true; return response(200, { version: 2, working_directory: "C:/new", purpose: "New purpose" }); }
+    throw new Error("unexpected request " + request.href);
+  }, [], { "session-rows": sessionRows, form });
+  await settle();
+  const submit = form.listeners.get("submit") as unknown as (event: { preventDefault(): void }) => Promise<void>;
+  await submit({ preventDefault() {} });
+  assert.equal(patchFinished, true);
+  assert.equal(form.dataset.version, "2");
+  assert.equal(directoryCell.textContent, "C:/new");
+  releaseRefresh(response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/old", purpose: "Old purpose", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 1 },
+  ] }));
+  await settle();
+  assert.equal(directoryCell.textContent, "C:/new", "a pre-save response cannot roll back the committed display values");
+  assert.equal(purposeCell.textContent, "New purpose");
+  assert.equal(form.dataset.version, "2", "the saved compare version advances independently of the editor draft version");
+  ui.newest.click();
+  await settle(); await settle();
+  assert.equal(directoryCell.textContent, "C:/new", "a later response with an older saved version is also ignored");
+  assert.equal(form.dataset.version, "2");
+  ui.sources[0]?.close();
+});
+
+test("out-of-order state refresh responses apply only the newest requested snapshot", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const pending: Array<(value: ReturnType<typeof response>) => void> = [];
+  const ui = boot(async (url) => {
+    if (new URL(url, "http://local.test").pathname === "/api/console-state") return new Promise((resolve) => { pending.push(resolve); });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": sessionRows });
+  await settle();
+  ui.newest.click();
+  await settle();
+  assert.equal(pending.length, 2);
+  const latest = { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:02:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/latest", purpose: "Latest", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 3 },
+  ] };
+  pending[1]!(response(200, latest));
+  await settle();
+  pending[0]!(response(200, { ...latest, activeSessions: 0, sessions: [{ ...latest.sessions[0]!, working_directory: "C:/older", purpose: "Older", state: "closed", active: false, version: 2 }] }));
+  await settle();
+  assert.equal(sessionRows.children[0]?.children[6]?.textContent, "C:/latest");
+  assert.equal(sessionRows.children[0]?.children[4]?.textContent, "Latest");
+  assert.equal(sessionRows.children[0]?.children[3]?.textContent, "有効", "an older response cannot roll back session lifecycle");
+  ui.sources[0]?.close();
+});
+
 test("version conflicts load the latest values and require an explicit re-edit choice", async () => {
   const directory = { value: "C:/draft" }; const purpose = { value: "Draft purpose" };
   const output = { textContent: "" }; const summary = { textContent: "" }; const conflict = { hidden: true };
@@ -269,6 +344,7 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   const directoryCell = new FakeElement("td"); directoryCell.dataset.sessionDirectory = "true"; originalRow.append(directoryCell);
   const editorCell = new FakeElement("td"); originalRow.append(editorCell);
   const editorDisclosure = new FakeElement("details"); editorDisclosure.open = true; editorCell.append(editorDisclosure);
+  const editorSummary = new FakeElement("summary"); editorDisclosure.append(editorSummary);
   const sessionForm = new FakeElement("form"); sessionForm.dataset = { sessionEdit: "session-1", version: "1" }; editorDisclosure.append(sessionForm);
   const directoryInput = new FakeElement("input"); directoryInput.value = "C:/draft";
   const purposeInput = new FakeElement("input"); purposeInput.value = "Unsaved purpose";
@@ -288,7 +364,7 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   let refresh = 0;
   const ui = boot(async (url) => {
     const request = new URL(url, "http://local.test");
-    if (request.pathname === "/api/console-state") return response(200, refresh++ === 0 ? stateA : stateB);
+    if (request.pathname === "/api/console-state") { refresh++; return response(200, refresh <= 2 ? stateA : stateB); }
     if (request.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
     throw new Error("unexpected request " + request.href);
   }, [], { "session-rows": sessionRows });
@@ -311,12 +387,22 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   const closedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-3")!;
   assert.equal(closedRow.querySelector("form[data-session-edit]"), null, "closed sessions never retain an editor");
 
-  const currentCreatedSummary = updatedRow.children[1]?.children[0]?.children[0];
+  FakeElement.activeElement = editorSummary;
+  ui.newest.click();
+  await settle(); await settle();
+  assert.equal(refresh, 2);
+  assert.equal(sessionRows.children.length, 3, "the intermediate refresh retains the active editor row");
+  const editorFocusRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
+  const restoredEditorSummary = editorFocusRow.children[7]?.querySelector("summary");
+  assert.equal(FakeElement.activeElement, restoredEditorSummary, "the editor summary keeps keyboard focus after its row is replaced");
+  assert.equal(restoredEditorSummary?.focusOptions?.preventScroll, true);
+
+  const currentCreatedSummary = editorFocusRow.children[1]?.children[0]?.children[0];
   assert.equal(currentCreatedSummary?.tagName, "summary");
   FakeElement.activeElement = currentCreatedSummary ?? null;
   ui.newest.click();
   await settle(); await settle();
-  assert.equal(refresh, 2);
+  assert.equal(refresh, 3);
   const endedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
   assert.equal(endedRow.children[3]?.textContent, "終了");
   assert.equal(endedRow.querySelector("form[data-session-edit]"), null, "an editor is removed when its session ends");

@@ -29,6 +29,10 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
 }
 
 function clientBootstrap(): void {
+  type SessionState = { session_id: string; working_directory?: string; purpose?: string; version?: number; created_at: string; last_used_at?: string; state: string; active: boolean };
+  let stateRequestGeneration = 0;
+  const latestSavedVersionBySession = new Map<string, number>();
+  const latestSessionStateById = new Map<string, SessionState>();
   const initializeSessionEditor = (form: HTMLFormElement) => {
     const conflict = form.querySelector<HTMLElement>("[data-session-conflict]");
     const conflictSummary = form.querySelector<HTMLElement>("[data-session-conflict-summary]");
@@ -92,6 +96,11 @@ function clientBootstrap(): void {
           return;
         }
         form.dataset.version = String(result.version);
+        latestSavedVersionBySession.set(sessionId, Math.max(latestSavedVersionBySession.get(sessionId) ?? 0, result.version));
+        const priorSession = latestSessionStateById.get(sessionId);
+        if (priorSession) latestSessionStateById.set(sessionId, { ...priorSession, version: result.version, working_directory: result.working_directory, purpose: result.purpose });
+        // Any state request started before this committed write must not restore its older snapshot.
+        stateRequestGeneration++;
         const addedDirectoryInput = directory.value !== submittedDirectory;
         const addedPurposeInput = purpose.value !== submittedPurpose;
         if (!addedDirectoryInput) directory.value = result.working_directory;
@@ -531,14 +540,25 @@ function clientBootstrap(): void {
     finally { if (olderButton) { olderButton.disabled = false; olderButton.textContent = "過去のログを読み込む"; } }
   };
   const refreshState = async () => {
+    const requestGeneration = ++stateRequestGeneration;
     try {
       const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (!response.ok) return;
       const state = await response.json() as {
         stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
-        sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; version?: number; created_at: string; last_used_at?: string; state: string; active: boolean }>;
+        sessions?: SessionState[];
         running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
       };
+      // Only the most recently requested snapshot may update global counters or rows.
+      if (requestGeneration !== stateRequestGeneration) return;
+      const sessions = state.sessions?.map((incoming) => {
+        const previous = latestSessionStateById.get(incoming.session_id);
+        const savedVersion = latestSavedVersionBySession.get(incoming.session_id) ?? 0;
+        const knownVersion = Math.max(savedVersion, previous?.version ?? 0);
+        if (Number.isSafeInteger(incoming.version) && incoming.version! < knownVersion) return previous;
+        latestSessionStateById.set(incoming.session_id, incoming);
+        return incoming;
+      }).filter((session): session is SessionState => session !== undefined);
       const stopped = document.getElementById("execution-state");
       const active = document.getElementById("active-session-count");
       const running = document.getElementById("running-count");
@@ -548,19 +568,20 @@ function clientBootstrap(): void {
       if (running) running.textContent = String(state.runningProcesses);
       if (updated) updated.textContent = timeText(state.updatedAt);
       const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
-      if (sessionRows && state.sessions) {
-        const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
+      if (sessionRows && sessions) {
+        const visibleSessions = root.dataset.filter === "active" ? sessions.filter((session) => session.active) : sessions;
         const savedOpenByKey = new Map<string, boolean>();
         let focusedTimeKey: string | undefined;
         const editorCells = new Map<string, HTMLTableCellElement>();
         let focusedEditor: HTMLElement | undefined;
+        let focusedEditorId: string | undefined;
         const activeElement = document.activeElement as HTMLElement | null;
         for (const form of sessionRows.querySelectorAll<HTMLFormElement>("form[data-session-edit]")) {
           const sessionKey = form.dataset.sessionEdit;
           const editorCell = form.closest("td") as HTMLTableCellElement | null;
           if (sessionKey && editorCell) {
             editorCells.set(sessionKey, editorCell);
-            if (activeElement && editorCell.contains(activeElement)) focusedEditor = activeElement;
+            if (activeElement && editorCell.contains(activeElement)) { focusedEditor = activeElement; focusedEditorId = sessionKey; }
           }
         }
         for (const details of sessionRows.querySelectorAll<HTMLDetailsElement>("details[data-session-time]")) {
@@ -599,7 +620,7 @@ function clientBootstrap(): void {
           } else addCell(row, "—");
         }
         if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
-        else if (focusedEditor && focusedEditor.closest("form[data-session-edit]") && restoredEditorIds.has((focusedEditor.closest("form[data-session-edit]") as HTMLFormElement).dataset.sessionEdit ?? "")) focusedEditor.focus({ preventScroll: true });
+        else if (focusedEditor && focusedEditorId && restoredEditorIds.has(focusedEditorId)) focusedEditor.focus({ preventScroll: true });
         syncSessionTimeUpdates();
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
