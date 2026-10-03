@@ -25,6 +25,7 @@ class FakeElement {
   className = "";
   tagName: string;
   href = "";
+  id = "";
   dateTime = "";
   parent: FakeElement | null = null;
   focusOptions?: { preventScroll?: boolean };
@@ -58,6 +59,7 @@ class FakeElement {
     const override = this.queries.get(selector);
     if (override) return override as T;
     if (selector === "h2") return (this.children.find((child) => child.tagName === "h2") ?? null) as T | null;
+    if (selector === "h3") return (this.children.find((child) => child.tagName === "h3") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     if (selector === "summary") return (this.children.find((child) => child.tagName === "summary") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     if (selector === ".process-block") return (this.children.find((child) => child.className === "process-block") ?? null) as T | null;
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
@@ -99,7 +101,7 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
   const newest = new FakeElement(); newest.hidden = true;
   const older = new FakeElement(); older.hidden = true;
   const elements = new Map<string, FakeElement>([["log-console", root], ["log-status", status], ["log-new-button", newest], ["log-older-button", older], ...Object.entries(extras)]);
-  const scrollY = 0; let scrollCalls = 0;
+  const scrollY = 0; let scrollCalls = 0; const scrollTargets: number[] = [];
   const windowListeners = new Map<string, () => void>();
   const intervals = new Map<number, { callback: () => void; delay: number }>(); let nextInterval = 0;
   const timeouts = new Map<number, { callback: () => void; delay: number; dueAt: number }>(); let nextTimeout = 0;
@@ -110,11 +112,11 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
     clearInterval: (id: number) => { intervals.delete(id); },
     setTimeout: (callback: () => void, delay: number) => { const id = ++nextTimeout; timeouts.set(id, { callback, delay, dueAt: clockNow + delay }); return id; },
     clearTimeout: (id: number) => { timeouts.delete(id); },
-    scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }),
+    scrollTo: (_x: number, y: number) => { scrollCalls += 1; scrollTargets.push(y); }, getSelection: () => ({ toString: () => "" }),
   };
   const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), get activeElement() { return FakeElement.activeElement; }, documentElement: { scrollHeight: 1200 } };
   runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: TestDate });
-  return { root, status, newest, older, windowStub, windowListeners, intervals, timeouts, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, advanceTime: (milliseconds: number) => { const target = clockNow + milliseconds; while (true) { const due = [...timeouts.entries()].filter(([, timer]) => timer.dueAt <= target).sort((a, b) => a[1].dueAt - b[1].dueAt)[0]; if (!due) break; clockNow = due[1].dueAt; timeouts.delete(due[0]); due[1].callback(); } clockNow = target; }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
+  return { root, status, newest, older, windowStub, windowListeners, intervals, timeouts, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, advanceTime: (milliseconds: number) => { const target = clockNow + milliseconds; while (true) { const due = [...timeouts.entries()].filter(([, timer]) => timer.dueAt <= target).sort((a, b) => a[1].dueAt - b[1].dueAt)[0]; if (!due) break; clockNow = due[1].dueAt; timeouts.delete(due[0]); due[1].callback(); } clockNow = target; }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, scrollTargets, sources: FakeEventSource.instances };
 }
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {
@@ -533,6 +535,106 @@ test("process grouping preserves distinct same-time output IDs and cursor resync
   assert.equal(afterResync[0]?.output, "resynced only");
   assert.equal(blockAfterResync.children.some((child) => child.textContent === "purpose"), false, "a resync does not reuse stale SSR command metadata");
   assert.ok(calls.some((url) => url.pathname === "/api/logs" && !url.searchParams.has("after")));
+});
+
+test("process output refresh restores focus to the same session and process without scrolling", async () => {
+  const sessionId = "focus-session";
+  const processId = "focus-process";
+  const at = "2026-10-02T00:00:00.000Z";
+  const start = { id: "focus-start", cursor: "c0", event: { event: "process.start", at, sessionId, processId, comment: "focus purpose", command: "echo focus" } };
+  const output = { id: "focus-output", cursor: "c1", event: { event: "process.output", at, sessionId, processId, output: "first" } };
+  const processDetails = new FakeElement("section");
+  const heading = new FakeElement("h2"); processDetails.append(heading);
+  const initialBlock = new FakeElement("article"); initialBlock.className = "process-block";
+  initialBlock.dataset.sessionId = sessionId; initialBlock.dataset.processId = processId;
+  initialBlock.dataset.eventsJson = JSON.stringify([start.event, output.event]);
+  const initialDetails = new FakeElement("details"); initialDetails.open = true;
+  const initialSummary = new FakeElement("summary"); initialDetails.append(initialSummary); initialBlock.append(initialDetails); processDetails.append(initialBlock);
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 1, updatedAt: at });
+    if (request.searchParams.get("after") === "c1") return response(200, { items: [{ id: "focus-output-next", cursor: "c2", event: { event: "process.output", at, sessionId, processId, output: "second" } }], newestCursor: "c2", oldestCursor: "c2", hasMoreOlder: false, hasMoreNewer: false });
+    if (!request.searchParams.has("after")) return response(200, { items: [{ id: "replacement-output", cursor: "c3", event: { event: "process.output", at, sessionId, processId: "other-process", output: "other output" } }], newestCursor: "c3", oldestCursor: "c3", hasMoreOlder: false, hasMoreNewer: false });
+    throw new Error("unexpected request " + request.href);
+  }, [output, start], { "process-details": processDetails }, sessionId);
+  initialSummary.focus();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c2", overflow: false }));
+  ui.newest.click();
+  await settle(); await settle();
+  const updatedBlock = processDetails.children.find((child) => child.className === "process-block");
+  assert.ok(updatedBlock);
+  const updatedDetails = updatedBlock.querySelector<FakeElement>("details");
+  const updatedSummary = updatedDetails?.children[0];
+  assert.equal(updatedDetails?.open, true, "output disclosure remains open after refresh");
+  assert.notEqual(updatedSummary, initialSummary);
+  const activeElement = FakeElement.activeElement;
+  const activeProcess = activeElement?.parent?.parent;
+  assert.equal(activeElement === updatedSummary, true, "activeElement is the replacement disclosure, not the detached prior element");
+  assert.equal(activeElement?.tagName, "summary", "the restored element kind is the output disclosure control");
+  assert.equal(activeProcess?.dataset.sessionId, sessionId, "focus stays in the same session");
+  assert.equal(activeProcess?.dataset.processId, processId, "focus stays in the same process");
+  assert.equal(activeElement?.focusOptions?.preventScroll, true, "the replacement disclosure receives focus with preventScroll after redraw");
+  ui.sources.at(-1)!.dispatch("resync-required");
+  await settle(); await settle();
+  const otherBlock = processDetails.children.find((child) => child.className === "process-block" && child.dataset.processId === "other-process");
+  assert.ok(otherBlock, "resync replaces the original process with a different process");
+  const otherSummary = otherBlock.querySelector<FakeElement>("details")?.children[0];
+  assert.notEqual(FakeElement.activeElement, otherSummary, "focus is not transferred to another process when the focused process disappears");
+  assert.equal(otherSummary?.focusOptions, undefined, "the replacement process receives no focus call");
+  assert.equal(ui.scrollTargets.every((target) => target === 0), true, "redraw and focus restoration preserve the current scroll position");
+});
+
+test("Issue 55: state refresh and resync retain a running process destination outside the newest log page", async () => {
+  const sessionId = "quiet-session";
+  const processId = "quiet-process";
+  const at = "2026-10-02T00:00:00.000Z";
+  const startEvent = { event: "process.start", at, sessionId, processId, comment: "quiet task", command: "echo waiting" };
+  const initialDetails = new FakeElement("section");
+  const title = new FakeElement("h2"); title.textContent = "コマンドと出力の詳細"; initialDetails.append(title);
+  const initialBlock = new FakeElement("article"); initialBlock.className = "process-block";
+  initialBlock.dataset.sessionId = sessionId; initialBlock.dataset.processId = processId;
+  initialBlock.dataset.eventsJson = JSON.stringify([startEvent]);
+  initialDetails.append(initialBlock);
+  const runningRows = new FakeElement("tbody");
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 1, updatedAt: at,
+      running: [{ operation_id: processId, connection_id: sessionId, label: "process", status: "running", purpose: "quiet task", command: "echo waiting" }],
+    });
+    if (request.searchParams.has("after")) return response(200, { items: [{ id: "quiet-output", cursor: "c200", event: { event: "process.output", at, sessionId, processId, output: "still waiting" } }], newestCursor: "c200", oldestCursor: "c200", hasMoreOlder: false, hasMoreNewer: false });
+    if (!request.searchParams.has("after")) return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    throw new Error("unexpected request " + request.href);
+  }, Array.from({ length: 200 }, (_, index) => ({ id: "unrelated-" + index, cursor: "c" + index, event: { event: "operation.completed", at, sessionId, operationId: "other-" + index } })), {
+    "process-details": initialDetails,
+    "running-rows": runningRows,
+    "running-table": new FakeElement("div"),
+    "running-empty": new FakeElement("p"),
+  }, sessionId);
+  await settle(); await settle();
+
+  const expectedId = "process-" + encodeURIComponent(sessionId) + "-" + encodeURIComponent(processId);
+  const assertDestination = (phase: string) => {
+    const block = initialDetails.children.find((child) => child.className === "process-block" && child.dataset.sessionId === sessionId && child.dataset.processId === processId);
+    assert.ok(block, `${phase}: running process detail survives even when its start event is outside the newest log page; rendered keys=${JSON.stringify(initialDetails.children.filter((child) => child.className === "process-block").map((child) => [child.dataset.sessionId, child.dataset.processId]))}`);
+    const heading = block.children.find((child) => child.tagName === "h3");
+    assert.equal(heading?.id, expectedId, `${phase}: fragment targets the corresponding process heading`);
+    if (phase === "log resync") assert.ok(heading?.textContent.includes(processId), "log resync: visible heading still identifies the live process when its audit events are unavailable");
+    const link = runningRows.allDescendants().find((child) => child.tagName === "a" && child.dataset.sessionId === sessionId && child.dataset.processId === processId);
+    assert.equal(link?.href, "#" + expectedId, `${phase}: running row points to its same-session heading`);
+  };
+  assertDestination("state refresh");
+  const focusedHeading = initialDetails.children.find((child) => child.className === "process-block")?.children.find((child) => child.tagName === "h3");
+  assert.ok(focusedHeading);
+  focusedHeading.focus();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c200", overflow: false }));
+  ui.newest.click();
+  await settle(); await settle();
+  const replacementHeading = initialDetails.children.find((child) => child.className === "process-block")?.children.find((child) => child.tagName === "h3");
+  assert.equal(FakeElement.activeElement, replacementHeading, "the heading reached by the running-row fragment remains the focused same-session/process target after output refresh");
+  ui.sources.at(-1)!.dispatch("resync-required");
+  await settle(); await settle();
+  assertDestination("log resync");
 });
 
 test("the 1000-event older window retains every API process event and keeps start metadata separate", async () => {

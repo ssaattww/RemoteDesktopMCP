@@ -61,7 +61,8 @@ function clientBootstrap(): void {
   let baselineCaptured = false;
   let baselineCleared = false;
   const baselineOperations = new Map<string, Record<string, unknown>>();
-  const baselineProcesses = new Map<string, { session: string; process: string; start?: Record<string, unknown> }>();
+  const baselineProcesses = new Map<string, { session: string; process: string; start?: Record<string, unknown>; events: Array<Record<string, unknown>> }>();
+  const liveProcesses = new Map<string, { purpose: string; command: string; status: string }>();
   let connection: EventSource | undefined;
   let generation = 0;
   let storeGeneration = 0;
@@ -105,7 +106,7 @@ function clientBootstrap(): void {
         const events = JSON.parse(block.dataset.eventsJson ?? "[]") as Array<Record<string, unknown>>;
         const start = events.find((event) => event.event === "process.start");
         if (process && start) baselineProcesses.set(processKey(session, process), {
-          session, process,
+          session, process, events,
           start: { event: "process.start", at: start.at, processId: start.processId ?? process, command: start.command, comment: start.comment },
         });
       } catch { /* A malformed snapshot is discarded. */ }
@@ -114,7 +115,7 @@ function clientBootstrap(): void {
   const captureOpenStates = () => {
     const state = new Map<string, boolean>();
     processDetails?.querySelectorAll<HTMLDetailsElement>(".process-block").forEach((block) => {
-      const key = (block.dataset.sessionId ?? "") + ":" + (block.dataset.processId ?? "");
+      const key = processKey(block.dataset.sessionId ?? "", block.dataset.processId ?? "");
       const output = block.querySelector("details");
       if (output) state.set(key, output.open);
     });
@@ -231,7 +232,7 @@ function clientBootstrap(): void {
       addOperationDetailCell(row, event, openedDetails.get(String(event.operationId ?? key)));
     }
   };
-  const processKey = (session: string, process: string) => session + ":" + process;
+  const processKey = (session: string, process: string) => JSON.stringify([session, process]);
   const renderProcesses = () => {
     if (!processDetails) return;
     ensureInitialSnapshot();
@@ -259,7 +260,16 @@ function clientBootstrap(): void {
       group.events.push(entry.event);
       groups.set(key, group);
     }
-    const all = [...groups.values()].sort((a, b) => Date.parse(String(b.events.at(-1)?.at ?? "")) - Date.parse(String(a.events.at(-1)?.at ?? "")));
+    for (const key of liveProcesses.keys()) if (!groups.has(key)) {
+      const baseline = baselineCleared ? undefined : baselineProcesses.get(key);
+      const identity = baseline ? [baseline.session, baseline.process] : JSON.parse(key) as [string, string];
+      groups.set(key, { session: identity[0], process: identity[1], events: [...(baseline?.events ?? [])] });
+    }
+    const all = [...groups.values()].sort((a, b) => {
+      const aLive = liveProcesses.has(processKey(a.session, a.process));
+      const bLive = liveProcesses.has(processKey(b.session, b.process));
+      return Number(bLive) - Number(aLive) || Date.parse(String(b.events.at(-1)?.at ?? "")) - Date.parse(String(a.events.at(-1)?.at ?? ""));
+    });
     const heading = processDetails.querySelector("h2");
     const toolbar = document.getElementById("log-console");
     processDetails.replaceChildren();
@@ -270,8 +280,9 @@ function clientBootstrap(): void {
       const start = events.find((event) => event.event === "process.start") ?? (baselineCleared ? undefined : baselineProcesses.get(processKey(group.session, group.process))?.start);
       const latest = events.at(-1) ?? {};
       const exit = events.filter((event) => event.event === "process.exit").at(-1);
-      const command = start?.command ?? events.filter((event) => event.command !== undefined).at(-1)?.command;
-      const comment = start?.comment ?? events.filter((event) => event.comment !== undefined).at(-1)?.comment;
+      const live = liveProcesses.get(processKey(group.session, group.process));
+      const command = start?.command ?? events.filter((event) => event.command !== undefined).at(-1)?.command ?? live?.command;
+      const comment = start?.comment ?? events.filter((event) => event.comment !== undefined).at(-1)?.comment ?? live?.purpose;
       const outputs = events.filter((event) => event.output !== undefined && event.event !== "process.exit");
       const earlierOutput = outputs.map((event) => String(event.output)).join("\n");
       if (exit?.output !== undefined && !earlierOutput.includes(String(exit.output))) {
@@ -284,15 +295,15 @@ function clientBootstrap(): void {
       article.dataset.sessionId = group.session;
       article.dataset.processId = group.process;
       article.dataset.eventsJson = JSON.stringify(events);
-      const heading = document.createElement("p");
-      heading.textContent = timeText(start?.at ?? events[0]?.at) + " · " + group.session + " · " + String(latest.processId ?? "—");
+      const heading = document.createElement("h3"); heading.tabIndex = -1; heading.id = "process-" + encodeURIComponent(group.session) + "-" + encodeURIComponent(group.process);
+      heading.textContent = timeText(start?.at ?? events[0]?.at) + " · " + group.session + " · " + String(latest.processId ?? group.process);
       article.append(heading);
       const addPre = (label: string, value: unknown) => {
         const title = document.createElement("h3"); title.textContent = label; article.append(title);
         const pre = document.createElement("pre"); pre.textContent = String(value ?? ""); article.append(pre);
       };
-      if (comment !== undefined) addPre("実行目的", comment);
-      if (command !== undefined) addPre("コマンド", command);
+      addPre("実行目的", typeof comment === "string" && comment ? comment : "未記録");
+      addPre("コマンド", typeof command === "string" && command ? command : "未記録");
       if (outputs.length) {
         const details = document.createElement("details");
         const summary = document.createElement("summary"); summary.textContent = "出力"; details.append(summary);
@@ -312,6 +323,23 @@ function clientBootstrap(): void {
     processDetails.hidden = false;
   };
   const renderEvents = () => {
+    let focused: { session: string; process: string; tag: string } | undefined;
+    let active = document.activeElement as HTMLElement | null;
+    while (active && active !== processDetails) {
+      if (active.className === "process-block") {
+        let target = document.activeElement as HTMLElement | null;
+        while (target && target !== active) {
+          const targetTag = target.tagName.toUpperCase();
+          if (targetTag === "SUMMARY" || targetTag === "H3") {
+            focused = { session: active.dataset.sessionId ?? "", process: active.dataset.processId ?? "", tag: targetTag };
+            break;
+          }
+          target = target.parentElement ?? (target as unknown as { parent?: HTMLElement }).parent ?? null;
+        }
+        break;
+      }
+      active = active.parentElement ?? (active as unknown as { parent?: HTMLElement }).parent ?? null;
+    }
     const visible = processDetails ? [...processDetails.querySelectorAll<HTMLElement>(".process-block")].find((block) => {
       const rect = block.getBoundingClientRect();
       return rect.bottom > 0 && rect.top < window.innerHeight;
@@ -323,6 +351,11 @@ function clientBootstrap(): void {
     const replacement = anchor ? [...(processDetails?.querySelectorAll<HTMLElement>(".process-block") ?? [])].find((block) => block.dataset.sessionId === anchor.session && block.dataset.processId === anchor.process) : undefined;
     const shift = replacement ? replacement.getBoundingClientRect().top - anchor!.top : 0;
     window.scrollTo(window.scrollX, scrollY + shift);
+    if (focused) {
+      const targetBlock = [...(processDetails?.querySelectorAll<HTMLElement>(".process-block") ?? [])].find((block) => block.dataset.sessionId === focused!.session && block.dataset.processId === focused!.process);
+      const target = targetBlock?.querySelector<HTMLElement>(focused.tag === "SUMMARY" ? "summary" : "h3");
+      if (target && target.tagName.toUpperCase() === focused.tag) target.focus({ preventScroll: true });
+    }
   };
   const commitItems = (incoming: LogItem[], direction: "newer" | "older" | "replace") => {
     if (direction === "replace") {
@@ -445,8 +478,13 @@ function clientBootstrap(): void {
       const state = await response.json() as {
         stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
         sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
-        running?: Array<{ operation_id: string; connection_id: string; label: string; status: string }>;
+        running?: Array<{ operation_id: string; connection_id: string; label: string; status: string; purpose?: string; command?: string }>;
       };
+      if (state.running) {
+        liveProcesses.clear();
+        for (const operation of state.running) if (operation.label === "process") liveProcesses.set(processKey(operation.connection_id, operation.operation_id), { purpose: operation.purpose ?? "", command: operation.command ?? "", status: operation.status });
+        if (processDetails) renderEvents();
+      }
       const stopped = document.getElementById("execution-state");
       const active = document.getElementById("active-session-count");
       const running = document.getElementById("running-count");
@@ -500,6 +538,14 @@ function clientBootstrap(): void {
           addCell(row, operation.connection_id);
           const stateCell = addCell(row, operation.label + " · " + operation.status);
           stateCell.className = "running";
+          if (operation.label === "process") {
+            addCell(row, operation.purpose || "未記録");
+            addCell(row, operation.command || "未記録");
+            const action = row.insertCell(); const link = document.createElement("a");
+            link.href = "#process-" + encodeURIComponent(operation.connection_id) + "-" + encodeURIComponent(operation.operation_id);
+            link.dataset.sessionId = operation.connection_id; link.dataset.processId = operation.operation_id;
+            link.textContent = "詳細へ"; action.append(link);
+          } else { addCell(row, "—"); addCell(row, "—"); addCell(row, "—"); }
         }
         const table = document.getElementById("running-table");
         const empty = document.getElementById("running-empty");
