@@ -24,6 +24,8 @@ PR #52には未公開の7ファイル実装がFA780にあり、ユーザーか�
 - `version` は利用者のメタデータPATCH全体の比較番号であり、workdir/purpose/URL/titleを一つのcommitで更新する。実際の利用者変更一回につき最大一度増え、同値だけの更新では増えない。
 - `linkRevision` はリンク利用者変更に由来する取得世代であり、`version` と別に管理する。URL/title意図が実際に変更されたときだけ一回増やす。取得結果反映はtitle/source/statusだけを更新し、`version` と `linkRevision` のどちらも進めない。
 - PATCHは疎な意図差分だけ送る。URL/title項目を省略した場合、編集中に自動取得が完了しても最新のSession値を保つ。明示入力だけが値の変更・解除を表す。
+- 公開PATCHでは`externalUrl`と`externalTitle`を使い、省略は保持、明示`null`または空白のみの文字列は解除として扱う。URL解除はfetched titleを消しmanual titleを保ち、title解除は有効URLがあれば新世代fetchを開始する。不正な型、長過ぎる値、不正な明示URLはPATCH全体を拒否する。
+- `console-state`は内部値を`external_url`、`external_title`、`external_title_source`、`external_title_status`へ写し、未設定値を`null`、初期statusを`not_requested`として公開する。内部`linkRevision`は公開しない。
 - 題名取得はPATCHのcommit後に始め、session ID・所有者・URL・`linkRevision` の取得リースを使う。Sessionの終了、期限切れ、緊急停止が先なら遅延結果を破棄する。通信・DNS・本文処理で更新lockを待たない。
 - 監査、診断、失敗応答、通知、標準出力にURL、title、本文、DNS/接続情報を出さない。Session終了・期限切れ・緊急停止時にリンク値を消し、後着結果で復元しない。
 - 特殊用途CIDRは親範囲を全面拒否し、より具体的なglobally-reachable例外も許可しない。NAT64、6to4、Teredo等の変換・トンネル範囲も例外にしない。これはユーザーが選択した保守方針で、追加承認待ちではない。
@@ -38,14 +40,15 @@ IANAの[IPv4特殊用途登録簿](https://www.iana.org/assignments/iana-ipv4-sp
 これらのケースをPR52共有実装のhandoff後に合成transport/DNSで追加する。各ケースは実装前に期待値との差を記録し、同じケースのGreenを確認する。外部ネットワークへ接続しない。
 
 1. **複合PATCH原子性:** workdir、purpose、URL、titleを一つの成功PATCHで変更し、Session、応答、所有者向けconsole-state、auditの整合を確認する。どれか一項目の検証失敗では全値、`version`、`linkRevision`を不変にし、fetchも開始しない。
-2. **自動取得と疎な保存の競合:** editorを版 `v` で開き、別の自動取得でtitle/source/statusを更新してから、リンク項目を省略したworkdir/purpose PATCH (`expectedVersion: v`) を保存する。PATCHが成功し、取得済みtitleを保持することを確認する。
-3. **非同期取得の版番号:** fetch成功・失敗で `version` と `linkRevision` は不変、取得statusだけが一度遷移することを確認する。取得反映後の疎なPATCHが無用な409にならず、結果も消さない。
-4. **取得リースと `linkRevision`:** URL/title意図変更を旧fetchと競合させ、世代不一致結果が無反映であることを確認する。GET完了がPATCHに先行する順序、PATCHが先行する順序、close/expiry/stopが先行する順序をbarrierで作る。
-5. **省略・解除・取得元:** URL/title省略で状態を維持する。URL変更時manual titleは維持し、fetched titleは破棄する。同じfetched文字列の明示入力はmanualへ切り替える。明示空欄はtitle overrideを解除し、URLが有効なら新世代fetchを開始する。リンク意図の同値再送では番号を増やさない。
-6. **古い利用者版:** 別タブの利用者変更後、古い `expectedVersion` のPATCHは409で全項目不変、fetchキュー不変とする。既存UIは自動再送せず、二択操作へ最新値を提示する。
-7. **非出力・終了消去:** 合成markerをURL/title/bodyに入れ、成功・検証失敗・fetch失敗・監査失敗・通知に漏れないことを確認する。close/expiry/stop後の状態取得から値が消え、遅延取得も値を戻さない。
-8. **CIDRと表示:** 公開正例、特殊用途の親・具体例外の境界、private/loopback/link-local、混在DNS、IPv4埋め込みIPv6、NAT64/6to4/Teredoを表形式で確認する。全特殊用途例外を拒否し、各redirect先も再検査し、検査後IPへ接続固定する。titleは `textContent`、URLは検査後の `href`、`noopener noreferrer` と `no-referrer` を確認する。
-9. **リンクUI:** URL/title編集・再表示、manual/fetched状態、入力中の非同期完了、保存待ち追加入力、409二択、終了行の編集不可を確認する。旧7ケースは現行UIが変更されない限り再実行しない。
+2. **外部field mapping:** 省略/null/空文字の保持・解除意味、camelCase PATCHからsnake_case console-stateへの写像、未設定値、`linkRevision`の非公開を確認する。
+3. **自動取得と疎な保存の競合:** editorを版 `v` で開き、別の自動取得でtitle/source/statusを更新してから、リンク項目を省略したworkdir/purpose PATCH (`expectedVersion: v`) を保存する。PATCHが成功し、取得済みtitleを保持することを確認する。
+4. **非同期取得の版番号:** fetch成功・失敗で `version` と `linkRevision` は不変、取得statusだけが一度遷移することを確認する。取得反映後の疎なPATCHが無用な409にならず、結果も消さない。
+5. **取得リースと `linkRevision`:** URL/title意図変更を旧fetchと競合させ、世代不一致結果が無反映であることを確認する。GET完了がPATCHに先行する順序、PATCHが先行する順序、close/expiry/stopが先行する順序をbarrierで作る。
+6. **省略・解除・取得元:** URL/title省略で状態を維持する。URL変更時manual titleは維持し、fetched titleは破棄する。同じfetched文字列の明示入力はmanualへ切り替える。明示空欄はtitle overrideを解除し、URLが有効なら新世代fetchを開始する。リンク意図の同値再送では番号を増やさない。
+7. **古い利用者版:** 別タブの利用者変更後、古い `expectedVersion` のPATCHは409で全項目不変、fetchキュー不変とする。既存UIは自動再送せず、二択操作へ最新値を提示する。
+8. **非出力・終了消去:** 合成markerをURL/title/bodyに入れ、成功・検証失敗・fetch失敗・監査失敗・通知に漏れないことを確認する。close/expiry/stop後の状態取得から値が消え、遅延取得も値を戻さない。
+9. **CIDRと表示:** 公開正例、特殊用途の親・具体例外の境界、private/loopback/link-local、混在DNS、IPv4埋め込みIPv6、NAT64/6to4/Teredoを表形式で確認する。全特殊用途例外を拒否し、各redirect先も再検査し、検査後IPへ接続固定する。titleは `textContent`、URLは検査後の `href`、`noopener noreferrer` と `no-referrer` を確認する。
+10. **リンクUI:** URL/title編集・再表示、manual/fetched状態、入力中の非同期完了、保存待ち追加入力、409二択、終了行の編集不可を確認する。旧7ケースは現行UIが変更されない限り再実行しない。
 
 ## 次のタスクと停止条件
 
@@ -67,7 +70,7 @@ IANAの[IPv4特殊用途登録簿](https://www.iana.org/assignments/iana-ipv4-sp
 - `npm run lint:md`: 90 files, 0 issues。`npm run lint:md:terms:design`: 成功。`git diff --check`: 成功。
 - TDDテストはまだ作成・実行していない。共有API本体がhandoffされる前の準備段階であり、テスト名・field semanticsはPR52契約との照合が必要。
 - 実装後に使うvalidation plan: `node --import tsx --test test/mvp.test.ts test/regressions.test.ts test/user-console.test.ts test/user-console-client.test.ts`, `npm run check`, `npm run lint:ts`, `npm run lint:md`, `npm run lint:md:terms:design`, およびLinux/Windows CI。
-- Commit/push: `commit_pending` / `push_pending`。
+- R54-07計画はcommit/push済み。今回のmapping追記は未commit。
 - Current design-candidate CI: 未実行。この作業は後続実装の候補HEADのための準備で、最終CIではない。
 
 ## 変更ファイル
