@@ -1,3 +1,7 @@
+import { createSessionTimeFormatter } from "./session-time.js";
+
+const formatSessionTime = createSessionTimeFormatter();
+
 export type ConsoleLogItem = { id: string; cursor: string; event: Record<string, unknown> };
 
 export function chronologicalPage(items: ConsoleLogItem[]): ConsoleLogItem[] {
@@ -157,6 +161,30 @@ function clientBootstrap(): void {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "—";
     return new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "medium", hourCycle: "h23" }).format(date) + " JST";
+  };
+  const appendSessionTimeCell = (row: HTMLTableRowElement, value: unknown, sessionId: string, kind: "created" | "last-access", open: boolean) => {
+    const cell = row.insertCell();
+    cell.className = "session-time-cell";
+    const display = formatSessionTime(value);
+    if (!display) { cell.textContent = "—"; return undefined; }
+    const details = document.createElement("details");
+    details.className = "session-time";
+    details.dataset.sessionId = sessionId;
+    details.dataset.sessionTime = kind;
+    details.open = open;
+    const summary = document.createElement("summary");
+    const relative = document.createElement("time");
+    relative.dateTime = display.iso;
+    relative.dataset.sessionRelative = "true";
+    relative.textContent = display.relative;
+    summary.append(relative);
+    const exact = document.createElement("time");
+    exact.dateTime = display.iso;
+    exact.textContent = display.exact;
+    details.append(summary);
+    details.append(exact);
+    cell.append(details);
+    return details;
   };
   const addCell = (row: HTMLTableRowElement, value: unknown) => {
     const cell = row.insertCell();
@@ -430,6 +458,15 @@ function clientBootstrap(): void {
       const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
       if (sessionRows && state.sessions) {
         const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
+        const savedOpenByKey = new Map<string, boolean>();
+        let focusedTimeKey: string | undefined;
+        for (const details of sessionRows.querySelectorAll<HTMLDetailsElement>("details[data-session-time]")) {
+          const key = JSON.stringify([details.dataset.sessionId ?? "", details.dataset.sessionTime ?? ""]);
+          savedOpenByKey.set(key, details.open);
+          const summary = details.querySelector("summary");
+          if (summary && document.activeElement === summary) focusedTimeKey = key;
+        }
+        const restoredSummaries = new Map<string, HTMLElement>();
         sessionRows.replaceChildren();
         if (!visibleSessions.length) {
           const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 7;
@@ -438,13 +475,21 @@ function clientBootstrap(): void {
           const row = sessionRows.insertRow();
           const linkCell = row.insertCell(); const link = document.createElement("a");
           link.className = "session-link"; link.href = "/user/sessions/" + encodeURIComponent(session.session_id); link.textContent = "詳細を見る"; linkCell.append(link);
-          addCell(row, timeText(session.created_at));
-          addCell(row, timeText(session.last_used_at ?? session.created_at));
+          const createdKey = JSON.stringify([session.session_id, "created"]);
+          const createdDetails = appendSessionTimeCell(row, session.created_at, session.session_id, "created", savedOpenByKey.get(createdKey) ?? false);
+          const createdSummary = createdDetails?.querySelector("summary") as HTMLElement | null;
+          if (createdSummary) restoredSummaries.set(createdKey, createdSummary);
+          const lastAccessKey = JSON.stringify([session.session_id, "last-access"]);
+          const lastAccessDetails = appendSessionTimeCell(row, session.last_used_at ?? session.created_at, session.session_id, "last-access", savedOpenByKey.get(lastAccessKey) ?? false);
+          const lastAccessSummary = lastAccessDetails?.querySelector("summary") as HTMLElement | null;
+          if (lastAccessSummary) restoredSummaries.set(lastAccessKey, lastAccessSummary);
           addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
           addCell(row, session.purpose ?? "—");
           addCell(row, session.session_id);
           addCell(row, session.working_directory ?? "—");
         }
+        if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
+        syncSessionTimeUpdates();
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
       if (runningRows && state.running) {
@@ -539,6 +584,85 @@ function clientBootstrap(): void {
     if (!hasMoreOlder || !oldestCursor || (olderButton && olderButton.disabled)) return;
     if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 120) void loadOlder();
   }, { passive: true });
+  const sessionRows = document.getElementById("session-rows") as HTMLTableSectionElement | null;
+  let relativeUpdateInterval: number | undefined;
+  let secondsUpdateInterval: number | undefined;
+  let futureBoundaryTimeout: number | undefined;
+  const isSecondDisplay = (value: string | null) => /^\d+秒(?:前|後)$/.test(value ?? "");
+  const sessionRelativeElements = () => sessionRows?.querySelectorAll<HTMLTimeElement>("time[data-session-relative]") ?? [];
+  const updateSessionRelativeTimes = () => {
+    for (const relative of sessionRelativeElements()) {
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+    }
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const updateSessionSecondTimes = () => {
+    let hasSecondDisplay = false;
+    for (const relative of sessionRelativeElements()) {
+      if (!isSecondDisplay(relative.textContent)) continue;
+      const next = formatSessionTime(relative.dateTime)?.relative ?? "—";
+      if (relative.textContent !== next) relative.textContent = next;
+      if (isSecondDisplay(next)) hasSecondDisplay = true;
+    }
+    if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionSecondUpdates = () => {
+    const hasSecondDisplay = Array.from(sessionRelativeElements()).some((relative) => isSecondDisplay(relative.textContent));
+    if (hasSecondDisplay && secondsUpdateInterval === undefined) {
+      secondsUpdateInterval = window.setInterval(updateSessionSecondTimes, 1_000);
+    } else if (!hasSecondDisplay && secondsUpdateInterval !== undefined) {
+      window.clearInterval(secondsUpdateInterval);
+      secondsUpdateInterval = undefined;
+    }
+  };
+  const syncSessionFutureBoundary = () => {
+    if (futureBoundaryTimeout !== undefined) {
+      window.clearTimeout(futureBoundaryTimeout);
+      futureBoundaryTimeout = undefined;
+    }
+    const now = Date.now();
+    let nearestDelay: number | undefined;
+    for (const relative of sessionRelativeElements()) {
+      const timestamp = Date.parse(relative.dateTime);
+      const remaining = timestamp - now;
+      if (!Number.isFinite(timestamp) || remaining < 60_000) continue;
+      const delay = Math.min(remaining - 59_999, 2_147_483_647);
+      if (nearestDelay === undefined || delay < nearestDelay) nearestDelay = delay;
+    }
+    if (nearestDelay !== undefined) {
+      futureBoundaryTimeout = window.setTimeout(() => {
+        futureBoundaryTimeout = undefined;
+        updateSessionRelativeTimes();
+      }, nearestDelay);
+    }
+  };
+  const syncSessionTimeUpdates = () => {
+    syncSessionSecondUpdates();
+    syncSessionFutureBoundary();
+  };
+  const stopSessionRelativeUpdates = () => {
+    if (relativeUpdateInterval !== undefined) window.clearInterval(relativeUpdateInterval);
+    if (secondsUpdateInterval !== undefined) window.clearInterval(secondsUpdateInterval);
+    if (futureBoundaryTimeout !== undefined) window.clearTimeout(futureBoundaryTimeout);
+    relativeUpdateInterval = undefined;
+    secondsUpdateInterval = undefined;
+    futureBoundaryTimeout = undefined;
+  };
+  const startSessionRelativeUpdates = () => {
+    if (!sessionRows || relativeUpdateInterval !== undefined) return;
+    updateSessionRelativeTimes();
+    relativeUpdateInterval = window.setInterval(updateSessionRelativeTimes, 60_000);
+  };
+  if (sessionRows) {
+    window.addEventListener("pagehide", stopSessionRelativeUpdates);
+    window.addEventListener("pageshow", startSessionRelativeUpdates);
+    startSessionRelativeUpdates();
+  }
   setStatus(); showPending();
   void refreshState();
   restartEvents();
@@ -546,4 +670,4 @@ function clientBootstrap(): void {
 
 // tsx/esbuild decorates function expressions with __name during tests. Define
 // the harmless helper in the emitted browser program as well as in tsc output.
-export const userConsoleClientScript = `const __name=(value)=>value;(${clientBootstrap.toString()})();`;
+export const userConsoleClientScript = `const __name=(value)=>value;const formatSessionTime=(${createSessionTimeFormatter.toString()})();(${clientBootstrap.toString()})();`;

@@ -2,17 +2,25 @@ name: test-runtime-measurement
 
 on:
   workflow_dispatch:
+  pull_request:
+    types: [labeled]
 
 permissions:
   contents: read
 
 concurrency:
-  group: test-runtime-measurement-${{ github.ref }}
+  group: test-runtime-measurement-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
   measure:
     name: Measure individual Windows tests
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'ci-measure-runtime' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
     timeout-minutes: 360
     permissions:
@@ -30,10 +38,25 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Skip an already successful measurement for this PR head
+        id: measurement-gate
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        env:
+          CI_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $decision = & node scripts/ci-test-measurement-gate.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $decision = $decision.Trim()
+          if ($decision -notin @('run', 'skip')) { throw 'The measurement gate returned an invalid decision.' }
+          "skip=$($decision -eq 'skip')" | Add-Content -Path $env:GITHUB_OUTPUT
+
       - name: Install dependencies
+        if: steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
         run: npm ci
 
       - name: Resolve workflow metadata
+        if: steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
         shell: pwsh
         env:
           CI_GITHUB_TOKEN: ${{ github.token }}
@@ -44,6 +67,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Measure each tracked test file
+        if: steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
         shell: pwsh
         run: |
           $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
@@ -53,7 +77,7 @@ jobs:
           exit $LASTEXITCODE
 
       - name: Upload measurement evidence
-        if: always()
+        if: always() && steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: test-runtime-measurement-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}

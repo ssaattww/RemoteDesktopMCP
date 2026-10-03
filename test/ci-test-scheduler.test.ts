@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, symlink } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { parse as parseYaml } from "yaml";
 import {
   buildAssignments,
   buildPlan,
@@ -19,6 +20,7 @@ import {
   getWorkflowRunMetadata,
 } from "../scripts/ci-test-scheduler.mjs";
 import { buildManifestCandidate, createMeasurementRecord, measurementChildEnvironment } from "../scripts/ci-test-measurement.mjs";
+import { hasSuccessfulMeasurementRun, shouldSkipMeasurement } from "../scripts/ci-test-measurement-gate.mjs";
 
 const files = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts", "test/d.test.ts"];
 const environment = {
@@ -201,6 +203,68 @@ test("measurement child process cannot inherit credentials and keeps safe run me
   const probe = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify({ hasToken: Boolean(process.env.CI_GITHUB_TOKEN), runId: process.env.CI_WORKFLOW_RUN_ID }))"], { env: child, encoding: "utf8" });
   assert.equal(probe.status, 0);
   assert.deepEqual(JSON.parse(probe.stdout), { hasToken: false, runId: "7" });
+});
+
+test("measurement gate skips only a completed successful run for the exact PR head", async () => {
+  const headSha = "a".repeat(40);
+  const runs = [
+    { event: "pull_request", head_sha: headSha, status: "completed", conclusion: "success", pull_requests: [{ number: 41 }] },
+    { event: "workflow_dispatch", head_sha: headSha, status: "completed", conclusion: "success", pull_requests: [{ number: 42 }] },
+    { event: "pull_request", head_sha: "b".repeat(40), status: "completed", conclusion: "success", pull_requests: [{ number: 42 }] },
+    { event: "pull_request", head_sha: headSha, status: "in_progress", conclusion: null, pull_requests: [{ number: 42 }] },
+    { event: "pull_request", head_sha: headSha, status: "completed", conclusion: "failure", pull_requests: [{ number: 42 }] },
+    { event: "pull_request", head_sha: headSha, status: "completed", conclusion: "success", pull_requests: [{ number: 42 }] },
+  ];
+  assert.equal(hasSuccessfulMeasurementRun(runs, { prNumber: 42, headSha }), true);
+  assert.equal(hasSuccessfulMeasurementRun(runs.slice(0, -1), { prNumber: 42, headSha }), false);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "ci-measurement-gate-"));
+  try {
+    const eventPath = path.join(root, "event.json");
+    await writeFile(eventPath, JSON.stringify({ pull_request: {
+      number: 42, head: { sha: headSha, repo: { full_name: "ssaattww/RemoteDesktopMCP" } },
+    } }));
+    let requestUrl: URL | undefined;
+    let requestHeaders: Record<string, string> | undefined;
+    const skip = await shouldSkipMeasurement({
+      GITHUB_REPOSITORY: "ssaattww/RemoteDesktopMCP",
+      GITHUB_EVENT_PATH: eventPath,
+      CI_GITHUB_TOKEN: "synthetic-read-token",
+    }, async (input, init) => {
+      requestUrl = new URL(String(input));
+      requestHeaders = init?.headers as Record<string, string>;
+      return { ok: true, json: async () => ({ total_count: runs.length, workflow_runs: runs }) } as Response;
+    });
+    assert.equal(skip, true);
+    assert.match(requestUrl?.pathname ?? "", /actions\/workflows\/test-runtime-measurement\.yml\/runs$/);
+    assert.equal(requestUrl?.searchParams.get("event"), "pull_request");
+    assert.equal(requestUrl?.searchParams.get("head_sha"), headSha);
+    assert.equal(requestHeaders?.Authorization, "Bearer synthetic-read-token");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("measurement workflow is opt-in on same-repository label events with read-only permissions", async () => {
+  const workflow = parseYaml(await readFile(path.join(process.cwd(), ".github/workflows/test-runtime-measurement.yml"), "utf8"));
+  assert.ok(Object.hasOwn(workflow.on, "workflow_dispatch"));
+  assert.deepEqual(workflow.on.pull_request.types, ["labeled"]);
+  assert.equal(workflow.permissions.contents, "read");
+  assert.equal(workflow.jobs.measure.permissions.contents, "read");
+  assert.equal(workflow.jobs.measure.permissions.actions, "read");
+  assert.equal(workflow.concurrency["cancel-in-progress"], false);
+  assert.match(workflow.concurrency.group, /pull_request\.number/);
+  assert.match(workflow.concurrency.group, /pull_request\.head\.sha/);
+  assert.match(workflow.jobs.measure["if"], /ci-measure-runtime/);
+  assert.match(workflow.jobs.measure["if"], /head\.repo\.full_name == github\.repository/);
+  assert.doesNotMatch(JSON.stringify(workflow), /pull_request_target/);
+
+  const steps = workflow.jobs.measure.steps;
+  const gate = steps.findIndex((step) => step.id === "measurement-gate");
+  const install = steps.findIndex((step) => step.name === "Install dependencies");
+  assert.ok(gate >= 0 && gate < install, "duplicate-success guard runs before npm ci");
+  assert.deepEqual(steps[gate].env, { CI_GITHUB_TOKEN: "${{ github.token }}" });
+  assert.equal(steps[gate]["if"], "github.event_name == 'pull_request'");
 });
 
 test("scheduler CLI executes its entry point and rejects unknown commands", () => {
