@@ -59,6 +59,15 @@
 - Finding `PR54-NR-003` remains provisional P2 and parent-assigned. The focused pass validates the fixture behavior locally; matching Windows CI evidence is still absent. Whole-file test execution was incomplete at the available 30-second command window.
 - The test asserts latching before the persistence writer proceeds while path validation is pending; it then permits the real persistence and stop cleanup to finish. It does not assert that all persistence/cleanup completes within a fixed latency.
 
+### Parent-owned supplemental implementation evidence — PR54-NR-004
+
+- **Source identity:** current workspace HEAD before this supplemental uncommitted diff is `543f0a7140aa8df24123fbf89fbce53db63d1b33`; validation applies to this HEAD plus only the test change at `test/user-console.test.ts:478-484`. No commit or push was made.
+- **Finding `PR54-NR-004` / P2 provisional (parent-assigned, report-local):** current-head Windows CI run `37133047283` reported async activity after `session edit and process start use one ordering boundary and preserve each start snapshot` passed, with an unhandled `ENOENT` from `lstat` under the fixture's `reference/validation/.../data` directory. The test adapter returned live `PID n` output. Production `process_start` registers `watchProcess` for a running item (`src/index.ts:1241`); that timer can perform an audit after fixture cleanup removes its data directory. The test asserts start ordering, working-directory snapshots, and start audit snapshots; it does not assert watcher polling or live-process lifecycle behavior.
+- **Test-only change:** `test/user-console.test.ts:478-484` now has the adapter return `PID n` plus `Process completed with exit code 0`. This preserves PID parsing and both start/snapshot/audit assertions while representing completed fixture processes, so the production code does not register a watcher for these unrelated-to-the-test live lifecycles. No production code, timeouts, assertions on the required snapshots, or test selection were changed.
+- **Focused validation:** `npx tsx --test --test-name-pattern='session edit and process start use one ordering boundary and preserve each start snapshot' test/user-console.test.ts` — exit 0; 1 passed, 0 failed.
+- **Full validation:** `npm test` — exit 0; 126 total, 115 passed, 11 skipped, 0 failed. `npm run check`, `npm run build`, and `npm run lint` — each exit 0. `git diff --check` — exit 0.
+- **Evidence limits:** validation ran locally on Linux; no new Windows CI run was started. The Windows async failure is supplied current-head evidence; this local pass does not establish Windows-specific CI status. `PR54-NR-004` remains provisional P2 pending independent review and current-head CI.
+
 ## 親側の追加検証（2026-10-03）
 
 - 実行コマンド `npm test`: exit 0、126 tests、115 pass、0 fail、11 skipped（Windows固有・環境依存 fixture を含む）、duration 142.5s。

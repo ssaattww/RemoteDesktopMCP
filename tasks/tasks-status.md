@@ -37,9 +37,10 @@
 | F02 | P4 | ノード間相互認証・複数PC経路・再接続 | T08 | L | 登録2台以上、切断・世代交代・再送・転送中継の試験が合格 | 後続 |
 | F03 | P4 | 単一 PC の Tailscale Funnel と ChatGPT 公開接続検証 | F01,F01a,F01b,F01c | M | 実際の公開経路から認証と操作、再起動後の接続を確認 | 公開起動済み。HTTPSの認証案内と未認証401確認、ChatGPT実操作を利用者へ依頼中 |
 | F04 | P4 | 公開接続の通常・独立レビュー | F01a,F01b,F01c | M | Sol / high で公開用変更を確認し、F03 の実運用結果と未検証事項を区別 | 通常10件解消後、3ffd783の独立レビューで追加3件。F01dで対応し同じ独立担当へ限定確認 |
-| R54-01 | P5 | PR #54 Windows shard 1/3 の緊急停止・作業ディレクトリ検証競合失敗を調査し、原因が実装なら最小修正 | PR54 HEAD 6b3df248、R54-02 | M | 失敗原因をログ・fixture・本番経路で特定。必要なら縮退fixtureにせずTDDで修正し、対象テストと関連検証を実行 | TDD test fixture修正済み。全ローカル回帰126件中115 pass/11 Windows等skip/0 fail、build・lint成功。現ソースWindows CI待ち |
-| R54-02 | P5 | PR #54 の編集summary focus復元とrefresh/save応答順のP2指摘を同一通常レビュアーが修正確認 | R54-01 | S | stable report IDs PR54-NR-001/002で元HEAD・箇所を対応付け、修正HEADのfocused検証とP2 severity維持を記録 | 同一通常レビュアーがPR54-NR-001/002/003を確認。ローカル全検証成功、現ソースWindows CI待ち |
+| R54-01 | P5 | PR #54 Windows shard 1/3 の緊急停止・作業ディレクトリ検証競合失敗を調査し、原因が実装なら最小修正 | PR54 HEAD 6b3df248、R54-02 | M | 失敗原因をログ・fixture・本番経路で特定。必要なら縮退fixtureにせずTDDで修正し、対象テストと関連検証を実行 | NR-003の50ms timing oracleを決定的barrierへ修正。新しいWindows未処理I/O失敗（37133047283、NR-004）を調査しtest fixtureを追加修正。全ローカル回帰126件中115 pass/11 skip/0 fail、build・lint成功。修正後Windows CI待ち |
+| R54-02 | P5 | PR #54 の編集summary focus復元とrefresh/save応答順のP2指摘を同一通常レビュアーが修正確認 | R54-01 | S | stable report IDs PR54-NR-001/002で元HEAD・箇所を対応付け、修正HEADのfocused検証とP2 severity維持を記録 | 同一通常レビュアーがPR54-NR-001/002/003を確認済み。NR-004確認中、修正後Windows CI待ち |
 | R54-03 | P5 | PR #54 現ビルドのFA780 UI手動確認と画面証拠 | R54-01,R54-02 | S | 編集draft/focus、他画面更新、保存待ち追加入力、409二択、相対時刻・詳細開閉を親が現ビルドで確認・撮影 | 親の実機確認待ち |
+| R54-04 | P5 | Windows shard 1/3のprocess snapshot fixture終了後に発生する非同期audit ENOENTの原因調査・修正 | R54-01 | S | run 37133047283のexact errorをproduction watcherとtest fixtureに照合。試験対象のスナップショット保証を保った最小TDD修正をし、同reviewer確認と修正後Windows CIで検証 | fixtureを完了processモデルに修正。通常review・Windows CI待ち |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。

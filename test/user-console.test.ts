@@ -480,7 +480,7 @@ test("session edit and process start use one ordering boundary and preserve each
       startedDirectories.push(String(workingDirectory));
       calls++;
       if (calls === 1) { firstStartEntered(); await release; }
-      return `PID ${80 + calls}`;
+      return `PID ${80 + calls}\nProcess completed with exit code 0`;
     },
     read: async () => "", terminate: async () => "", sessions: async () => "",
   };
