@@ -356,6 +356,7 @@ test("Issue 48: session metadata edits require owner and CSRF, compare versions,
   try {
     const owned = await owner.call("session_open", { working_directory: f.root, purpose: "Initial purpose" });
     const foreign = await other.call("session_open", { working_directory: f.data, purpose: "Private purpose" });
+    const linked = await owner.call("session_open", { working_directory: f.root, purpose: "Link edit contract" });
     const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
     const cookieValue = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie")!)?.[1]; assert.ok(cookieValue);
     const cookie = `rdmcp_user=${cookieValue}`;
@@ -365,13 +366,53 @@ test("Issue 48: session metadata edits require owner and CSRF, compare versions,
     const update = (sessionId: string, body: Record<string, unknown>, csrfToken = csrf, origin = f.service.cfg.baseUrl, withCookie = true) => fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: "PATCH", headers: { ...(withCookie ? { cookie } : {}), origin, "content-type": "application/json", "x-csrf-token": csrfToken }, body: JSON.stringify(body),
     });
+    const linkUpdate = await update(String(linked.session_id), { expectedVersion: 1, externalUrl: "https://example.com/manual", externalTitle: "Manual link title" });
+    assert.equal(linkUpdate.status, 200, "URL and title edits are accepted atomically");
+    assert.deepEqual(await linkUpdate.json(), {
+      session_id: linked.session_id,
+      working_directory: f.root,
+      purpose: "Link edit contract",
+      external_url: "https://example.com/manual",
+      external_title: "Manual link title",
+      external_title_source: "manual",
+      external_title_status: "not_requested",
+      version: 2,
+      changedFields: ["externalUrl", "externalTitle"],
+    });
+    assert.equal(f.service.sessions.get(String(linked.session_id))?.linkRevision, 1);
+    const linkedState = await (await fetch(`${base}/api/console-state`, { headers: { cookie } })).json() as { sessions: Array<Record<string, unknown>> };
+    const linkedOwnerState = linkedState.sessions.find((session) => session.session_id === linked.session_id)!;
+    assert.equal(linkedOwnerState.external_url, "https://example.com/manual");
+    assert.equal(linkedOwnerState.external_title, "Manual link title");
+    assert.equal(linkedOwnerState.external_title_source, "manual");
+    assert.equal(linkedOwnerState.external_title_status, "not_requested");
+    assert.equal(Object.hasOwn(linkedOwnerState, "link_revision"), false, "the internal fetch generation is not exposed to the browser");
+    const clearUrl = await update(String(linked.session_id), { expectedVersion: 2, externalUrl: null });
+    assert.equal(clearUrl.status, 200);
+    const afterUrlClear = await clearUrl.json() as { external_url: string | null; external_title: string | null; external_title_source: string | null; version: number };
+    assert.equal(afterUrlClear.external_url, null);
+    assert.equal(afterUrlClear.external_title, "Manual link title", "clearing a URL keeps a manual title");
+    assert.equal(afterUrlClear.version, 3);
+    assert.equal(f.service.sessions.get(String(linked.session_id))?.linkRevision, 2);
+    const clearTitle = await update(String(linked.session_id), { expectedVersion: 3, externalTitle: "   " });
+    assert.equal(clearTitle.status, 200, "blank text clears a title field");
+    const afterTitleClear = await clearTitle.json() as { external_title: string | null; external_title_source: string | null; external_title_status: string; version: number };
+    assert.equal(afterTitleClear.external_title, null);
+    assert.equal(afterTitleClear.external_title_source, null);
+    assert.equal(afterTitleClear.external_title_status, "not_requested");
+    assert.equal(afterTitleClear.version, 4);
+    assert.equal(f.service.sessions.get(String(linked.session_id))?.linkRevision, 3);
     assert.equal((await update(String(owned.session_id), { expectedVersion: 1, purpose: "No login" }, "", f.service.cfg.baseUrl, false)).status, 401);
     assert.equal((await update(String(owned.session_id), { expectedVersion: 1, purpose: "No token" }, "")).status, 403);
     assert.equal((await update(String(owned.session_id), { expectedVersion: 1, purpose: "Wrong origin" }, csrf, "https://attacker.example")).status, 403);
-    const externalUrlRejected = await update(String(owned.session_id), { expectedVersion: 1, externalUrl: "https://example.test" });
-    assert.equal(externalUrlRejected.status, 400, "link fields remain unsupported in this implementation slice");
-    assert.equal((await externalUrlRejected.json() as { error: string }).error, "unsupported_field");
-    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, externalTitle: "Not supported yet" })).status, 400, "link fields remain unsupported in this implementation slice");
+    const externalUrlRejected = await update(String(owned.session_id), { expectedVersion: 1, workingDirectory: f.base, purpose: "Must not partially commit", externalUrl: "file:///etc/passwd" });
+    assert.equal(externalUrlRejected.status, 400, "invalid explicit link fields reject the whole PATCH");
+    assert.equal((await externalUrlRejected.json() as { error: string }).error, "invalid_external_link");
+    const unchangedAfterInvalidLink = f.service.sessions.get(String(owned.session_id))!;
+    assert.equal(unchangedAfterInvalidLink.workingDirectory, f.root);
+    assert.equal(unchangedAfterInvalidLink.purpose, "Initial purpose");
+    assert.equal(unchangedAfterInvalidLink.version, 1);
+    assert.equal((await update(String(owned.session_id), { expectedVersion: 1, externalTitle: 17 })).status, 400, "link fields require strings or null");
     assert.equal((await update(String(owned.session_id), { expectedVersion: 1, unexpected: true })).status, 400, "unknown fields are rejected");
     assert.equal((await update(String(owned.session_id), { expectedVersion: 1, workingDirectory: f.base, purpose: "Updated purpose" })).status, 200);
     const state = await (await fetch(`${base}/api/console-state`, { headers: { cookie } })).json() as { sessions: Array<{ session_id: string; working_directory: string; purpose: string; version: number }> };
@@ -407,7 +448,7 @@ test("Issue 48: session metadata edits require owner and CSRF, compare versions,
     }
     await writeFile(`${f.base}/not-a-directory`, "file");
     assert.equal((await update(String(owned.session_id), { expectedVersion: 2, workingDirectory: `${f.base}/not-a-directory` })).status, 400);
-    const audit = f.service.auditEntriesForConsole().find((event) => event.event === "session.metadata.updated");
+    const audit = f.service.auditEntriesForConsole().find((event) => event.event === "session.metadata.updated" && event.sessionId === owned.session_id);
     assert.ok(audit);
     assert.deepEqual(audit.changedFields, ["workingDirectory", "purpose"]);
     assert.equal(audit.previousVersion, 1);
@@ -444,6 +485,46 @@ test("Issue 48: session metadata edits require owner and CSRF, compare versions,
     await f.service.stopUserExecution("owner@example.test");
     assert.equal((await update(String(stopped.session_id), { expectedVersion: 1, purpose: "Attempt" })).status, 404);
   } finally { await owner.close(); await other.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
+});
+
+test("Issue 48: a fetched title does not advance the edit version or get erased by a stale sparse PATCH", async () => {
+  const f = await fixture();
+  let releaseResponse!: (value: { status: number; contentType: string; body: Uint8Array }) => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  f.service.cfg.sessionLinkTransport = { resolve: async () => ["93.184.216.34"], request: async () => { markStarted(); return new Promise((resolve) => { releaseResponse = resolve; }); } };
+  const owner = await mcp(f.service);
+  const server = createApp(f.service).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const opened = await owner.call("session_open", { working_directory: f.root, purpose: "Before link edit" });
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token);
+    const cookie = `rdmcp_user=${token}`;
+    const page = await (await fetch(`${base}/user`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1]; assert.ok(csrf);
+    const patch = (body: Record<string, unknown>) => fetch(`${base}/api/sessions/${encodeURIComponent(String(opened.session_id))}`, { method: "PATCH", headers: { cookie, origin: f.service.cfg.baseUrl, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
+    const saved = await patch({ expectedVersion: 1, purpose: "Edited purpose", externalUrl: "https://example.com/fetched" });
+    assert.equal(saved.status, 200);
+    const saveResult = await saved.json() as { version: number; external_title_status: string };
+    assert.equal(saveResult.version, 2);
+    assert.equal(saveResult.external_title_status, "pending");
+    await started;
+    const session = f.service.sessions.get(String(opened.session_id)); assert.ok(session);
+    releaseResponse({ status: 200, contentType: "text/html; charset=utf-8", body: new TextEncoder().encode("<title>Auto title</title>") });
+    for (let tries = 0; tries < 100 && session.externalTitleStatus === "pending"; tries += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(session.externalTitle, "Auto title");
+    assert.equal(session.version, 2, "background title retrieval does not consume the user's compare version");
+    const staleDraftSave = await patch({ expectedVersion: 2, workingDirectory: f.base, purpose: "Edited purpose" });
+    assert.equal(staleDraftSave.status, 200, "a form opened at the unchanged user version can save fields without link intent");
+    const result = await staleDraftSave.json() as { version: number; external_title: string | null };
+    assert.equal(result.version, 3);
+    assert.equal(result.external_title, "Auto title", "omitting URL/title preserves the fetched title");
+    assert.equal(session.externalTitle, "Auto title");
+    assert.equal(session.version, 3);
+  } finally { await owner.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await f.cleanup(); }
 });
 
 test("Issue 48: emergency stop is accepted while a session working directory is being validated", async () => {

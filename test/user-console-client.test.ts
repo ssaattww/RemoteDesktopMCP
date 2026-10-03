@@ -46,6 +46,7 @@ class FakeElement {
   click(name = "click") { this.listeners.get(name)?.(); }
   replaceChildren(...children: FakeElement[]) { for (const child of this.children) child.parent = null; this.children = children; for (const child of children) { child.parent?.remove(child); child.parent = this; } }
   append(child: FakeElement) { child.parent?.remove(child); child.parent = this; this.children.push(child); }
+  replaceChildren(...children: FakeElement[]) { for (const child of this.children) child.parent = null; this.children = []; for (const child of children) this.append(child); }
   remove(child: FakeElement) { this.children = this.children.filter((candidate) => candidate !== child); child.parent = null; }
   insertRow() { const row = new FakeElement("tr"); row.parent = this; this.children.push(row); return row; }
   insertCell() { const cell = new FakeElement("td"); cell.parent = this; this.children.push(cell); return cell; }
@@ -132,7 +133,7 @@ function boot(fetchImpl: (url: string, init?: { method?: string }) => Promise<Re
     scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }),
   };
   const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, querySelectorAll: (selector: string) => [...elements.values()].flatMap((element) => element.querySelectorAll(selector)), createElement: (tagName: string) => new FakeElement(tagName), get activeElement() { return FakeElement.activeElement; }, documentElement: { scrollHeight: 1200 } };
-  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: TestDate });
+  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URL, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: TestDate });
   return { root, status, newest, older, windowStub, windowListeners, intervals, timeouts, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, advanceTime: (milliseconds: number) => { const target = clockNow + milliseconds; while (true) { const due = [...timeouts.entries()].filter(([, timer]) => timer.dueAt <= target).sort((a, b) => a[1].dueAt - b[1].dueAt)[0]; if (!due) break; clockNow = due[1].dueAt; timeouts.delete(due[0]); due[1].callback(); } clockNow = target; }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
@@ -147,7 +148,7 @@ test("session metadata editor uses the authenticated PATCH contract and preserve
   let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
   const form = {
     dataset: { sessionEdit: "owned/session", version: "3" },
-    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf-token" } : name === "workingDirectory" ? directory : purpose },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf-token" } : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null },
     addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
     querySelector: (selector: string) => selector === "output" ? output : button,
     closest: () => row,
@@ -189,13 +190,14 @@ test("session metadata editor keeps typing made while a save is pending", async 
   const output = { textContent: "" };
   const form = {
     dataset: { sessionEdit: "session-1", version: "1" },
-    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : purpose },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null },
     addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
     querySelector: (selector: string) => selector === "output" ? output : button,
     closest: () => row,
   };
   const button = { disabled: false, addEventListener: () => undefined };
-  const row = { querySelector: () => ({ textContent: "" }) };
+  const linkCell = { textContent: "", replaceChildren() {} };
+  const row = { querySelector: () => linkCell };
   let release!: (value: ReturnType<typeof response>) => void;
   let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
   runInNewContext(userConsoleClientScript, {
@@ -212,6 +214,50 @@ test("session metadata editor keeps typing made while a save is pending", async 
   assert.match(output.textContent, /未保存/);
 });
 
+test("link editor sends sparse intent so a fetched title survives unrelated saves and explicit clearing is distinct", async () => {
+  const directory = { value: "C:/work" };
+  const purpose = { value: "Original" };
+  const externalUrl = { value: "https://example.com/page" };
+  const externalTitle = { value: "Fetched title" };
+  const output = { textContent: "" };
+  const button = { disabled: false, addEventListener() {} };
+  const linkCell = { textContent: "", replaceChildren() {} };
+  const row = { querySelector: (selector: string) => selector === "[data-session-external-link]" ? linkCell : null };
+  let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  const form = {
+    dataset: { sessionEdit: "session-1", version: "2" },
+    elements: { namedItem: (name: string) => ({ csrf: { value: "csrf" }, workingDirectory: directory, purpose, externalUrl, externalTitle } as Record<string, { value: string }>)[name] ?? null },
+    addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
+    querySelector: (selector: string) => selector === "output" ? output : button,
+    closest: () => row,
+  };
+  const requests: Array<{ body: string }> = [];
+  let calls = 0;
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null }, encodeURIComponent,
+    fetch: async (_url: string, init: { body: string }) => {
+      requests.push(init); calls++;
+      return calls === 1
+        ? response(200, { version: 3, working_directory: "C:/work", purpose: "Updated", external_url: externalUrl.value, external_title: "Fetched title", external_title_source: "fetched", external_title_status: "resolved" })
+        : response(200, { version: 4, working_directory: "C:/work", purpose: "Updated", external_url: externalUrl.value, external_title: null, external_title_source: null, external_title_status: "pending" });
+    },
+  });
+  assert.ok(handler);
+  purpose.value = "Updated";
+  await handler({ preventDefault() {} });
+  const sparse = JSON.parse(requests[0]!.body) as Record<string, unknown>;
+  assert.equal(Object.hasOwn(sparse, "externalUrl"), false);
+  assert.equal(Object.hasOwn(sparse, "externalTitle"), false, "an unrelated save omits fetched title intent");
+  assert.equal(externalTitle.value, "Fetched title");
+  externalTitle.value = "";
+  await handler({ preventDefault() {} });
+  const clearing = JSON.parse(requests[1]!.body) as Record<string, unknown>;
+  assert.equal(Object.hasOwn(clearing, "externalUrl"), false);
+  assert.equal(clearing.externalTitle, null, "an explicit empty title is sent as a clear operation");
+  assert.equal(externalTitle.value, "");
+  assert.equal(form.dataset.version, "4");
+});
+
 test("a state snapshot started before a successful save cannot restore its older session version", async () => {
   const sessionRows = new FakeElement("tbody");
   const row = new FakeElement("tr"); sessionRows.append(row);
@@ -224,7 +270,7 @@ test("a state snapshot started before a successful save cannot restore its older
   const directory = new FakeElement("input"); directory.value = "C:/new";
   const purpose = new FakeElement("input"); purpose.value = "New purpose";
   const csrf = new FakeElement("input"); csrf.value = "csrf";
-  Object.assign(form, { elements: { namedItem: (name: string) => name === "csrf" ? csrf : name === "workingDirectory" ? directory : purpose } });
+  Object.assign(form, { elements: { namedItem: (name: string) => name === "csrf" ? csrf : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null } });
   const output = new FakeElement("output"); const submitButton = new FakeElement("button");
   form.queries.set("output", output); form.queries.set("button[type=submit]", submitButton);
   row.queries.set("[data-session-directory]", directoryCell); row.queries.set("[data-session-purpose]", purposeCell);
@@ -298,7 +344,7 @@ test("version conflicts load the latest values and require an explicit re-edit c
   let patchCalls = 0;
   const form = {
     dataset: { sessionEdit: "session-1", version: "1" },
-    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : purpose },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null },
     addEventListener: (_: string, handler: (event: { preventDefault(): void }) => Promise<void>) => { submit = handler; },
     querySelector: (selector: string) => selector === "output" ? output : selector === "[data-session-conflict]" ? conflict : selector === "[data-session-conflict-summary]" ? summary : selector.includes("keep-draft") ? keepDraft : selector.includes("use-latest") ? useLatest : submitButton,
     closest: () => row,
@@ -350,11 +396,11 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   const purposeInput = new FakeElement("input"); purposeInput.value = "Unsaved purpose";
   const csrfInput = new FakeElement("input"); csrfInput.value = "csrf";
   sessionForm.append(directoryInput); sessionForm.append(purposeInput); sessionForm.append(csrfInput);
-  Object.assign(sessionForm, { elements: { namedItem: (name: string) => name === "workingDirectory" ? directoryInput : name === "purpose" ? purposeInput : csrfInput } });
+  Object.assign(sessionForm, { elements: { namedItem: (name: string) => name === "workingDirectory" ? directoryInput : name === "purpose" ? purposeInput : name === "csrf" ? csrfInput : null } });
 
   const stateA = { stopped: false, activeSessions: 2, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [
-    { session_id: "session-1", working_directory: "C:/server-value", purpose: "Server purpose", created_at: "2026-10-02T00:00:00Z", last_used_at: "2026-10-03T00:00:00Z", state: "active", active: true, version: 2 },
-    { session_id: "session-2", working_directory: "C:/added", purpose: "Added session", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, version: 1 },
+    { session_id: "session-1", working_directory: "C:/server-value", purpose: "Server purpose", external_url: "https://example.com/", external_title: "Fetched title", external_title_source: "fetched", external_title_status: "resolved", created_at: "2026-10-02T00:00:00Z", last_used_at: "2026-10-03T00:00:00Z", state: "active", active: true, version: 2 },
+    { session_id: "session-2", working_directory: "C:/added", purpose: "Added session", external_url: null, external_title: "Title without URL", external_title_source: "manual", external_title_status: "not_requested", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, version: 1 },
     { session_id: "session-3", working_directory: "C:/closed", purpose: "Closed session", created_at: "2026-09-30T00:00:00Z", state: "closed", active: false },
   ] };
   const stateB = { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:01:00Z", sessions: [
@@ -376,6 +422,12 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   assert.ok(updatedRow);
   assert.equal(updatedRow.children[4]?.textContent, "Server purpose");
   assert.equal(updatedRow.children[6]?.textContent, "C:/server-value");
+  assert.equal(updatedRow.children[7]?.children[0]?.textContent, "Fetched title", "the owner session link uses fetched title as text");
+  assert.equal(updatedRow.children[7]?.children[0]?.rel, "noopener noreferrer");
+  assert.equal(updatedRow.children[7]?.children[0]?.referrerPolicy, "no-referrer");
+  assert.equal(updatedRow.children[7]?.children[1]?.textContent, "自動取得");
+  assert.equal(sessionRows.children[1]?.children[7]?.children[0]?.className, "session-external-title");
+  assert.equal(sessionRows.children[1]?.children[7]?.children[0]?.textContent, "Title without URL");
   assert.equal(updatedRow.querySelector("form[data-session-edit]"), sessionForm, "the same editor form is moved into the reconciled row");
   assert.equal(directoryInput.value, "C:/draft");
   assert.equal(purposeInput.value, "Unsaved purpose");
@@ -383,7 +435,7 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   assert.equal(FakeElement.activeElement, purposeInput);
   assert.equal(purposeInput.focusOptions?.preventScroll, true);
   assert.equal(updatedRow.children[1]?.children[0]?.open, true);
-  assert.equal(sessionRows.children[1]?.children[7]?.innerHTML.includes('data-session-edit="session-2"'), true, "new active sessions receive an editor");
+  assert.equal(sessionRows.children[1]?.children[8]?.innerHTML.includes('data-session-edit="session-2"'), true, "new active sessions receive an editor");
   const closedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-3")!;
   assert.equal(closedRow.querySelector("form[data-session-edit]"), null, "closed sessions never retain an editor");
 
@@ -393,7 +445,7 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   assert.equal(refresh, 2);
   assert.equal(sessionRows.children.length, 3, "the intermediate refresh retains the active editor row");
   const editorFocusRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
-  const restoredEditorSummary = editorFocusRow.children[7]?.querySelector("summary");
+  const restoredEditorSummary = editorFocusRow.children[8]?.querySelector("summary");
   assert.equal(FakeElement.activeElement, restoredEditorSummary, "the editor summary keeps keyboard focus after its row is replaced");
   assert.equal(restoredEditorSummary?.focusOptions?.preventScroll, true);
 
