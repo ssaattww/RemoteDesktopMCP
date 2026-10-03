@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/bootstrap.js",
+    "cui": "node dist/bootstrap.js --cui",
     "dev": "tsx watch src/bootstrap.ts",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",

@@ -30,10 +30,39 @@ const jst = (value: unknown) => { const date = new Date(String(value ?? "")); re
 const page = (body: string, nonce?: string) => `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RDMCP User Console</title><style>body{font:13px system-ui,sans-serif;background:#f4f6fa;color:#17243b;margin:0}main{max-width:1100px;margin:12px auto;padding:12px}header{display:flex;gap:8px;align-items:center;flex-wrap:wrap}header h1{font-size:15px;margin:0 auto 0 0}h2{font-size:14px;margin:0 0 8px}p{margin:7px 0}section,form{background:#fff;border:1px solid #dbe2ec;border-radius:12px;padding:20px;margin:18px 0}section.session-list{font-size:12px;border-radius:8px;padding:12px;margin:10px 0}header form,.toolbar form{display:inline-flex;align-items:center;gap:6px;background:none;border:0;padding:0;margin:0}button,select{font:inherit;padding:5px 7px}button{white-space:nowrap}#log-new-button{border:1px solid #9ab7df;background:#e8f1ff;color:#174f91;border-radius:999px;font-weight:650;box-shadow:0 1px 1px #17243b18}#log-new-button:hover{background:#dceaff}#log-new-button:focus-visible{outline:3px solid #70a5e8;outline-offset:2px}#log-new-button:disabled{opacity:.65;cursor:wait}@media(pointer:fine){#log-pull-hint{display:none}}.toolbar form{flex-wrap:wrap}article p,.session-meta{overflow-wrap:anywhere}.danger{background:#b42318;color:#fff;border:0;font-weight:700}.ok{background:#147a43;color:#fff;border:0;font-weight:700}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:10px;border-bottom:1px solid #dbe2ec;vertical-align:top}th{font-weight:600}.session-list th,.session-list td{padding:6px}.scroll{overflow:auto}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}.session-link{white-space:nowrap;font-weight:600}.process-block{border:1px solid #dbe2ec;border-radius:8px;padding:10px;margin:10px 0}.process-block h3{font-size:inherit;margin:10px 0 4px}.output-part+ .output-part{margin-top:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef2f7;padding:12px;border-radius:8px}.stopped{color:#b42318;font-weight:700}.running{color:#a15c00;font-weight:700}small{color:#526078}@media(max-width:600px){main{margin:4px auto;padding:7px}section{padding:12px;margin:10px 0}section.session-list{padding:9px;margin:7px 0}header h1{font-size:14px}h2{font-size:13px}th,td{padding:7px;white-space:nowrap}.session-list th,.session-list td{padding:5px}}</style><main>${body}</main>${nonce ? `<script nonce="${nonce}">${userConsoleClientScript}</script>` : ""}</html>`;
 
 type Login = { principal: string; expires: number; csrf: string; email?: string; identity?: GoogleIdentity };
+export type UserConsoleLogin = Login;
+export async function isUserConsoleLoginAllowed(service: RemoteDesktopService, login: UserConsoleLogin): Promise<boolean> {
+  return login.identity ? Boolean(await service.publicAuth?.isAllowedIdentity(login.identity)) : Boolean(login.email && login.principal === login.email && service.cfg.users.some((entry) => entry.email === login.email));
+}
+export type UserConsolePairing = {
+  submit(login: Login, code: string): { ok: true; confirmationId: string } | { ok: false; reason: string };
+  revoke(login: Login): void;
+};
+
+export async function readUserCuiSnapshot(service: RemoteDesktopService, principal: string) {
+  await service.refreshAuditIndex();
+  const { sessions: allSessions } = await readSessionLogs(service);
+  const owned = allSessions.filter((session) => session.user === principal);
+  const activeIds = new Set([...service.sessions.values()].filter((session) => session.user === principal && session.state === "active" && session.expires > Date.now()).map((session) => session.id));
+  const sessions = owned.filter((session) => !session.id.startsWith("request:")).map((session) => ({ session_id: session.id, working_directory: session.workingDirectory ?? null, purpose: session.purpose ?? null, created_at: session.at, last_used_at: session.lastAccessAt ?? session.at, state: activeIds.has(session.id) ? "active" : session.state, active: activeIds.has(session.id) }));
+  const events = owned.flatMap((session) => session.events.map((event) => ({ session, event }))).filter(({ event }) => ["operation.received", "operation.started", "operation.succeeded", "operation.failed", "operation.cancelled", "operation.rejected"].includes(event.event)).sort((a, b) => Date.parse(a.event.at) - Date.parse(b.event.at));
+  const operations = new Map<string, { sessionId: string; event: Record<string, unknown> & { event: string } }>();
+  for (const { session, event } of events) {
+    const operationId = String(event.operationId ?? `${session.id}:${event.at}:${event.event}`);
+    const prior = operations.get(operationId);
+    operations.set(operationId, { sessionId: session.id, event: { ...(prior?.event ?? {}), ...event, connectionId: event.connectionId ?? prior?.event.connectionId } });
+  }
+  const running = [...operations.entries()].flatMap(([operationId, operation]) => {
+    const status = typeof operation.event.status === "string" ? operation.event.status : operation.event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(operation.event.event) ? operation.event.event.slice("operation.".length) : "running";
+    return status === "running" ? [{ operation_id: operationId, connection_id: String(operation.event.connectionId ?? operation.sessionId), label: String(operation.event.tool ?? "operation"), status }] : [];
+  }).concat([...service.processes.values()].filter((process) => process.user === principal && (process.state === "running" || process.state === "terminating")).map((process) => ({ operation_id: process.id, connection_id: process.sessionId, label: "process", status: process.state })));
+  const logs = service.getUserAuditPage(principal, undefined, { limit: 200 });
+  return { state: { sessions, running }, logs };
+}
 type Pending = { binding: string; nonce: string; expires: number };
 type Budget = { attempts: number; reset: number };
 
-export function mountUserConsole(app: Express, service: RemoteDesktopService) {
+export function mountUserConsole(app: Express, service: RemoteDesktopService, options: { pairing?: UserConsolePairing } = {}) {
   const logins = new Map<string, Login>();
   const pending = new Map<string, Pending>();
   const loginBudgets = new Map<string, Budget>();
@@ -44,13 +73,11 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
   // The console's read-only HTTP and SSE APIs live under /api, so the login
   // cookie must be sent there as well as to the rendered /user pages.
   const setLoginCookie = (res: Response, value: string, age: number) => { setCookie(res, value, age, cookieName, "/"); setCookie(res, "", 0, cookieName, "/user"); };
-  const clean = () => { const now = Date.now(); for (const [key, value] of logins) if (value.expires <= now) logins.delete(key); for (const [key, value] of pending) if (value.expires <= now) pending.delete(key); for (const [key, value] of loginBudgets) if (value.reset <= now) loginBudgets.delete(key); for (const [key, value] of passwordBudgets) if (value.reset <= now) passwordBudgets.delete(key); };
-  const remember = <T>(map: Map<string, T>, key: string, value: T, maximum: number) => { map.delete(key); while (map.size >= maximum) map.delete(map.keys().next().value!); map.set(key, value); };
+  const clean = () => { const now = Date.now(); for (const [key, value] of logins) if (value.expires <= now) { logins.delete(key); options.pairing?.revoke(value); } for (const [key, value] of pending) if (value.expires <= now) pending.delete(key); for (const [key, value] of loginBudgets) if (value.reset <= now) loginBudgets.delete(key); for (const [key, value] of passwordBudgets) if (value.reset <= now) passwordBudgets.delete(key); };
+  const remember = <T>(map: Map<string, T>, key: string, value: T, maximum: number) => { map.delete(key); while (map.size >= maximum) { const oldest = map.keys().next().value!; const removed = map.get(oldest); map.delete(oldest); if (map === logins && removed) options.pairing?.revoke(removed as unknown as Login); } map.set(key, value); };
   const consume = (map: Map<string, Budget>, key: string) => { const now = Date.now(); const prior = map.get(key); const budget = !prior || prior.reset <= now ? { attempts: 1, reset: now + 60_000 } : { ...prior, attempts: prior.attempts + 1 }; remember(map, key, budget, 2_000); return budget.attempts <= 10; };
   const constantTimeEqual = (left: string, right: string) => { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); };
-  const loginAllowed = async (login: Login) => login.identity
-    ? Boolean(await service.publicAuth?.isAllowedIdentity(login.identity))
-    : Boolean(login.email && login.principal === login.email && service.cfg.users.some((entry) => entry.email === login.email));
+  const loginAllowed = (login: Login) => isUserConsoleLoginAllowed(service, login);
   const newLogin = (principal: string, extra: { email?: string; identity?: GoogleIdentity } = {}) => ({ principal, expires: Date.now() + 3600_000, csrf: id(), ...extra });
   const passwordPrincipal = async (req: Request): Promise<string | undefined> => {
     const email = typeof req.body?.email === "string" ? req.body.email : "";
@@ -211,8 +238,17 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     // itself so a normal heartbeat does not terminate the EventSource.
     res.on("close", close);
   });
-  app.use("/user", async (req, res, next) => { const login = await userLogin(req); if (!login) return res.redirect(303, "/user/login"); setLoginCookie(res, cookie(req.header("cookie")) ?? "", Math.max(0, Math.floor((login.expires - Date.now()) / 1000))); res.locals.principal = login.principal; res.locals.csrf = login.csrf; next(); });
-  app.post("/user/logout", (req, res) => { if (!requireCsrf(req, res)) return; logins.delete(cookie(req.header("cookie")) ?? ""); setLoginCookie(res, "", 0); setCookie(res, "", 0, cookieName, "/user"); return res.redirect(303, "/user/login"); });
+  app.use("/user", async (req, res, next) => { const login = await userLogin(req); if (!login) return res.redirect(303, "/user/login"); setLoginCookie(res, cookie(req.header("cookie")) ?? "", Math.max(0, Math.floor((login.expires - Date.now()) / 1000))); res.locals.principal = login.principal; res.locals.csrf = login.csrf; res.locals.login = login; next(); });
+  app.post("/user", (req, res) => {
+    if (!options.pairing) return res.sendStatus(404);
+    if (!requireCsrf(req, res)) return;
+    const login = res.locals.login as Login;
+    if (req.body?.consent !== "yes") return res.sendStatus(400);
+    const result = options.pairing.submit(login, typeof req.body?.pairingCode === "string" ? req.body.pairingCode : "");
+    if (!result.ok) return res.status(400).type("html").send(page(`<p>端末との連携を確認できませんでした。コード期限切れ、入力上限、または保留中の候補を確認してください。</p><a href="/user">戻る</a>`));
+    return res.type("html").send(page(`<h1>端末連携の確認</h1><p>この確認IDをブラウザーと端末の両方で確認してください。</p><p><strong>${escape(result.confirmationId)}</strong></p><p>同じIDを端末で明示承認するまでデータは端末へ送信されません。</p><a href="/user">戻る</a>`));
+  });
+  app.post("/user/logout", (req, res) => { if (!requireCsrf(req, res)) return; const token = cookie(req.header("cookie")) ?? ""; const login = logins.get(token); if (login) options.pairing?.revoke(login); logins.delete(token); setLoginCookie(res, "", 0); setCookie(res, "", 0, cookieName, "/user"); return res.redirect(303, "/user/login"); });
   app.post("/user/emergency-stop", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.stopUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "停止状態を保存できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
   app.post("/user/resume", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.resumeUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "再開できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
   app.get(["/user", "/user/", "/user/sessions/:sessionId"], async (req, res) => {
@@ -261,6 +297,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     if (!selectedSession) {
       body += `${logControls}<section class="session-list"><div class="toolbar"><h2>セッション一覧</h2><span>有効な接続: <span id="active-session-count">${activeSessions.length}</span> · 現在実行中の操作: <span id="running-count">${runningOperations.length + running.length}</span></span><form method="get" action="/user"><label>表示 <select name="filter"><option value="all"${filter === "all" ? " selected" : ""}>すべて</option><option value="active"${filter === "active" ? " selected" : ""}>有効のみ</option></select></label><button>適用</button></form></div><div class="scroll"><table><thead><tr><th>内容</th><th>作成日時</th><th>最終アクセス日時</th><th>状態</th><th>用途</th><th>Connection ID</th><th>作業ディレクトリ</th></tr></thead><tbody id="session-rows">${shownSessions.length ? shownSessions.map((session) => `<tr><td><a class="session-link" href="/user/sessions/${encodeURIComponent(session.id)}">詳細を見る</a></td><td>${jst(session.at)}</td><td>${jst(session.lastAccessAt ?? session.at)}</td><td>${escape(activeIds.has(session.id) ? "有効" : session.state === "closed" ? "終了" : "履歴")}</td><td style="overflow-wrap:anywhere">${escape(session.purpose ?? "—")}</td><td style="overflow-wrap:anywhere">${escape(session.id)}</td><td style="overflow-wrap:anywhere">${escape(session.workingDirectory ?? "—")}</td></tr>`).join("") : `<tr><td colspan="7">${filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。"}</td></tr>`}</tbody></table></div></section>`;
       if (unassignedOperations.length) body += `<section><h2>セッション外の操作</h2><ul>${unassignedOperations.map((session) => `<li>${jst(session.at)} · <a href="/user/sessions/${encodeURIComponent(session.id)}">${escape(session.id)}</a></li>`).join("")}</ul></section>`;
+      if (options.pairing) body += `<section><h2>端末CUIへの表示</h2><p>このログイン中のセッション情報を、起動中の端末へ読み取り専用で表示します。ブラウザーと端末で同じ確認IDを確かめてください。</p><form method="post" action="/user"><input type="hidden" name="csrf" value="${escape(res.locals.csrf)}"><label>端末の一回限りコード <input name="pairingCode" type="password" inputmode="text" autocomplete="off" pattern="[a-f0-9]{32}" maxlength="32" required></label><label><input type="checkbox" name="consent" value="yes" required>このログインのセッション一覧・実行状態・ログ概要を端末へ表示する</label><button>確認IDを発行</button></form></section>`;
       body += cuiJsonPanel("");
       return res.type("html").send(page(body + stopDetails, res.locals.userNonce));
     }

@@ -87,3 +87,45 @@ test("CUI API returns owner scoped session list through existing auth boundary",
     await f.cleanup();
   }
 });
+
+test("terminal pairing reuses the authenticated user page consent and revokes the same login on logout", async () => {
+  const f = await fixture();
+  let submittedLogin: unknown;
+  let revokedLogin: unknown;
+  let submittedCode = "";
+  const pairing = {
+    submit(login: unknown, code: string) { submittedLogin = login; submittedCode = code; return { ok: true as const, confirmationId: "A1B2C3D4E5" }; },
+    revoke(login: unknown) { revokedLogin = login; },
+  };
+  const server = createApp(f.service, { pairing }).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const login = await fetch(`${base}/user/login`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@example.test", password: "correct-horse-battery" }), redirect: "manual" });
+    const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie") ?? "")?.[1];
+    assert.ok(token);
+    const cookie = `rdmcp_user=${token}`;
+    const page = await fetch(`${base}/user`, { headers: { cookie } });
+    const html = await page.text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1];
+    assert.ok(csrf);
+    assert.match(html, /action="\/user"/);
+    const denied = await fetch(`${base}/user`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, pairingCode: "deadbeef" }) });
+    assert.equal(denied.status, 400, "the route requires explicit consent in addition to CSRF");
+    const paired = await fetch(`${base}/user`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, pairingCode: "abcdef0123456789abcdef0123456789", consent: "yes" }) });
+    assert.equal(paired.status, 200);
+    assert.match(await paired.text(), /A1B2C3D4E5/);
+    assert.equal(submittedCode, "abcdef0123456789abcdef0123456789");
+    assert.ok(submittedLogin);
+    const logout = await fetch(`${base}/user/logout`, { method: "POST", headers: { origin: f.service.cfg.baseUrl, cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }), redirect: "manual" });
+    assert.equal(logout.status, 303);
+    assert.equal(revokedLogin, submittedLogin, "logout revokes the exact login record bound to the pairing candidate");
+  } finally {
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    server.closeAllConnections();
+    await closed;
+    await f.cleanup();
+  }
+});

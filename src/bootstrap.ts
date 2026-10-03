@@ -5,5 +5,6 @@ const envPath = path.resolve(process.cwd(), ".env");
 await assertSafePrivateParent(path.dirname(envPath));
 await assertPrivateFile(envPath);
 process.loadEnvFile(envPath);
-const { startFromEnvironment } = await import("./index.js");
-await startFromEnvironment();
+const { startCuiFromEnvironment, startFromEnvironment } = await import("./index.js");
+if (process.argv.includes("--cui")) await startCuiFromEnvironment();
+else await startFromEnvironment();

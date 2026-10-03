@@ -1,4 +1,5 @@
 export type ConsoleLogItem = { id: string; cursor: string; event: Record<string, unknown> };
+import { mapCuiResponse } from "./cui-output.js";
 
 export function chronologicalPage(items: ConsoleLogItem[]): ConsoleLogItem[] {
   // /api/logs returns pages newest first. `after` pages are deliberately
@@ -24,7 +25,7 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
   };
 }
 
-function clientBootstrap(): void {
+function clientBootstrap(mapCuiResponse: typeof import("./cui-output.js").mapCuiResponse): void {
   const consoleRoot = document.getElementById("log-console");
   if (!consoleRoot) return;
   const root = consoleRoot;
@@ -469,9 +470,6 @@ function clientBootstrap(): void {
       }
     } catch { /* Keep the last successful state visible. */ }
   };
-  const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
-  const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
-  const isIsoDate = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
   let cuiGeneration = 0;
   let cuiController: AbortController | undefined;
   let cuiBusy = false;
@@ -488,23 +486,6 @@ function clientBootstrap(): void {
     if (cuiLogin) cuiLogin.hidden = !showLogin;
   };
   const sessionForPanel = () => cuiPanel?.dataset.sessionId ?? "";
-  const mapCuiResponse = (rawState: unknown, rawLogs: unknown, selectedSession: string) => {
-    if (!isRecord(rawState) || !Array.isArray(rawState.sessions) || !Array.isArray(rawState.running) || !isRecord(rawLogs) || !Array.isArray(rawLogs.items)) throw new Error("invalid response");
-    const sessions = rawState.sessions.map((raw): Record<string, unknown> => {
-      if (!isRecord(raw) || !isNonEmptyString(raw.session_id) || !(raw.purpose === null || raw.purpose === undefined || typeof raw.purpose === "string") || !(raw.working_directory === null || raw.working_directory === undefined || typeof raw.working_directory === "string") || !isIsoDate(raw.created_at) || !isIsoDate(raw.last_used_at) || typeof raw.active !== "boolean" || typeof raw.state !== "string" || !["active", "closed", "expired", "unavailable"].includes(raw.state) || (raw.active ? raw.state !== "active" : raw.state === "active")) throw new Error("invalid session");
-      return { sessionId: raw.session_id, purpose: raw.purpose ?? null, workingDirectory: raw.working_directory ?? null, createdAt: raw.created_at, lastAccessAt: raw.last_used_at, state: raw.state };
-    }).filter((session) => !selectedSession || session.sessionId === selectedSession);
-    const operations = rawState.running.map((raw): Record<string, unknown> => {
-      if (!isRecord(raw) || !isNonEmptyString(raw.operation_id) || !isNonEmptyString(raw.connection_id) || (raw.status !== "running" && raw.status !== "terminating")) throw new Error("invalid operation");
-      return { operationId: raw.operation_id, connectionId: raw.connection_id, status: raw.status, startedAt: null, endedAt: null };
-    });
-    const logs = rawLogs.items.map((raw): Record<string, unknown> => {
-      if (!isRecord(raw) || !isNonEmptyString(raw.id) || !isRecord(raw.event) || !isIsoDate(raw.event.at) || !isNonEmptyString(raw.event.event)) throw new Error("invalid log");
-      return { logId: raw.id, timestamp: raw.event.at, type: raw.event.event };
-    });
-    const truncated = sessions.length > 200 || operations.length > 200 || logs.length > 200;
-    return { model: { sessions: sessions.slice(0, 200), operations: operations.slice(0, 200), logs: logs.slice(0, 200) }, truncated };
-  };
   const fetchCuiJson = async () => {
     if (!cuiPanel || !cuiOutput || !cuiStatus || !cuiRefresh || cuiBusy || cuiEnded) return;
     const selectedSession = sessionForPanel();
@@ -639,4 +620,4 @@ function clientBootstrap(): void {
 
 // tsx/esbuild decorates function expressions with __name during tests. Define
 // the harmless helper in the emitted browser program as well as in tsc output.
-export const userConsoleClientScript = `const __name=(value)=>value;(${clientBootstrap.toString()})();`;
+export const userConsoleClientScript = `const __name=(value)=>value;(${clientBootstrap.toString()})(${mapCuiResponse.toString()});`;

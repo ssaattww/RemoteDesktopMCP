@@ -17,7 +17,8 @@ import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateFile } from "./private-storage.js";
 
 import { mountAdmin } from "./admin.js";
-import { mountUserConsole } from "./user-console.js";
+import { isUserConsoleLoginAllowed, mountUserConsole, readUserCuiSnapshot, type UserConsoleLogin, type UserConsolePairing } from "./user-console.js";
+import { TerminalCui } from "./terminal-cui.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
@@ -1196,7 +1197,7 @@ const publicAuthorizeRequest = (service: RemoteDesktopService, req: Request) => 
   if (clientId !== CHATGPT_CLIENT_ID || redirectUri !== CHATGPT_REDIRECT_URI || resource !== `${service.cfg.baseUrl}/mcp` || req.query.response_type !== "code" || req.query.code_challenge_method !== "S256" || req.query.scope !== "mcp" || (state?.length ?? 0) > 2048 || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return undefined;
   return { clientId, redirectUri, resource, state, challenge };
 };
-export function createApp(service: RemoteDesktopService): Express {
+export function createApp(service: RemoteDesktopService, options: { pairing?: UserConsolePairing } = {}): Express {
   const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => {
     // The audit EventSource is an authenticated, body-less GET that deliberately
     // keeps its response open. Only that exact body-less form avoids the generic
@@ -1209,7 +1210,7 @@ export function createApp(service: RemoteDesktopService): Express {
     next();
   }); app.use(express.urlencoded({ extended: false, limit: "16kb" })); app.use(["/token", "/authorize/confirm", "/authorize/consent"], express.json({ limit: "16kb" })); app.use(express.json({ limit: "1mb" }));
   mountAdmin(app, service);
-  mountUserConsole(app, service);
+  mountUserConsole(app, service, { pairing: options.pairing });
   app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: service.publicAuth ? "google" : "local-development" }));
   app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json({ resource: `${service.cfg.baseUrl}/mcp`, authorization_servers: [service.cfg.baseUrl], scopes_supported: ["mcp"] }));
   app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_response_iss_parameter_supported: Boolean(service.publicAuth), authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, ...(service.publicAuth ? { client_id_metadata_document_supported: true } : { registration_endpoint: `${service.cfg.baseUrl}/register` }), response_types_supported: ["code"], grant_types_supported: service.publicAuth ? ["authorization_code", "refresh_token"] : ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp"] }));
@@ -1301,4 +1302,46 @@ export function createApp(service: RemoteDesktopService): Express {
   return app;
 }
 export async function startFromEnvironment(): Promise<void> { const service = new RemoteDesktopService(configFromEnv()); await service.initialize(); createApp(service).listen(service.cfg.port, "127.0.0.1", () => console.log(`Remote Desktop MCP listening on ${service.publicAuth ? service.cfg.baseUrl : `http://127.0.0.1:${service.cfg.port}`}/mcp (${service.publicAuth ? "google" : "local-development"})`)); }
+export async function startCuiFromEnvironment(): Promise<void> {
+  if (!process.stdin.isTTY) throw new Error("CUI pairing requires an interactive terminal on stdin.");
+  const unknownArguments = process.argv.slice(2).filter((argument) => argument !== "--cui" && argument !== "--jsonl");
+  if (unknownArguments.length) throw new Error(`Unsupported CUI option: ${unknownArguments[0]}`);
+  const jsonl = process.argv.includes("--jsonl");
+  if (!process.stdout.isTTY && !jsonl) throw new Error("Redirected stdout requires the explicit --jsonl option.");
+  const service = new RemoteDesktopService(configFromEnv());
+  await service.initialize();
+  const readerRef: { current?: ReturnType<typeof createInterface> } = {};
+  const cui = new TerminalCui<UserConsoleLogin>({
+    read: (login) => readUserCuiSnapshot(service, login.principal),
+    active: async (login) => login.expires > Date.now() && await isUserConsoleLoginAllowed(service, login),
+    write: (text) => process.stdout.write(`${text}\n`),
+    clear: () => process.stdout.write("\u001b[2J\u001b[H"),
+    jsonl,
+    onEnd: () => readerRef.current?.close(),
+  });
+  const app = createApp(service, { pairing: cui });
+  const server = app.listen(service.cfg.port, "127.0.0.1");
+  try { await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); }); }
+  catch (error) { cui.stop(); await service.close(); throw error; }
+  const url = `${service.publicAuth ? service.cfg.baseUrl : `http://127.0.0.1:${service.cfg.port}`}/user`;
+  process.stderr.write(`Read-only terminal CUI is ready. Open ${url} in your own browser and sign in.\nPairing code (expires in 5 minutes): ${cui.takePairingCode()}\nEnter the browser confirmation identifier as: approve <ID>\nCommands: q (quit)\n`);
+  const reader = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+  readerRef.current = reader;
+  try {
+    await new Promise<void>((resolve) => {
+      reader.on("line", (line) => {
+        const input = line.trim();
+        if (input === "q") { cui.stop(); reader.close(); return; }
+        const match = /^approve ([A-F0-9]{10})$/.exec(input);
+        if (match) { void cui.approve(match[1]!).then((approved) => process.stderr.write(approved ? `Confirmed ${match[1]}. Read-only view started.\n` : "No matching live confirmation. This CUI process has ended.\n")); return; }
+        process.stderr.write("Enter approve <ID> from the browser confirmation page, or q to quit.\n");
+      });
+      reader.once("close", resolve);
+    });
+  } finally {
+    cui.stop();
+    await service.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
 if (process.argv[1] === fileURLToPath(import.meta.url)) await startFromEnvironment();
