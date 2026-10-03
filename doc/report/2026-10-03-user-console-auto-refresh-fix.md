@@ -29,4 +29,4 @@
 
 ## 次の工程
 
-通常reviewerによる同一指摘のfix verificationと最新HEADのPR CI確認が必要。Draft状態を維持し、マージは行わない。
+通常fix verificationは `doc/report/2026-10-03-user-console-auto-refresh-fix-verification.md` に記録し、対象HEAD `190da9a2bf9906b3dc83978c355b6816ddf28016` で pass。クライアント35件、型検査、TypeScript lint、Markdown lintが成功した。PR #51はDraftのまま維持し、マージしていない。verification report commit後のPR HEAD一致CIは未確認。
