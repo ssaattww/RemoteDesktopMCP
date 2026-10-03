@@ -3,7 +3,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fixture, FIXTURE_PASSWORD_HASH } from "./fixture.js";
-import { verifyPassword } from "../src/hash-password.js";
+import { hashPassword, verifyPassword } from "../src/hash-password.js";
+
+test("password hash generation and verification remain functional", async () => {
+  const hash = await hashPassword("correct-horse-battery");
+  assert.match(hash, /^scrypt\$[^$]+\$[^$]+$/);
+  assert.equal(await verifyPassword("correct-horse-battery", hash), true);
+  assert.equal(await verifyPassword("incorrect-test-password", hash), false);
+});
 
 test("fixture reuses a verified test password hash and can skip unused service startup", async () => {
   const f = await fixture({ initializeService: false });
