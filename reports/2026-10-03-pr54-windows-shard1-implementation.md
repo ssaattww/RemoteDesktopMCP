@@ -95,7 +95,7 @@
 - **Additional Red evidence:** an isolated archive of baseline HEAD `b57b6b891ee4eecee97076cbd0dfdcc978f4dee5` was placed at `/tmp/rdmcp-pr54-nr005-red`; only `test/independent-fixes.test.ts` was overlaid. The new watcher-failure test command exited 1 with the expected unhandled `process observation audit failed` error. The main worktree was not changed by this probe.
 - **Final focused result:** four shutdown regressions passed, 0 failed.
 - **Final full result:** `npm test` exit 0; 130 total, 119 passed, 11 skipped, 0 failed. `npm run check`, `npm run build`, `npm run lint` and `git diff --check` all exited 0. No test runner remained after completion.
-- **Current disposition:** implementation responds to reviewer-confirmed P2 finding PR54-NR-005. The same reviewer checked the revised snapshot with no remaining finding. Current-head Windows CI remains pending; run `37134613123` is baseline evidence, not post-fix validation. No commit, push, comment, or merge was performed.
+- **Current disposition:** implementation responds to reviewer-confirmed P2 finding PR54-NR-005. The same reviewer checked the revised snapshot with no remaining finding. The post-fix exact-head run `37139053445` at commit `f929bee1d353863476fca0f45b0d93f1f4fe23ba` completed successfully on Ubuntu and all three Windows shards. Run `37134613123` remains baseline evidence only. PR comment `5970624374` was updated; the PR remains Draft and unmerged.
 
 ## 親側の追加検証（2026-10-03）
 
@@ -107,3 +107,10 @@
 - Windows CI はローカル実行と等価ではなく、現ソースの Windows shard 実行が必要。以前のWindows失敗は baseline `6b3df248...` に紐付くhistorical evidenceで、修正後のCI成功として扱わない。
 - 失敗期待値の根拠: baseline testは全stop promiseの50ms完了を要求していた（Windows shardでexpected `true`, actual `false`）。設計文書は停止状態をメモリへ反映して新規実行を遮断した後に永続化・後処理すると定義し、実装は `src/index.ts:515-523` でその順序を保つ。改訂fixtureはpath validatorを保留したままstopを開始し、1 microtask後に stopped latch と marker writerへの到達を確認するため、継続中のfilesystem同期・cleanup時間に依存せず、停止保証の要件を直接検査できる。
 - Commit/PR update, current-source Windows CI, and FA780 UI screenshot/manual verification remain subsequent steps; no freeze/attestation was initiated.
+
+### Parent-owned delivery result — exact-head CI
+
+- Normal commit `f929bee1d353863476fca0f45b0d93f1f4fe23ba` was pushed to `design/issue48-session-edit`.
+- Exact-head workflow `37139053445` concluded success: Ubuntu lint/check/build/test and Windows shard 1/3, 2/3, and 3/3 all succeeded.
+- The existing Japanese PR comment `5970624374` records the commit, same-reviewer NR-005 checked_no_finding result, local validation, CI outcome, and remaining FA780 UI follow-up.
+- PR remains Draft. No merge or independent final review was started.

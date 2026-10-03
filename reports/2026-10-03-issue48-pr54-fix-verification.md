@@ -91,9 +91,16 @@
 - **Evidence:** implementation owner reports isolated baseline Red for the new failure-path test (exit 1 with unhandled `process observation audit failed`). Revised focused close regressions pass 4/4. Full `npm test` exits 0: 130 total, 119 passed, 11 skipped, 0 failed (135.9s). `npm run check`, `npm run build`, `npm run lint`, and `git diff --check` exit 0. No current-source Windows CI result was supplied. Run `37134613123` remains a pre-fix Windows shard failure and is not evidence about this revision.
 - **Verdict: incomplete.** NR-005 is `checked_no_finding` for this revised dirty snapshot; NR-001/002/003/004 retain their prior checked dispositions. Current-source Windows CI remains outstanding, so cross-platform completion cannot be verified.
 
+### Parent-owned exact-head CI and delivery record
+
+- Commit `f929bee1d353863476fca0f45b0d93f1f4fe23ba` was normally pushed to `design/issue48-session-edit` and is the exact head for workflow run `37139053445`.
+- GitHub run `37139053445` completed successfully: Ubuntu lint/check/build/test and Windows shards 1/3, 2/3, and 3/3 all concluded success. This supplies current-source Windows evidence for the reviewed NR-005 descendant; prior failed run `37134613123` remains historical baseline evidence.
+- Existing Japanese PR comment ID `5970624374` was updated with the fix summary, local validation, same-reviewer disposition, exact CI result, parent-owned FA780 UI follow-up, and Draft/no-merge status.
+- Remaining scope boundary: FA780 UI evidence remains parent-owned and pending. No independent final review, reservation/freeze/attestation, or merge was performed.
+
 ## リスク
 
-- 未解決のリスクまたは後続対応: Obtain current-source Windows CI for the revised NR-005 dirty snapshot; none was supplied. Run 37134613123 is baseline failure evidence only. Hosted artifact download was blocked in this review runtime. PR54-NR-001/002 original IDs unavailable; report-local IDs preserve parent-provided P2. Prior normal reviewer identity is unknown; current reviewer continuity is `/root/pr54_fix_verification`. FA780 UI remains parent-owned/unverified. Remote/FA780 UI and unrelated server paths remain unexplored.
+- 未解決のリスクまたは後続対応: Current-source Windows CI completed successfully in run 37139053445 at commit f929bee. Run 37134613123 is baseline failure evidence only. Hosted artifact download was blocked in this review runtime. PR54-NR-001/002 original IDs unavailable; report-local IDs preserve parent-provided P2. Prior normal reviewer identity is unknown; current reviewer continuity is `/root/pr54_fix_verification`. FA780 UI remains parent-owned/unverified. Remote/FA780 UI and unrelated server paths remain unexplored.
 
 ## Parent-owned supplemental implementation follow-up — PR54-NR-005
 
