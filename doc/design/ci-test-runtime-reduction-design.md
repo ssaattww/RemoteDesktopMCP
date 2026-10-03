@@ -24,6 +24,22 @@ Uは版管理対象の`test/**/*.test.ts`全ファイルを正規化して昇順
 
 割当の生成時と各分割での実行前に、名前の正規化、許可範囲、重複、Uとの全体一致、分割同士の重複なし、全ファイル各一度を検証する。実行時に再検索してファイルを加えず、明示された名前だけを渡す。分割数は正整数とする。対象が空の分割は許可し、試験を起動せず、空であることを記録する。Uが空である状態とは区別する。
 
+### 回帰試験の意味単位への配置
+
+`test/regressions.test.ts` の29件は、次の7ファイルへ意味単位で分ける。この整理ではテスト集合U、テスト名、関数本体、検証項目、実際の`Commander`使用、各テストのサービス、MCP接続、一時領域、後片付けを変えない。各テストは移動先に一度だけ置き、旧ファイルには残さない。共有する可変状態を導入しない。
+
+| 新しいファイル | 移動する既存テスト | 維持する境界 |
+| --- | --- | --- |
+| `test/tool-root-contracts.test.ts` | `Issue 13: published tool descriptions match session, file-root, transfer, and process boundaries`; `Issue 20: root-scoped file operations expose their canonical path when the session CWD differs`; `Issue 9: sessions require a working directory and purpose, and commands start there` | 公開ツールの仕様、rootと作業場所が異なるときのパス、接続開始時の作業場所と目的 |
+| `test/operation-audit-details.test.ts` | `built-in file tools persist structured operation details for user monitoring`; `failed upload commit does not expose existing destination content in operation detail`; `schema validation rejections persist safe operation detail`; `schema validation rejection bounds oversized comments before audit persistence`; `schema validation rejection bounds variable-length bodies before detail processing`; `successful upload commit detail is pinned to verified upload bytes`; `file transfer cancel detail includes the transferred position`; `long UTF-8 transfer previews remain text when the byte limit splits a code point`; `Issue 29: small transfers complete in one MCP call while large transfers keep the chunked fallback` | 操作記録の個人情報保護と関連付け、転送操作の詳細、単一呼出しと分割転送 |
+| `test/config-transfer-integrity.test.ts` | `DR001: downloads use one immutable multi-chunk snapshot and clean failed snapshots`; `DR002: no-replace commit preserves a winner and removes the losing temp`; `DR002: upload begin fails safely when the destination lacks atomic no-replace support`; `DR003: protected config aliases cannot be read, searched, or reached by a swapped upload temp`; `DR003: a config replacement during pin linking preserves known history and the final config`; `DR003: exact bigint identity keys distinguish adjacent unsafe ids while preserving ordinary reads`; `DR003: protected identity manifests accept safe legacy values and fail closed on unsafe numeric values` | 変更不能な転送状態、上書きなしの原子的な確定、保護対象の設定識別、整数精度と一覧の検証 |
+| `test/session-filesystem-lifecycle.test.ts` | `NR009: canonical allowed roots work through a symlink or Windows junction`; `NR002 and NR006: expiry sweeps cancel transfers, clean files, and list session state`; `NR008: startup preserves unowned lookalikes and removes only manifest-owned orphan artifacts` | Windowsの`junction`と`symlink`を介した正規root、接続と転送の期限切れ、所有元を確認する起動時清掃 |
+| `test/search-process-lifecycle.test.ts` | `NR003 and NR004: searches return every page and portable Node processes retain output/audit`; `Issue 10: process_start inherits the service user profile environment`; `Desktop Commander stderr is drained before repeated get_config calls can block MCP` | 検索結果の全件、外部プロセスの出力・終了・監査、環境引継ぎ、実際の`Commander`の標準エラー読出し |
+| `test/http-oauth-regression.test.ts` | `NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, and MCP file operations` | 実際のローカルHTTP接続、`OAuth`と`PKCE`、再利用・要求情報の検証、認証後のMCP操作 |
+| `test/config-correlation-regression.test.ts` | `configuration rejects resolved overlap and traversal aliases`; `REV001: operation correlation ownership only accepts active owned sessions`; `REV001: accepted and rejected operations preserve safe correlation contracts` | 設定の重複・上位移動の拒否、有効な接続が所有する操作の関連付け |
+
+分割時は対象版のテスト名一覧を基準に、29件すべてが正確に一度ずつ存在し、各関数の内容が保持されていることを機械的に照合する。移動先ごとの試験を実行してから必須のUbuntu全件試験とWindowsの3分割実行を確認する。分割前後のファイル単位と分割実行の所要時間を同じ実行環境・同じ試験方法で比較し、速度改善を確認できない場合もその結果を記録する。必須自動検査と測定は同時に走らせない。新しい`test/**/*.test.ts`の集合には新しい照合値を用い、既存の実行時間表は再利用・適用しない。
+
 ## 割当計画と分割間の一致
 
 計画生成はWindowsの前段に置く単一の準備処理で一度だけ行う。共通入力は完全な変更識別子、追跡済み対象一覧と内容照合値、実行時間表、対象環境、および同じ自動処理実行記録の`created_at`である。準備処理は`GITHUB_REPOSITORY`と`GITHUB_RUN_ID`から実行記録を取得し、`head_sha`、`run_attempt`、`created_at`を検証する。取得や検証に失敗した場合は割当計画を作らず失敗する。3つのWindows処理には同じ成果物を渡し、各処理はその内容を検証した後にのみ自身の明示されたファイル一覧を実行する。
