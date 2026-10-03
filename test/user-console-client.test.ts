@@ -102,19 +102,19 @@ function boot(fetchImpl: (url: string) => Promise<ReturnType<typeof response>>, 
   const scrollY = 0; let scrollCalls = 0;
   const windowListeners = new Map<string, () => void>();
   const intervals = new Map<number, { callback: () => void; delay: number }>(); let nextInterval = 0;
-  const timeouts = new Map<number, { callback: () => void; delay: number }>(); let nextTimeout = 0;
+  const timeouts = new Map<number, { callback: () => void; delay: number; dueAt: number }>(); let nextTimeout = 0;
   const windowStub = {
     scrollY, scrollX: 0, innerHeight: 600,
     addEventListener: (name: string, listener: () => void) => { windowListeners.set(name, listener); },
     setInterval: (callback: () => void, delay: number) => { const id = ++nextInterval; intervals.set(id, { callback, delay }); return id; },
     clearInterval: (id: number) => { intervals.delete(id); },
-    setTimeout: (callback: () => void, delay: number) => { const id = ++nextTimeout; timeouts.set(id, { callback, delay }); return id; },
+    setTimeout: (callback: () => void, delay: number) => { const id = ++nextTimeout; timeouts.set(id, { callback, delay, dueAt: clockNow + delay }); return id; },
     clearTimeout: (id: number) => { timeouts.delete(id); },
     scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }),
   };
   const documentStub = { getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), get activeElement() { return FakeElement.activeElement; }, documentElement: { scrollHeight: 1200 } };
   runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: TestDate });
-  return { root, status, newest, older, windowStub, windowListeners, intervals, timeouts, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, tickTimeout: (delay: number) => { const match = [...timeouts.entries()].find(([, timer]) => timer.delay === delay); if (!match) throw new Error("no timeout scheduled for " + delay); timeouts.delete(match[0]); match[1].callback(); }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
+  return { root, status, newest, older, windowStub, windowListeners, intervals, timeouts, tickIntervals: () => { for (const timer of [...intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...intervals.values()]) if (timer.delay === delay) timer.callback(); }, advanceTime: (milliseconds: number) => { const target = clockNow + milliseconds; while (true) { const due = [...timeouts.entries()].filter(([, timer]) => timer.dueAt <= target).sort((a, b) => a[1].dueAt - b[1].dueAt)[0]; if (!due) break; clockNow = due[1].dueAt; timeouts.delete(due[0]); due[1].callback(); } clockNow = target; }, setNow: (value: number) => { clockNow = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {
@@ -425,9 +425,9 @@ test("future session times schedule their seconds boundary and release updates a
   assert.deepEqual([...ui.timeouts.values()].map((timeout) => timeout.delay), [1_001]);
 
   const requestCount = calls.length;
-  ui.setNow(now + 1_001);
-  ui.tickTimeout(1_001);
-  assert.equal(createdRelative?.textContent, "59\u79d2\u5f8c");
+  ui.advanceTime(2_000);
+
+  assert.equal(createdRelative?.textContent, "59\u79d2\u5f8c", "the scheduled boundary fires during two seconds of elapsed time");
   assert.equal(lastAccessRelative?.textContent, "59\u5206\u5f8c");
   assert.deepEqual([...ui.intervals.values()].map((timer) => timer.delay).sort(), [1_000, 60_000]);
   assert.equal(ui.timeouts.size, 1, "the next future timestamp keeps one later boundary wakeup");
