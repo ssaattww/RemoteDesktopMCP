@@ -48,6 +48,7 @@ test("executor authenticates, becomes active, and serves authenticated requests"
   const { coordinator, executor } = configs();
   const registry = new NodeRegistry(coordinator);
   registry.setLocalCapabilities({ operations: ["file"], roots: [], path_base: "root" });
+  const authState = { epoch: "", principal_id: "", stopped: true, stop_generation: -1 };
 
   const server = new CoordinatorNodeServer({
     host: "127.0.0.1",
@@ -55,7 +56,7 @@ test("executor authenticates, becomes active, and serves authenticated requests"
     port: 0,
     config: coordinator,
     registry,
-    userStates: () => [],
+    userStates: () => [{ principal_id: "owner@example.test", stopped: false, stop_generation: 0, stop_id: null }],
     heartbeatIntervalMs: 30,
     idleTimeoutMs: 200,
   });
@@ -71,6 +72,12 @@ test("executor authenticates, becomes active, and serves authenticated requests"
       path_base: "root",
     },
     onRequest: async (payload) => ({ received: payload }),
+    onCoordinatorEpoch: async (epoch) => { authState.epoch = epoch; },
+    onUserState: async (state) => { authState.principal_id = state.principal_id; authState.stopped = state.stopped; authState.stop_generation = state.stop_generation; },
+    isOperationAuthorized: (operation) => authState.epoch === operation.operation_id.coordinator_epoch
+      && authState.principal_id === operation.request.principal_id
+      && !authState.stopped
+      && authState.stop_generation === operation.request.stop_generation,
   });
 
   try {
@@ -106,9 +113,56 @@ test("executor authenticates, becomes active, and serves authenticated requests"
         operation: "arbitrary_desktop_commander_tool",
         args: {},
       } as never),
-      /NODE_REQUEST_FAILED/,
+      /Node operation is not supported/,
     );
   } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("authenticated user stop is applied while a duplicate-safe request is pending", async () => {
+  const { coordinator, executor } = configs();
+  const registry = new NodeRegistry(coordinator);
+  registry.setLocalCapabilities({ operations: ["file"], roots: [], path_base: "root" });
+  const state = { epoch: "", principal_id: "", stopped: true, stop_generation: -1 };
+  const server = new CoordinatorNodeServer({
+    host: "127.0.0.1", expectedBindHost: "127.0.0.1", port: 0, config: coordinator, registry,
+    userStates: () => [{ principal_id: "owner@example.test", stopped: false, stop_generation: 0, stop_id: null }],
+  });
+  const address = await server.start();
+  let started!: () => void;
+  let release!: () => void;
+  const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+  const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+  let workCount = 0;
+  const client = new ExecutorNodeClient({
+    config: executor,
+    capabilities: { executor_generation: generation(8), desktop_commander_generation: generation(9), operations: ["file"], roots: [], path_base: "root" },
+    onCoordinatorEpoch: async (epoch) => { state.epoch = epoch; },
+    onUserState: async (userState) => { state.principal_id = userState.principal_id; state.stopped = userState.stopped; state.stop_generation = userState.stop_generation; },
+    isOperationAuthorized: (operation) => state.epoch === operation.operation_id.coordinator_epoch
+      && state.principal_id === operation.request.principal_id
+      && !state.stopped
+      && state.stop_generation === operation.request.stop_generation,
+    onRequest: async (payload) => { workCount += 1; started(); await releasePromise; return payload; },
+  });
+  try {
+    await client.connect("127.0.0.1", address.port);
+    await waitFor(() => registry.activeConnection(remoteId) !== undefined);
+    const pending = server.request(remoteId, {
+      principal_id: "owner@example.test", stop_generation: 0, session_id: "session-pending-stop",
+      operation: "file_read", args: { root_id: "remote", relative_path: "note.txt" },
+    });
+    await startedPromise;
+    const acknowledgements = await server.syncUserState({ principal_id: "owner@example.test", stopped: true, stop_generation: 1, stop_id: "stop-request-0001" });
+    assert.equal(acknowledgements.length, 1);
+    assert.deepEqual(acknowledgements[0].failed_process_ids, []);
+    release();
+    await assert.rejects(pending, /NODE_REQUEST_FAILED/);
+    assert.equal(workCount, 1);
+  } finally {
+    release();
     await client.close();
     await server.close();
   }
@@ -198,6 +252,7 @@ test("a newly synchronized connection replaces the old active connection without
       path_base: "root",
     },
     onRequest: async () => null,
+    onCoordinatorEpoch: async () => undefined,
   });
 
   const first = makeClient(7);

@@ -18,6 +18,8 @@ export type NodeFrameType =
   | "response"
   | "heartbeat"
   | "heartbeat_ack"
+  | "coordinator_state"
+  | "coordinator_state_ack"
   | "capabilities"
   | "user_state"
   | "user_state_ack"
@@ -316,6 +318,8 @@ function assertFrameType(value: unknown): asserts value is NodeFrameType {
     "response",
     "heartbeat",
     "heartbeat_ack",
+    "coordinator_state",
+    "coordinator_state_ack",
     "capabilities",
     "user_state",
     "user_state_ack",

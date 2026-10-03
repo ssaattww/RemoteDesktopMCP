@@ -42,6 +42,7 @@ type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type DownloadChunkReplay = { offset: number; data: string; nextOffset: number; complete: boolean };
 type Transfer = { id: string; direction: "download" | "upload"; principalId: string; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; downloadReplay?: DownloadChunkReplay; committedPreview?: OperationDetailEntry };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
+type RemoteProcessMapping = { principalId: string; sessionId: string; nodeId: string; executorGeneration: string; connectionId: string; remoteProcessId: string };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
 type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; comment?: string; sessionAccessAt?: string };
 type OperationDetailEntry = { label: string; value: string; format: "text" | "diff"; truncated?: boolean };
@@ -59,11 +60,12 @@ const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_TRANSFERS = 20;
 const MAX_TERMINAL_TRANSFERS = 100;
 const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
+const MAX_REMOTE_PROCESS_MAPPINGS = 10_000;
 const MAX_AUDIT_EVENTS = 20_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: NodeOperationRequest) => Promise<unknown> };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: NodeOperationRequest) => Promise<unknown>; nodeStateSync?: (state: { principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null }) => Promise<Array<{ state_applied: true; failed_process_ids: string[] }>> };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -211,6 +213,7 @@ export class RemoteDesktopService {
   readonly transfers = new Map<string, Transfer>();
   readonly processes = new Map<string, Process>();
   private readonly currentProcessOwners = new Map<string, string>();
+  private readonly processAdapterGeneration = makeId();
   readonly clients = new Map<string, OAuthClient>();
   readonly authorizations = new Map<string, Authorization>();
   readonly codes = new Map<string, Authorization>();
@@ -222,9 +225,12 @@ export class RemoteDesktopService {
   private readonly terminalTransfers: string[] = [];
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
+  private readonly remoteProcessMappings = new Map<string, RemoteProcessMapping>();
   private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
   private readonly configIdentityLock = new Mutex();
   private readonly executionStates = new Map<string, UserExecutionState>();
+  private synchronizedNodeUsers = new Set<string>();
+  private coordinatorEpoch?: string;
   private readonly executionStateLock = new Mutex();
   private readonly executionResumes = new Set<string>();
   private readonly operationContext = new AsyncLocalStorage<ExecutionOperation>();
@@ -241,7 +247,7 @@ export class RemoteDesktopService {
   readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
-  async initialize(): Promise<void> {
+  async initialize(options: { startDesktopCommander?: boolean } = {}): Promise<void> {
     await ensureSafeDataDirectory(this.cfg.dataDir);
     await this.loadAuditIndex();
     await this.loadExecutionStates();
@@ -259,7 +265,7 @@ export class RemoteDesktopService {
     for (const entry of await readdir(transferDirectory, { withFileTypes: true })) if (entry.isFile() && entry.name.endsWith(".snapshot")) await rm(path.join(transferDirectory, entry.name), { force: true });
     await this.cleanupOwnedUploadArtifacts();
     if (this.publicAuth) { await this.publicAuth.initialize(); if (!this.publicAuth.hasAllowedSubject()) throw new Error("Google mode requires a locally approved Google subject. Run remote-auth authorize-google."); }
-    await this.dc.start();
+    if (options.startDesktopCommander !== false) await this.dc.start();
     await this.rememberProtectedConfigIdentity();
     await this.pruneProtectedConfigIdentities();
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
@@ -440,6 +446,93 @@ export class RemoteDesktopService {
     const state = this.executionStateFor(user);
     return { ...state, stopped: state.stopped || this.executionStateUnavailable || this.executionResumes.has(user) };
   }
+  activateNodeCoordinatorEpoch(epoch: string): void {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(epoch) || Buffer.from(epoch, "base64url").length !== 32) throw new Error("Coordinator epoch is invalid.");
+    if (this.coordinatorEpoch === epoch) return;
+    this.coordinatorEpoch = epoch;
+    this.synchronizedNodeUsers = new Set();
+  }
+  async applyNodeUserState(state: { principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null; coordinator_epoch: string }): Promise<{ requested_process_ids: string[]; failed_process_ids: string[] }> {
+    return this.executionStateLock.run(async () => {
+    const user = state.principal_id;
+    this.synchronizedNodeUsers.delete(user);
+    if (!this.coordinatorEpoch || state.coordinator_epoch !== this.coordinatorEpoch) throw new Error("User state coordinator epoch is not synchronized.");
+    if (!this.cfg.users.some((configured) => configured.email === user)) throw new Error("User state principal is unknown.");
+    if (!Number.isSafeInteger(state.stop_generation) || state.stop_generation < 0 || typeof state.stopped !== "boolean" || !(typeof state.stop_id === "string" || state.stop_id === null) || (state.stopped && !state.stop_id)) throw new Error("User state payload is invalid.");
+    if (this.executionStateUnavailable) throw new Error("User execution state is unavailable.");
+    const prior = this.executionStates.get(user);
+    if (prior && state.stop_generation < prior.stopGeneration) throw new Error("User state generation is stale.");
+    if (prior && state.stop_generation === prior.stopGeneration
+      && (state.stopped !== prior.stopped || (state.stop_id ?? undefined) !== prior.stopId)) {
+      throw new Error("User state changed without advancing its generation.");
+    }
+    const applied: UserExecutionState = {
+      principalId: user,
+      stopped: state.stopped,
+      stopGeneration: state.stop_generation,
+      ...(state.stopped ? { stoppedAt: prior?.stoppedAt ?? new Date().toISOString(), stopId: state.stop_id ?? undefined } : {}),
+    };
+    if (prior?.stopped && !applied.stopped && !this.cfg.processAdapter) {
+      await this.dc.call("_rdmcp_resume_owner", { owner: user }, 2_000, { skipRootPreflight: true, allowStoppedOperation: true });
+    }
+    this.executionStates.set(user, applied);
+    try {
+      await this.persistExecutionStates();
+    } catch (error) {
+      this.executionStates.set(user, prior ?? { principalId: user, stopped: true, stopGeneration: state.stop_generation });
+      throw error;
+    }
+    let result = { requested_process_ids: [] as string[], failed_process_ids: [] as string[] };
+    if (applied.stopped) result = await this.applySynchronizedStop(user, applied.stopId!);
+    this.synchronizedNodeUsers.add(user);
+    return result;
+    });
+  }
+  private async applySynchronizedStop(user: string, stopId: string): Promise<{ requested_process_ids: string[]; failed_process_ids: string[] }> {
+    for (const session of this.sessions.values()) if (session.user === user && session.state === "active") session.state = "closed";
+    let bridgeAvailable = false;
+    const bridgeTerminatedPids = new Set<number>();
+    if (!this.cfg.processAdapter) {
+      try {
+        const reply = await this.dc.call("_rdmcp_stop_owner", { owner: user }, 2_000, { skipRootPreflight: true, allowStoppedOperation: true });
+        const response = JSON.parse(reply) as { stopped?: unknown; terminated_pids?: unknown };
+        if (response.stopped !== true || !Array.isArray(response.terminated_pids) || !response.terminated_pids.every((pid) => Number.isInteger(pid) && pid > 0)) throw new Error("Owner stop result is invalid.");
+        bridgeAvailable = true;
+        for (const pid of response.terminated_pids) bridgeTerminatedPids.add(pid as number);
+      } catch { /* The persisted user stop latch remains authoritative. */ }
+    }
+    const requested: string[] = [];
+    const failed: string[] = [];
+    for (const item of this.processes.values()) if (item.user === user && (item.state === "running" || item.state === "terminating")) {
+      item.state = "terminating";
+      item.terminationRequested = true;
+      try {
+        if (this.cfg.processAdapter) await this.cfg.processAdapter.terminate(item.pid, 2_000);
+        else if (!bridgeAvailable || !bridgeTerminatedPids.has(item.pid)) throw new Error("Owner termination was not confirmed.");
+        item.terminationUnconfirmed = false;
+        requested.push(item.id);
+      } catch {
+        item.terminationUnconfirmed = true;
+        failed.push(item.id);
+      }
+    }
+    await this.transferLock.run(async () => {
+      for (const item of this.transfers.values()) if (item.sessionId && this.sessions.get(item.sessionId)?.user === user && item.state === "active") {
+        item.state = "cancelled";
+        await this.cleanup(item);
+        this.rememberTerminal(item);
+      }
+    });
+    await this.audit("user.stop_requested", { user, stopId, stopGeneration: this.executionStates.get(user)?.stopGeneration }).catch(() => undefined);
+    return { requested_process_ids: requested, failed_process_ids: failed };
+  }
+  isNodeOperationAuthorized(request: NodeOperationRequest, coordinatorEpoch: string): boolean {
+    if (this.executionStateUnavailable || !this.coordinatorEpoch || coordinatorEpoch !== this.coordinatorEpoch) return false;
+    if (!this.cfg.users.some((configured) => configured.email === request.principal_id)) return false;
+    if (!this.synchronizedNodeUsers.has(request.principal_id)) return false;
+    const state = this.userExecutionState(request.principal_id);
+    return !state.stopped && state.stopGeneration === request.stop_generation;
+  }
   private requireExecutionAllowed(user: string): void {
     const state = this.userExecutionState(user);
     if (state.stopped) throw new UserStopRequested(state);
@@ -500,6 +593,16 @@ export class RemoteDesktopService {
         await this.audit("transfer.cancelled_by_user_stop", { user, transferId: item.id, stopId: state.stopId }).catch(() => undefined);
       }
     });
+    if (this.cfg.nodeStateSync) {
+      try {
+        const acknowledgements = await this.cfg.nodeStateSync({ principal_id: user, stopped: true, stop_generation: state.stopGeneration, stop_id: state.stopId ?? null });
+        if (!acknowledgements.length || acknowledgements.some((ack) => ack.state_applied !== true || ack.failed_process_ids.length > 0)) {
+          await this.audit("user.stop_remote_sync_unconfirmed", { user, stopId: state.stopId, stopGeneration: state.stopGeneration, acknowledgedNodes: acknowledgements.length }).catch(() => undefined);
+        }
+      } catch {
+        await this.audit("user.stop_remote_sync_unconfirmed", { user, stopId: state.stopId, stopGeneration: state.stopGeneration }).catch(() => undefined);
+      }
+    }
     if (persistenceFailure) throw persistenceFailure;
     return { ...state };
   }); }
@@ -604,6 +707,28 @@ export class RemoteDesktopService {
     if (!target.connected) throw new Error("Selected node is disconnected.");
     return { session, target };
   }
+  private remoteProcessBinding(nodeId: string): { executorGeneration: string; connectionId: string } {
+    const active = this.cfg.nodeRegistry?.activeConnection(nodeId);
+    if (!active) throw new Error("Remote process node is disconnected.");
+    return { executorGeneration: active.executor_generation, connectionId: active.connection_id };
+  }
+  private remoteProcessForOperation(user: string, session: Session, nodeId: string, publicId: string): RemoteProcessMapping {
+    const mapping = this.remoteProcessMappings.get(publicId);
+    if (!mapping || mapping.principalId !== user || mapping.sessionId !== session.id || mapping.nodeId !== nodeId) {
+      throw new Error("Remote process mapping is unavailable.");
+    }
+    const active = this.remoteProcessBinding(nodeId);
+    if (active.executorGeneration !== mapping.executorGeneration || active.connectionId !== mapping.connectionId) {
+      throw new Error("Remote process mapping is stale after node reconnection.");
+    }
+    return mapping;
+  }
+  private assertRemoteProcessBinding(mapping: RemoteProcessMapping): void {
+    const active = this.remoteProcessBinding(mapping.nodeId);
+    if (active.executorGeneration !== mapping.executorGeneration || active.connectionId !== mapping.connectionId) {
+      throw new Error("Remote process mapping changed during the operation.");
+    }
+  }
   private async requestRemoteWithoutSession(
     user: string,
     target: NodeListEntry,
@@ -676,7 +801,7 @@ export class RemoteDesktopService {
   private requireCurrentProcess(item: Process): Process {
     let generation: string;
     try {
-      generation = this.dc.currentGeneration();
+      generation = this.cfg.processAdapter ? this.processAdapterGeneration : this.dc.currentGeneration();
     } catch {
       this.markProcessStale(item);
       throw new Error("Process id is stale or finished.");
@@ -1199,7 +1324,7 @@ export class RemoteDesktopService {
             id: makeId(),
             sessionId,
             user,
-            generation: this.dc.currentGeneration(),
+            generation: this.cfg.processAdapter ? this.processAdapterGeneration : this.dc.currentGeneration(),
             pid,
             state: initialCompletion ? "finished" : "running",
             output,
@@ -1969,27 +2094,48 @@ export class RemoteDesktopService {
     server.registerTool("process_start", { description: "Start a command for the current user-authorized task on the local node through Desktop Commander. Requires the caller's active session_id. The command starts in that session's working_directory. Prefer the dedicated root-scoped file tools for file operations. The command runs with the MCP server OS user's existing permissions. timeout_ms is 100–60000 (default 10000); returns a process_id and initial output. Use process_status, process_output, or process_kill with this same session_id.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => {
       await this.sweepExpired();
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
-      return this.dispatchNodeOperation(user, session, target, "process_start", {
+      if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "process_start", {
         command,
         timeout_ms,
         working_directory: session.workingDirectory,
       });
+      if (this.remoteProcessMappings.size >= MAX_REMOTE_PROCESS_MAPPINGS) throw new Error("Remote process mapping limit reached.");
+      const binding = this.remoteProcessBinding(target.node_id);
+      const started = await this.dispatchNodeOperation(user, session, target, "process_start", {
+        command,
+        timeout_ms,
+        working_directory: session.workingDirectory,
+      }) as { process_id: string; output: string };
+      if (!started || typeof started.process_id !== "string" || started.process_id.length < 16 || typeof started.output !== "string") throw new Error("Remote process start response is invalid.");
+      const mapping = { principalId: user, sessionId: session.id, nodeId: target.node_id, ...binding, remoteProcessId: started.process_id };
+      this.assertRemoteProcessBinding(mapping);
+      const publicId = makeId();
+      this.remoteProcessMappings.set(publicId, mapping);
+      return { process_id: publicId, output: started.output };
     }));
     server.registerTool("process_output", { description: "Read the combined output for process_id started in the supplied active session_id. Requires the same session_id used for process_start; returns current state, available exit code, and combined output (stdout and stderr are not separated). Output for finished processes is returned from saved state.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
-      return this.dispatchNodeOperation(user, session, target, "process_output", { process_id });
+      if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "process_output", { process_id });
+      const mapping = this.remoteProcessForOperation(user, session, target.node_id, process_id);
+      const response = await this.dispatchNodeOperation(user, session, target, "process_output", { process_id: mapping.remoteProcessId });
+      this.assertRemoteProcessBinding(mapping);
+      return response;
     }));
     server.registerTool("process_status", { description: "Refresh and return the state for process_id started in the supplied active session_id, including an available exit code and output. Requires the same session_id used for process_start; process IDs are scoped to their owner and session.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
-      return this.dispatchNodeOperation(user, session, target, "process_status", { process_id });
+      if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "process_status", { process_id });
+      const mapping = this.remoteProcessForOperation(user, session, target.node_id, process_id);
+      const response = await this.dispatchNodeOperation(user, session, target, "process_status", { process_id: mapping.remoteProcessId });
+      this.assertRemoteProcessBinding(mapping);
+      return response;
     }));
     server.registerTool("process_kill", { description: "Request termination of a running process_id started in the supplied active session_id. Requires the same session_id used for process_start. This targets the tracked process; Windows managed descendants may also be stopped. If rejected=true, the termination request was not accepted. Otherwise state=terminating records a request, not a confirmed exit. Check process_status for the resulting state and termination_unconfirmed flag.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote process public mapping is not implemented yet.");
-      return this.dispatchNodeOperation(user, session, target, "process_kill", { process_id });
+      if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "process_kill", { process_id });
+      const mapping = this.remoteProcessForOperation(user, session, target.node_id, process_id);
+      const response = await this.dispatchNodeOperation(user, session, target, "process_kill", { process_id: mapping.remoteProcessId });
+      this.assertRemoteProcessBinding(mapping);
+      return response;
     }));
     return server;
   }

@@ -13,7 +13,16 @@ import {
   type NodeFrameDirection,
   type NodeFrameType,
 } from "./node-cluster.js";
-import { parseNodeOperationRequest, type NodeOperationRequest } from "./node-operation.js";
+import {
+  createNodeOperationResponseEnvelope,
+  NodeOperationSequenceIssuer,
+  parseNodeOperationEnvelope,
+  parseNodeOperationResponseEnvelope,
+  type NodeOperationEnvelope,
+  type NodeOperationIdentity,
+  type NodeOperationRequest,
+} from "./node-operation.js";
+import { NodeOperationReplayGuard } from "./node-operation-replay.js";
 import {
   NodeRegistry,
   type NodeCapabilities,
@@ -34,7 +43,11 @@ type UserState = {
   stopped: boolean;
   stop_generation: number;
   stop_id: string | null;
+  coordinator_epoch?: string;
 };
+type SynchronizedUserState = UserState & { coordinator_epoch: string };
+type UserStateAck = { principal_id: string; stop_generation: number; coordinator_epoch: string; state_applied: true; requested_process_ids: string[]; failed_process_ids: string[] };
+type UserStateResult = { requested_process_ids: string[]; failed_process_ids: string[] };
 
 type ExecutorCapabilities = NodeCapabilities & {
   executor_generation: string;
@@ -45,7 +58,15 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  operationId: NodeOperationIdentity;
 };
+type PendingStateSync = {
+  expected: SynchronizedUserState;
+  resolve: (value: UserStateAck) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+};
+const PROCESS_OPERATION_ISSUER = new NodeOperationSequenceIssuer();
 
 type CoordinatorConnection = {
   nodeId: string;
@@ -55,6 +76,8 @@ type CoordinatorConnection = {
   connectionId: string;
   lastReceivedAt: number;
   pending: Map<string, PendingRequest>;
+  stateSyncs: Map<string, PendingStateSync>;
+  stateSyncTail?: Promise<void>;
   heartbeatTimer?: NodeJS.Timeout;
   closed: boolean;
 };
@@ -77,7 +100,9 @@ type ExecutorNodeClientOptions = {
   config: ClusterConfig;
   capabilities: ExecutorCapabilities;
   onRequest: (payload: NodeOperationRequest) => Promise<unknown>;
-  onUserState?: (state: UserState) => Promise<void>;
+  isOperationAuthorized?: (payload: NodeOperationEnvelope) => boolean;
+  onCoordinatorEpoch?: (epoch: string) => Promise<void>;
+  onUserState?: (state: SynchronizedUserState) => Promise<UserStateResult | void>;
   authenticationTimeoutMs?: number;
 };
 
@@ -145,7 +170,7 @@ function readyState(payload: unknown, connectionId: string): NodeReadyState {
   };
 }
 
-function parseUserState(value: unknown): UserState {
+function parseUserState(value: unknown): SynchronizedUserState {
   if (
     !isRecord(value)
     || typeof value.principal_id !== "string"
@@ -162,6 +187,7 @@ function parseUserState(value: unknown): UserState {
     stopped: value.stopped,
     stop_generation: value.stop_generation as number,
     stop_id: value.stop_id as string | null,
+    coordinator_epoch: fixedBase64Url(value.coordinator_epoch, 32, "coordinator_epoch"),
   };
 }
 
@@ -170,6 +196,12 @@ function assertUserStateAck(value: unknown, expected: UserState): void {
     !isRecord(value)
     || value.principal_id !== expected.principal_id
     || value.stop_generation !== expected.stop_generation
+    || value.coordinator_epoch !== expected.coordinator_epoch
+    || value.state_applied !== true
+    || !Array.isArray(value.requested_process_ids)
+    || value.requested_process_ids.some((entry) => typeof entry !== "string")
+    || !Array.isArray(value.failed_process_ids)
+    || value.failed_process_ids.some((entry) => typeof entry !== "string")
   ) {
     throw new Error("user_state_ack does not match the synchronized state.");
   }
@@ -500,6 +532,7 @@ export class CoordinatorNodeServer {
         connectionId,
         lastReceivedAt: Date.now(),
         pending: new Map(),
+        stateSyncs: new Map(),
         closed: false,
       };
       this.connections.set(connectionId, connection);
@@ -514,8 +547,14 @@ export class CoordinatorNodeServer {
 
       this.unauthenticated.delete(socket);
       const userSyncDeadline = Date.now() + (this.options.userSyncTimeoutMs ?? USER_SYNC_TIMEOUT_MS);
+      await channel.send("coordinator_state", "", { coordinator_epoch: PROCESS_OPERATION_ISSUER.coordinatorEpoch });
+      const epochAck = await withDeadline(channel.receive(), userSyncDeadline, "Coordinator epoch synchronization timed out.");
+      if (epochAck.type !== "coordinator_state_ack" || epochAck.request_id !== "" || !isRecord(epochAck.payload) || epochAck.payload.coordinator_epoch !== PROCESS_OPERATION_ISSUER.coordinatorEpoch) {
+        throw new Error("Executor did not acknowledge coordinator epoch.");
+      }
       for (const state of this.options.userStates()) {
-        await channel.send("user_state", "", state);
+        const synchronizedState = { ...state, coordinator_epoch: PROCESS_OPERATION_ISSUER.coordinatorEpoch };
+        await channel.send("user_state", "", synchronizedState);
         const ack = await withDeadline(
           channel.receive(),
           userSyncDeadline,
@@ -524,7 +563,7 @@ export class CoordinatorNodeServer {
         if (ack.type !== "user_state_ack" || ack.request_id !== "") {
           throw new Error("Executor did not acknowledge initial user state.");
         }
-        assertUserStateAck(ack.payload, state);
+        assertUserStateAck(ack.payload, synchronizedState);
         connection.lastReceivedAt = Date.now();
       }
 
@@ -576,12 +615,28 @@ export class CoordinatorNodeServer {
           if (!pending) continue;
           connection.pending.delete(frame.request_id);
           clearTimeout(pending.timer);
-          if (frame.type === "response") pending.resolve(frame.payload);
+          if (frame.type === "response") {
+            try { pending.resolve(parseNodeOperationResponseEnvelope(frame.payload, pending.operationId).response); }
+            catch (error) { pending.reject(error instanceof Error ? error : new Error("Node response identity mismatch.")); }
+          }
           else pending.reject(new Error(
             isRecord(frame.payload) && typeof frame.payload.code === "string"
               ? frame.payload.code
               : "NODE_REQUEST_FAILED",
           ));
+          continue;
+        }
+        if (frame.type === "user_state_ack") {
+          const [key, pending] = connection.stateSyncs.entries().next().value ?? [];
+          if (!key || !pending) continue;
+          connection.stateSyncs.delete(key);
+          clearTimeout(pending.timer);
+          try {
+            assertUserStateAck(frame.payload, pending.expected);
+            pending.resolve(frame.payload as UserStateAck);
+          } catch (error) {
+            pending.reject(error instanceof Error ? error : new Error("User state acknowledgement is invalid."));
+          }
           continue;
         }
         if (frame.type === "capabilities") continue;
@@ -608,6 +663,11 @@ export class CoordinatorNodeServer {
       pending.reject(new Error("NODE_OUTCOME_UNKNOWN"));
     }
     connection.pending.clear();
+    for (const pending of connection.stateSyncs.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("NODE_STATE_SYNC_UNAVAILABLE"));
+    }
+    connection.stateSyncs.clear();
     if (!connection.socket.destroyed) connection.socket.destroy();
   }
 
@@ -627,8 +687,9 @@ export class CoordinatorNodeServer {
         reject(new Error("NODE_OUTCOME_UNKNOWN"));
       }, timeoutMs);
       timer.unref();
-      connection.pending.set(requestId, { resolve, reject, timer });
-      void connection.channel.send("request", requestId, payload).catch((error: unknown) => {
+      const operation = PROCESS_OPERATION_ISSUER.issue(nodeId, active.executor_generation, payload);
+      connection.pending.set(requestId, { resolve, reject, timer, operationId: operation.operation_id });
+      void connection.channel.send("request", requestId, operation).catch((error: unknown) => {
         const pending = connection.pending.get(requestId);
         if (!pending) return;
         connection.pending.delete(requestId);
@@ -636,6 +697,41 @@ export class CoordinatorNodeServer {
         pending.reject(error instanceof Error ? error : new Error("Node request failed."));
       });
     });
+  }
+
+  async syncUserState(state: UserState): Promise<UserStateAck[]> {
+    const synchronizedState = { ...state, coordinator_epoch: PROCESS_OPERATION_ISSUER.coordinatorEpoch };
+    const active = [...this.connections.values()].filter((connection) => {
+      const current = this.options.registry.activeConnection(connection.nodeId);
+      return current?.connection_id === connection.connectionId && !connection.closed && !connection.socket.destroyed;
+    });
+    if (!active.length) throw new Error("NODE_STATE_SYNC_UNAVAILABLE");
+    return Promise.all(active.map((connection) => {
+      const previous = connection.stateSyncTail ?? Promise.resolve();
+      const current = previous.then(() => new Promise<UserStateAck>((resolve, reject) => {
+        if (connection.closed || connection.socket.destroyed) {
+          reject(new Error("NODE_STATE_SYNC_UNAVAILABLE"));
+          return;
+        }
+        const key = randomBytes(16).toString("base64url");
+        const timeoutMs = this.options.userSyncTimeoutMs ?? USER_SYNC_TIMEOUT_MS;
+        const timer = setTimeout(() => {
+          connection.stateSyncs.delete(key);
+          reject(new Error("NODE_STATE_SYNC_TIMEOUT"));
+        }, timeoutMs);
+        timer.unref();
+        connection.stateSyncs.set(key, { expected: synchronizedState, resolve, reject, timer });
+        void connection.channel.send("user_state", "", synchronizedState).catch((error: unknown) => {
+          const pending = connection.stateSyncs.get(key);
+          if (!pending) return;
+          connection.stateSyncs.delete(key);
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error("NODE_STATE_SYNC_FAILED"));
+        });
+      }));
+      connection.stateSyncTail = current.then(() => undefined, () => undefined);
+      return current;
+    }));
   }
 
   async close(): Promise<void> {
@@ -658,6 +754,8 @@ export class ExecutorNodeClient {
   private readonly config: ClusterConfig;
   private socket?: Socket;
   private channel?: AuthenticatedChannel;
+  private coordinatorEpoch?: string;
+  private readonly replayGuard = new NodeOperationReplayGuard();
   private closedPromise: Promise<void> = Promise.resolve();
   private resolveClosed?: () => void;
 
@@ -779,25 +877,34 @@ export class ExecutorNodeClient {
           await channel.send("heartbeat_ack", "", { at: new Date().toISOString() });
           continue;
         }
+        if (frame.type === "coordinator_state") {
+          if (!isRecord(frame.payload)) throw new Error("Coordinator state is invalid.");
+          const epoch = fixedBase64Url(frame.payload.coordinator_epoch, 32, "coordinator_epoch");
+          if (!this.options.onCoordinatorEpoch) throw new Error("Executor coordinator epoch state handler is unavailable.");
+          this.replayGuard.activateCoordinatorEpoch(epoch);
+          await this.options.onCoordinatorEpoch(epoch);
+          this.coordinatorEpoch = epoch;
+          await channel.send("coordinator_state_ack", "", { coordinator_epoch: epoch });
+          continue;
+        }
         if (frame.type === "request") {
-          try {
-            const request = parseNodeOperationRequest(frame.payload);
-            const response = await this.options.onRequest(request);
-            await channel.send("response", frame.request_id, response);
-          } catch (error) {
-            await channel.send("error", frame.request_id, {
-              code: "NODE_REQUEST_FAILED",
-              message: error instanceof Error ? error.message : "Executor request failed.",
-            });
-          }
+          void this.handleRequest(channel, frame).catch(() => {
+            if (!socket.destroyed) socket.destroy();
+          });
           continue;
         }
         if (frame.type === "user_state") {
           const state = parseUserState(frame.payload);
-          await this.options.onUserState?.(state);
+          if (state.coordinator_epoch !== this.coordinatorEpoch) throw new Error("User state coordinator epoch mismatch.");
+          if (!this.options.onUserState) throw new Error("Executor user state handler is unavailable.");
+          const result = await this.options.onUserState(state);
           await channel.send("user_state_ack", "", {
             principal_id: state.principal_id,
             stop_generation: state.stop_generation,
+            coordinator_epoch: state.coordinator_epoch,
+            state_applied: true,
+            requested_process_ids: result ? result.requested_process_ids : [],
+            failed_process_ids: result ? result.failed_process_ids : [],
           });
           continue;
         }
@@ -806,6 +913,28 @@ export class ExecutorNodeClient {
       }
     } catch {
       if (!socket.destroyed) socket.destroy();
+    }
+  }
+
+  private async handleRequest(channel: AuthenticatedChannel, frame: ReturnType<typeof verifyAuthenticatedFrame>): Promise<void> {
+    try {
+      if (!this.coordinatorEpoch) throw new Error("Coordinator epoch has not been synchronized.");
+      const operation = parseNodeOperationEnvelope(frame.payload, {
+        coordinatorEpoch: this.coordinatorEpoch,
+        targetNodeId: this.config.local.node_id,
+        executorGeneration: this.options.capabilities.executor_generation,
+      });
+      const response = await this.replayGuard.execute(
+        operation,
+        () => this.options.isOperationAuthorized?.(operation) === true,
+        () => this.options.onRequest(operation.request),
+      );
+      await channel.send("response", frame.request_id, createNodeOperationResponseEnvelope(operation, response));
+    } catch (error) {
+      await channel.send("error", frame.request_id, {
+        code: "NODE_REQUEST_FAILED",
+        message: error instanceof Error ? error.message : "Executor request failed.",
+      });
     }
   }
 

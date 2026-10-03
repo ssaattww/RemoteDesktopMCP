@@ -17,6 +17,7 @@ const remoteId = "node_AAAAAAAAAAAAAAAAAAAAAA";
 const connectionId = Buffer.alloc(32, 1).toString("base64url");
 const executorGeneration = Buffer.alloc(16, 2).toString("base64url");
 const commanderGeneration = Buffer.alloc(16, 3).toString("base64url");
+const initialRemoteUserState = [{ principal_id: "owner@example.test", stopped: false, stop_generation: 0, stop_id: null }];
 
 function clusterRegistry() {
   const local = createInitialClusterConfig("both", "Coordinator", 41000);
@@ -67,7 +68,6 @@ test("node_list is available before session_open and keeps registered disconnect
     await f.cleanup();
   }
 });
-
 test("session_open requires node_id with multiple targets and binds a remote session after remote path validation", async () => {
   const { configured, registry } = clusterRegistry();
   activateRemote(registry);
@@ -356,7 +356,7 @@ test("RDMCP-25-DR-003: public MCP reaches the executor common handler through au
     port: 0,
     config: added.config,
     registry,
-    userStates: () => [],
+    userStates: () => initialRemoteUserState,
   });
   const address = await server.start();
   const executorBase = createInitialClusterConfig("executor", "Remote A");
@@ -376,6 +376,9 @@ test("RDMCP-25-DR-003: public MCP reaches the executor common handler through au
       path_base: "root",
     },
     onRequest: (payload) => executorFixture.service.executeNodeRequest(payload),
+    onCoordinatorEpoch: async (epoch) => executorFixture.service.activateNodeCoordinatorEpoch(epoch),
+    onUserState: (state) => executorFixture.service.applyNodeUserState(state),
+    isOperationAuthorized: (operation) => executorFixture.service.isNodeOperationAuthorized(operation.request, operation.operation_id.coordinator_epoch),
   });
 
   let coordinatorFixture: Awaited<ReturnType<typeof fixture>> | undefined;
@@ -428,7 +431,7 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
     port: 0,
     config: added.config,
     registry,
-    userStates: () => [],
+    userStates: () => initialRemoteUserState,
     requestTimeoutMs: 10_000,
   });
   const address = await server.start();
@@ -463,6 +466,9 @@ test("RDMCP-25-DR-001: download replay survives lost node responses and same-gen
         }
         return response;
       },
+      onCoordinatorEpoch: async (epoch) => executorFixture.service.activateNodeCoordinatorEpoch(epoch),
+      onUserState: (state) => executorFixture.service.applyNodeUserState(state),
+      isOperationAuthorized: (operation) => executorFixture.service.isNodeOperationAuthorized(operation.request, operation.operation_id.coordinator_epoch),
     });
     return { client, handledPromise, release };
   };
@@ -618,7 +624,7 @@ test("RDMCP-25-DR-003: executor common handler owns the process state machine", 
       },
       sessions: async () => "PID: 812",
     },
-  });
+  }, undefined, { startDesktopCommander: false });
   const sessionId = "remote-process-session";
   const envelope = (operation: NodeOperationName, args: Record<string, unknown>) => ({
     principal_id: "owner@example.test",
