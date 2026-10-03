@@ -1,0 +1,86 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: review
+  generated_at: 2026-10-03T09:48:18+09:00
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #46 / PR #51"
+task_id: user-console-auto-refresh-review
+branch: issue46-user-console-auto-refresh-design
+base_ref: main
+
+target:
+  reviewed_head: 11367c321838d8900c0068d441a05b2dea569e64
+  base_head: ed698f1031e9aafb88d4aa0fa6252636ea2df742
+  worktree_clean_before_report: true
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  os: Windows
+  working_directory: C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP-pr51-review
+  session_id: Vfz-nKpKFEJxGxL68TKVOvlNS65_Wnqs-MJjz0PT56Q
+
+verdict: fail
+
+findings:
+  - id: RDMCP-PR51-REV-001
+    severity: Medium
+    origin: review
+    status: open
+    summary: Session-row redraw replaces all rows but restores only focus, not text selection or the visible-row/scroll anchor required by Issue #46 and the design.
+  - id: RDMCP-PR51-REV-002
+    severity: Low
+    origin: review
+    status: open
+    summary: The UI has the auto-refresh checkbox but omits the design-required explanation that OFF mode uses manual refresh.
+
+held_conditions:
+  - id: RDMCP-PR51-HOLD-001
+    status: held
+    summary: PR #50 is still open/draft and a three-way merge with PR #51 conflicts at session timestamp focus restoration; if PR #50 lands first, rebase and combined regression verification are required.
+    related_pr: 50
+    related_head: 4102253628d4d638c26fa5c3a986082a53fe9e59
+
+validation:
+  local:
+    diff_check: pass
+    focused_user_console_client_tests: "25 pass / 0 fail"
+    initial_test_attempt: "environment failure: tsx not installed in detached review worktree"
+    design_terms_direct_run: "not run: yaml package absent in detached review worktree"
+    inline_code_review: pass
+  ci:
+    policy: exact_head_only
+    run_id: 37076454672
+    head_sha: 11367c321838d8900c0068d441a05b2dea569e64
+    event: pull_request
+    conclusion: success
+    jobs:
+      ubuntu: success
+      windows_1_of_3: success
+      windows_2_of_3: success
+      windows_3_of_3: success
+    diagnostics_steps_succeeded: true
+
+diagnostic_workflow:
+  path: .github/workflows/lint.yml
+  change_required: false
+  captures:
+    - test results
+    - stdout
+    - stderr
+    - environment information
+  upload_policy: always
+
+scope_notes:
+  - No product implementation, design, test, or workflow code was changed by the reviewer.
+  - No merge was performed.
+  - PR #50 compatibility is a held integration condition because that sibling feature is not present in the current PR #51 base.
+
+next_steps:
+  - Fix RDMCP-PR51-REV-001 and add regression coverage for text selection and visible-row/scroll preservation.
+  - Fix RDMCP-PR51-REV-002 and add UI rendering coverage.
+  - If PR #50 lands first, rebase PR #51 and resolve RDMCP-PR51-HOLD-001 while preserving timestamp details open/focus behavior.
+  - Validate only CI runs whose headSha exactly matches the new PR current HEAD.
+  - Re-review the same finding IDs without changing their severities.
