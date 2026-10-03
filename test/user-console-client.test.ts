@@ -334,6 +334,23 @@ test("session-link-updated refreshes owner state without fetching log pages and 
   assert.equal(anchor.referrerPolicy, "no-referrer");
 });
 
+test("state refresh renders a title without a URL as inert text", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+    ? response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z",
+      sessions: [{ session_id: "title-only-session", created_at: "2026-10-03T00:00:00Z", state: "active", active: true, external_title: "<Manual title>" }],
+      running: [],
+    })
+    : response(404, {}), [], { "session-rows": sessionRows });
+  await settle();
+  const title = sessionRows.children[0]?.children[7]?.children[0];
+  assert.equal(title?.tagName, "span");
+  assert.equal(title?.textContent, "<Manual title>");
+  assert.equal(title?.href, "");
+  assert.equal(ui.sources.length, 1);
+});
+
 test("pull-down refresh only starts on the visible newest log block and ignores horizontal or canceled gestures", async () => {
   const processDetails = new FakeElement();
   const newestBlock = new FakeElement(); newestBlock.rect = { top: 10, bottom: 150, left: 0, right: 100 };

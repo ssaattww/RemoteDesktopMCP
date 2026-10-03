@@ -9,9 +9,11 @@ import { userConsoleClientScript } from "./user-console-client.js";
 const id = () => randomBytes(32).toString("base64url");
 const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 const externalLinkMarkup = (session?: { externalUrl?: string; externalTitle?: string }) => {
-  if (!session?.externalUrl) return "";
-  const label = session.externalTitle ?? session.externalUrl;
-  return `<a class="session-external-link" href="${escape(session.externalUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escape(label)}</a>`;
+  if (session?.externalUrl) {
+    const label = session.externalTitle ?? session.externalUrl;
+    return `<a class="session-external-link" href="${escape(session.externalUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escape(label)}</a>`;
+  }
+  return session?.externalTitle ? `<span class="session-external-title">${escape(session.externalTitle)}</span>` : "";
 };
 const operationDetailHtml = (value: unknown) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "—";
@@ -149,9 +151,9 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       last_used_at: session.lastAccessAt ?? session.at,
       state: activeIds.has(session.id) ? "active" : session.state,
       active: activeIds.has(session.id),
-      ...(activeById.get(session.id)?.externalUrl ? {
-        external_url: activeById.get(session.id)!.externalUrl,
-        external_title: activeById.get(session.id)!.externalTitle,
+      ...(activeById.get(session.id)?.externalUrl || activeById.get(session.id)?.externalTitle ? {
+        ...(activeById.get(session.id)?.externalUrl ? { external_url: activeById.get(session.id)!.externalUrl } : {}),
+        ...(activeById.get(session.id)?.externalTitle ? { external_title: activeById.get(session.id)!.externalTitle } : {}),
         external_title_source: activeById.get(session.id)!.externalTitleSource,
         external_title_status: activeById.get(session.id)!.externalTitleStatus,
         link_revision: activeById.get(session.id)!.linkRevision,

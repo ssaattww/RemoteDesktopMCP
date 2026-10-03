@@ -40,6 +40,10 @@ test("session_open stores owner-only link metadata, skips manual-title retrieval
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const base = `http://127.0.0.1:${address.port}`;
   try {
+    const sessionOpenDescription = (await api.listTools()).tools.find((tool) => tool.name === "session_open")?.description ?? "";
+    assert.match(sessionOpenDescription, /unauthenticated public request/u);
+    assert.match(sessionOpenDescription, /no cookies or local credentials/u);
+    assert.match(sessionOpenDescription, /enter a title for those links/u);
     const manualUrl = "https://example.com/manual?api_key=private-test-secret#task";
     const manual = await api.call("session_open", { url: manualUrl, title: "<Manual & title>" });
     assert.equal(manual.external_url, manualUrl);
@@ -49,6 +53,13 @@ test("session_open stores owner-only link metadata, skips manual-title retrieval
     await sleep(10);
     assert.equal(requestCount, 0);
     assert.doesNotMatch(JSON.stringify(f.service.auditEntriesForConsole()), /private-test-secret|Manual & title/u);
+
+    const titleOnly = await api.call("session_open", { title: "<Title without URL>" });
+    assert.equal(titleOnly.external_url, undefined);
+    assert.equal(titleOnly.external_title, "<Title without URL>");
+    const invalidUrlWithTitle = await api.call("session_open", { url: "http://127.0.0.1/private", title: "<Local page>" });
+    assert.equal(invalidUrlWithTitle.external_url, undefined);
+    assert.equal(invalidUrlWithTitle.external_title, "<Local page>");
 
     const automatic = await api.call("session_open", { url: "https://example.com/work" });
     assert.equal(automatic.external_title_status, "pending");
@@ -77,6 +88,12 @@ test("session_open stores owner-only link metadata, skips manual-title retrieval
     const listed = json.sessions.find((session) => session.session_id === automatic.session_id); assert.ok(listed);
     assert.equal(listed.external_title, "Fetched & safe");
     assert.equal(listed.external_title_source, "fetched");
+    const titleOnlyListed = json.sessions.find((session) => session.session_id === titleOnly.session_id); assert.ok(titleOnlyListed);
+    assert.equal(titleOnlyListed.external_title, "<Title without URL>");
+    assert.equal(titleOnlyListed.external_url, undefined);
+    const invalidUrlListed = json.sessions.find((session) => session.session_id === invalidUrlWithTitle.session_id); assert.ok(invalidUrlListed);
+    assert.equal(invalidUrlListed.external_title, "<Local page>");
+    assert.equal(invalidUrlListed.external_url, undefined);
     const eventStream = await fetch(`${base}/api/events`, { headers: { cookie } }); assert.equal(eventStream.status, 200);
     const reader = eventStream.body!.getReader();
     try {
@@ -97,6 +114,8 @@ test("session_open stores owner-only link metadata, skips manual-title retrieval
 
     const page = await fetch(`${base}/user`, { headers: { cookie } }); assert.equal(page.status, 200);
     const html = await page.text();
+    assert.match(html, /<span class="session-external-title">&lt;Title without URL&gt;<\/span>/u);
+    assert.match(html, /<span class="session-external-title">&lt;Local page&gt;<\/span>/u);
     const anchor = [...html.matchAll(/<a class="session-external-link"([^>]*)>(.*?)<\/a>/gu)].find((match) => match[2] === "Fetched &amp; safe"); assert.ok(anchor);
     assert.match(anchor[1]!, /target="_blank"/u);
     assert.match(anchor[1]!, /rel="noopener noreferrer"/u);
@@ -133,6 +152,27 @@ test("session close suppresses an in-flight external title result", async () => 
     assert.equal(session.state, "closed");
     assert.equal(session.externalTitle, undefined);
     assert.equal(session.externalUrl, undefined);
+    assert.equal(session.externalTitleStatus, "not_requested");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("session expiry clears external link data even when expiry auditing fails", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  try {
+    const opened = await api.call("session_open", { url: "https://example.com/private?token=secret", title: "Private title" });
+    const session = f.service.sessions.get(String(opened.session_id)); assert.ok(session);
+    session.expires = Date.now() - 1;
+    const originalAudit = f.service.audit.bind(f.service);
+    f.service.audit = async (event, fields) => {
+      if (event === "session.expired") throw new Error("synthetic audit write failure");
+      return originalAudit(event, fields);
+    };
+    await assert.rejects(f.service.sweepExpired(), /synthetic audit write failure/u);
+    assert.equal(session.state, "expired");
+    assert.equal(session.externalUrl, undefined);
+    assert.equal(session.externalTitle, undefined);
+    assert.equal(session.externalTitleSource, undefined);
     assert.equal(session.externalTitleStatus, "not_requested");
   } finally { await api.close(); await f.cleanup(); }
 });

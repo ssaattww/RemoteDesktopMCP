@@ -26,6 +26,9 @@ test("normalizes only safe HTTP(S) links and preserves optional title source con
   assert.equal(link.externalTitleStatus, "not_requested");
   assert.equal(link.linkRevision, 0);
   assert.equal(createSessionLink({ url: "http://127.0.0.1/" }).externalUrl, undefined);
+  assert.equal(createSessionLink({ url: "http://home.arpa/" }).externalUrl, undefined);
+  assert.equal(createSessionLink({ url: "http://router.home.arpa/" }).externalUrl, undefined);
+  assert.equal(createSessionLink({ url: "http://child.router.home.arpa/" }).externalUrl, undefined);
   assert.equal(createSessionLink({ url: "https://user:secret@example.com/" }).externalUrl, undefined);
   assert.throws(() => createSessionLink({ url: `https://example.com/${"x".repeat(2048)}` }), /URL/i);
   assert.throws(() => createSessionLink({ title: "x".repeat(201) }), /title/i);
@@ -61,6 +64,7 @@ test("fetches a bounded UTF-8 HTML title through a pinned public address without
   assert.equal(fake.requests.length, 1);
   assert.equal(fake.requests[0]?.url, "https://example.com/x");
   assert.equal(fake.requests[0]?.address, publicIpv4);
+  assert.equal(fake.requests[0]?.headers.Connection, "close");
   assert.equal(Object.keys(fake.requests[0]!.headers).some((key) => /cookie|authorization|referer/i.test(key)), false);
 });
 
@@ -68,6 +72,12 @@ test("validates every redirect and does not contact private destinations", async
   const redirect = transport([{ status: 302, location: "https://privately-resolved.com/" }], { "example.com": [publicIpv4], "privately-resolved.com": ["10.0.0.4"] });
   await assert.rejects(fetchSessionLinkTitle("https://example.com/", { transport: redirect }), /address|destination|network/i);
   assert.equal(redirect.requests.length, 1);
+  const mixed = transport([{ status: 200, contentType: "text/html", body: "<title>must not connect</title>" }], { "example.com": [publicIpv4, "10.0.0.4"] });
+  await assert.rejects(fetchSessionLinkTitle("https://example.com/", { transport: mixed }), /address|destination|network/i);
+  assert.equal(mixed.requests.length, 0, "one prohibited DNS answer rejects the whole name");
+  const downgrade = transport([{ status: 302, location: "http://example.com/plain" }]);
+  await assert.rejects(fetchSessionLinkTitle("https://example.com/", { transport: downgrade }), /downgrade/i);
+  assert.equal(downgrade.requests.length, 1, "the HTTP downgrade target is never contacted");
   const tooMany = transport(Array.from({ length: 4 }, (_, i) => ({ status: 302, location: `/next${i}` })));
   await assert.rejects(fetchSessionLinkTitle("https://example.com/", { transport: tooMany }), /redirect/i);
   assert.equal(tooMany.requests.length, 4);
@@ -76,7 +86,7 @@ test("validates every redirect and does not contact private destinations", async
 test("rejects special-use IPv4 and IPv6 DNS answers while pinning a public answer", async () => {
   const prohibited = [
     "0.1.2.3", "10.1.2.3", "100.64.0.1", "127.0.0.1", "169.254.1.1", "172.16.0.1", "192.0.0.1", "192.0.2.1", "192.31.196.1", "192.52.193.1", "192.88.99.1", "192.168.1.1", "192.175.48.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1", "255.255.255.255",
-    "::", "::1", "::ffff:192.0.2.1", "64:ff9b::1", "64:ff9b:1::1", "100::1", "2001::1", "2001:db8::1", "2002::1", "3fff::1", "5f00::1", "fc00::1", "fe80::1", "ff02::1",
+    "::", "::1", "::ffff:192.0.2.1", "64:ff9b::1", "64:ff9b:1::1", "100::1", "2001::1", "2001:db8::1", "2002::1", "3fff::1", "5f00::1", "2620:4f:8000::1", "fc00::1", "fe80::1", "ff02::1",
   ];
   for (const address of prohibited) {
     const fake = transport([{ status: 200, contentType: "text/html", body: "<title>must not connect</title>" }], { "example.com": [address] });

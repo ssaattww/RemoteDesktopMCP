@@ -59,7 +59,7 @@ function inCidr(address: string, cidr: string): boolean {
 }
 
 const IPV4_DENY = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.31.196.0/24", "192.52.193.0/24", "192.88.99.0/24", "192.168.0.0/16", "192.175.48.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32"];
-const IPV6_DENY = ["2001::/23", "2001:db8::/32", "2002::/16", "3fff::/20", "5f00::/16"];
+const IPV6_DENY = ["2001::/23", "2001:db8::/32", "2002::/16", "2620:4f:8000::/48", "3fff::/20", "5f00::/16"];
 
 function isPublicAddress(address: string): boolean {
   const family = isIP(address);
@@ -82,7 +82,7 @@ function normalizedUrl(input: string | undefined): string | undefined {
     const host = parsed.hostname.startsWith("[") ? parsed.hostname.slice(1, -1) : parsed.hostname;
     if (isIP(host)) {
       if (!isPublicAddress(host)) return undefined;
-    } else if (!host.includes(".") || /\.(?:localhost|local|internal|home|lan|test|invalid|example)$/iu.test(host) || host.endsWith(".")) return undefined;
+    } else if (!host.includes(".") || /\.(?:localhost|local|internal|lan|test|invalid|example)$/iu.test(host) || host === "home.arpa" || host.endsWith(".home.arpa") || host.endsWith(".")) return undefined;
     if (codePoints(parsed.href) > MAX_URL_CODE_POINTS) throw new Error("URL exceeds the supported length.");
     return parsed.href;
   } catch { return undefined; }
@@ -216,6 +216,7 @@ const defaultTransport: SessionLinkTransport = {
     const request = requester(url, {
       method: "GET",
       headers,
+      agent: false,
       signal,
       lookup: (_hostname, _options, callback) => callback(null, address, family),
       ...(url.protocol === "https:" && !isIP(url.hostname.replace(/^\[|\]$/gu, "")) ? { servername: url.hostname } : {}),
@@ -309,6 +310,7 @@ export async function fetchSessionLinkTitle(rawUrl: string, options: { transport
       const requestPromise = transport.request(requestUrl, address, {
         Accept: "text/html",
         "Accept-Encoding": "identity",
+        Connection: "close",
         "User-Agent": "RemoteDesktopMCP-title-fetch/1.0",
       }, controller.signal);
       const response = await raceDeadline(requestPromise, controller.signal);

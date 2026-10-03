@@ -453,6 +453,8 @@ function clientBootstrap(): void {
                 const external = document.createElement("a"); external.className = "session-external-link"; external.href = destination.href; external.target = "_blank"; external.rel = "noopener noreferrer"; external.referrerPolicy = "no-referrer"; external.textContent = session.external_title ?? session.external_url; externalCell.append(external);
               }
             } catch { /* Malformed API data cannot create a navigation link. */ }
+          } else if (session.external_title) {
+            const title = document.createElement("span"); title.className = "session-external-title"; title.textContent = session.external_title; externalCell.append(title);
           }
         }
       }
