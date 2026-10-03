@@ -124,7 +124,6 @@ jobs:
       actions: read
     env:
       CI_RUNNER_LABEL: windows-latest
-      CI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -134,13 +133,22 @@ jobs:
         with:
           node-version: 22
 
+      - name: Resolve workflow metadata
+        shell: pwsh
+        env:
+          CI_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
+          & node scripts/ci-test-scheduler.mjs metadata --root . --output ci-artifacts/workflow-metadata.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Prepare assignment
         shell: pwsh
         run: |
           $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
-          & node scripts/ci-test-scheduler.mjs plan --root . --output ci-artifacts/test-scheduler.json --shard-count 3
+          & node scripts/ci-test-scheduler.mjs plan --root . --metadata ci-artifacts/workflow-metadata.json --output ci-artifacts/test-scheduler.json --shard-count 3
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload shared assignment

@@ -20,8 +20,6 @@ jobs:
       actions: read
     env:
       CI_RUNNER_LABEL: windows-latest
-      CI_JOB_NAME: Measure individual Windows tests
-      CI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +32,16 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Resolve workflow metadata
+        shell: pwsh
+        env:
+          CI_GITHUB_TOKEN: ${{ github.token }}
+          CI_JOB_NAME: Measure individual Windows tests
+        run: |
+          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
+          & node scripts/ci-test-scheduler.mjs metadata --root . --output ci-artifacts/workflow-metadata.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Measure each tracked test file
         shell: pwsh

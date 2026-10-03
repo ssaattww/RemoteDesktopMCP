@@ -16,8 +16,9 @@ import {
   validatePlan,
   parseArgs,
   validateRunMetadata,
+  getWorkflowRunMetadata,
 } from "../scripts/ci-test-scheduler.mjs";
-import { buildManifestCandidate, createMeasurementRecord } from "../scripts/ci-test-measurement.mjs";
+import { buildManifestCandidate, createMeasurementRecord, measurementChildEnvironment } from "../scripts/ci-test-measurement.mjs";
 
 const files = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts", "test/d.test.ts"];
 const environment = {
@@ -141,6 +142,67 @@ test("common run metadata requires the exact public workflow identity and UTC cr
   }
 });
 
+test("workflow metadata resolves push, pull request merge, and manual dispatch event identities", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ci-run-event-"));
+  const names = ["GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "CI_GITHUB_TOKEN", "CI_JOB_NAME"];
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    { name: "push", event: { ref: "refs/heads/main", after: "a".repeat(40) }, checkout: "a".repeat(40), apiHead: "a".repeat(40) },
+    { name: "pull_request", event: { action: "synchronize", pull_request: { number: 42, head: { sha: "b".repeat(40) }, base: { sha: "c".repeat(40) } } }, checkout: "d".repeat(40), apiHead: "b".repeat(40) },
+    { name: "workflow_dispatch", event: { ref: "refs/heads/issue-24-ci-phase1", inputs: {} }, checkout: "e".repeat(40), apiHead: "e".repeat(40) },
+  ];
+  try {
+    process.env.GITHUB_REPOSITORY = "ssaattww/RemoteDesktopMCP";
+    process.env.GITHUB_RUN_ID = "7";
+    process.env.GITHUB_RUN_ATTEMPT = "2";
+    process.env.CI_GITHUB_TOKEN = "synthetic-token-marker";
+    process.env.CI_JOB_NAME = "Measure individual Windows tests";
+    for (const item of cases) {
+      const eventPath = path.join(root, `${item.name}.json`);
+      await writeFile(eventPath, JSON.stringify(item.event));
+      process.env.GITHUB_EVENT_PATH = eventPath;
+      process.env.GITHUB_EVENT_NAME = item.name;
+      process.env.GITHUB_SHA = item.checkout;
+      globalThis.fetch = async (url, options) => {
+        assert.equal(new Headers(options.headers).get("authorization"), "Bearer synthetic-token-marker");
+        if (String(url).endsWith("/jobs?per_page=100")) {
+          assert.match(String(url), /actions\/runs\/7\/jobs\?per_page=100$/);
+          return { ok: true, json: async () => ({ jobs: [{ id: 9, run_id: 7, name: "Measure individual Windows tests" }] }) };
+        }
+        assert.match(String(url), /actions\/runs\/7$/);
+        return { ok: true, json: async () => ({ id: 7, repository: { full_name: "ssaattww/RemoteDesktopMCP" }, head_sha: item.apiHead,
+          run_attempt: 2, created_at: "2026-10-02T12:00:00Z" }) };
+      };
+      const identity = await getWorkflowRunMetadata();
+      assert.equal(identity.sourceCommit, item.checkout);
+      assert.equal(identity.triggerHeadSha, item.apiHead);
+      assert.equal(identity.runId, 7);
+      assert.equal(identity.runAttempt, 2);
+      assert.equal(identity.workflowJobId, 9);
+      assert.equal(identity.schemaVersion, 1);
+      assert.equal(Object.keys(identity).some((key) => /token|secret/i.test(key)), false);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("measurement child process cannot inherit credentials and keeps safe run metadata", () => {
+  const child = measurementChildEnvironment({ CI_GITHUB_TOKEN: "synthetic-token-marker", CI_WORKFLOW_RUN_ID: "7", PATH: "safe-path" });
+  assert.equal(child.CI_GITHUB_TOKEN, undefined);
+  assert.equal(child.CI_WORKFLOW_RUN_ID, "7");
+  assert.equal(child.PATH, "safe-path");
+  const probe = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify({ hasToken: Boolean(process.env.CI_GITHUB_TOKEN), runId: process.env.CI_WORKFLOW_RUN_ID }))"], { env: child, encoding: "utf8" });
+  assert.equal(probe.status, 0);
+  assert.deepEqual(JSON.parse(probe.stdout), { hasToken: false, runId: "7" });
+});
+
 test("scheduler CLI executes its entry point and rejects unknown commands", () => {
   assert.deepEqual(parseArgs(["--shard-id", "2", "--shard-count", "3"]), { shardId: "2", shardCount: "3" });
   const script = fileURLToPath(new URL("../scripts/ci-test-scheduler.mjs", import.meta.url));
@@ -160,6 +222,7 @@ test("measurement records bind the scheduler schema version and candidates requi
   assert.equal(candidate.files[0].medianDurationMs, 110);
   assert.equal(candidate.environment.packageLockSha256, environment.packageLockSha256);
   assert.equal(records[0].schedulerArtifactVersion, 1);
+  assert.equal(Object.keys(records[0]).some((key) => /token|secret/i.test(key)), false);
   assert.throws(() => buildManifestCandidate(records.slice(1), { sourceCommit: "1".repeat(40), files, environment, fingerprint: "b".repeat(64) }), /three records/i);
   assert.throws(() => buildManifestCandidate([{ ...records[0], status: "failure", exitCode: 1 }, ...records.slice(1)],
     { sourceCommit: "1".repeat(40), files, environment, fingerprint: "b".repeat(64) }), /non-success/i);

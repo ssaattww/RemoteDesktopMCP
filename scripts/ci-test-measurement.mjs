@@ -9,8 +9,8 @@ import {
   captureEnvironment,
   computeFingerprint,
   getTrackedTestFiles,
-  getWorkflowRunMetadata,
   normalizeEnvironment,
+  validateWorkflowIdentity,
 } from "./ci-test-scheduler.mjs";
 
 const RECORD_SCHEMA = 1;
@@ -20,6 +20,12 @@ let activeChild;
 let cancelled = false;
 
 const sameEnvironment = (left, right) => ENVIRONMENT_KEYS.every((key) => left[key] === right[key]);
+
+export function measurementChildEnvironment(environment = process.env) {
+  const child = { ...environment };
+  delete child.CI_GITHUB_TOKEN;
+  return child;
+}
 
 export function createMeasurementRecord(input) {
   if (!new Set(["success", "failure", "timeout", "cancel"]).has(input.status)) throw new Error("Measurement status is invalid.");
@@ -100,7 +106,7 @@ export function buildManifestCandidate(records, expected) {
 
 function waitForChild(file, timeoutMs = 30 * 60 * 1000) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ["--import", "tsx", "--test", file], { cwd: process.cwd(), windowsHide: true, stdio: "ignore" });
+    const child = spawn(process.execPath, ["--import", "tsx", "--test", file], { cwd: process.cwd(), env: measurementChildEnvironment(), windowsHide: true, stdio: "ignore" });
     activeChild = child;
     let settled = false;
     let timedOut = false;
@@ -123,23 +129,18 @@ function waitForChild(file, timeoutMs = 30 * 60 * 1000) {
   });
 }
 
-async function getWorkflowJobId(identity) {
-  const response = await fetch(`https://api.github.com/repos/${identity.repository}/actions/runs/${identity.runId}/jobs?per_page=100`, {
-    headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-  });
-  if (!response.ok) throw new Error(`Workflow job metadata request failed with HTTP ${response.status}.`);
-  const payload = await response.json();
-  const matches = payload.jobs?.filter((job) => job.name === process.env.CI_JOB_NAME && job.run_id === identity.runId) ?? [];
-  if (matches.length !== 1 || !Number.isSafeInteger(matches[0].id) || matches[0].id <= 0) throw new Error("Could not uniquely identify the measurement workflow job.");
-  return matches[0].id;
-}
-
 async function main() {
   const root = process.cwd();
   const recordsDir = path.join(root, "ci-artifacts", "test-measurement-records");
   await mkdir(recordsDir, { recursive: true });
-  const identity = await getWorkflowRunMetadata();
-  const workflowJobId = await getWorkflowJobId(identity);
+  const metadataPath = path.join(root, "ci-artifacts", "workflow-metadata.json");
+  const identity = validateWorkflowIdentity(JSON.parse(await readFile(metadataPath, "utf8")), {
+    repository: process.env.GITHUB_REPOSITORY,
+    runId: Number(process.env.GITHUB_RUN_ID),
+    runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+    sourceCommit: process.env.GITHUB_SHA,
+  });
+  if (!identity.workflowJobId) throw new Error("Measurement workflow identity lacks a verified workflowJobId.");
   const files = await getTrackedTestFiles(root);
   const environment = await captureEnvironment(root);
   const fingerprint = await computeFingerprint(root, environment);
@@ -155,7 +156,7 @@ async function main() {
       const finishedAt = new Date().toISOString();
       const record = createMeasurementRecord({
         ...result, file, startedAt, finishedAt, monotonicDurationMs: Math.max(1, performance.now() - start),
-        commit: identity.sourceCommit, workflowRunId: identity.runId, workflowJobId,
+        commit: identity.sourceCommit, workflowRunId: identity.runId, workflowJobId: identity.workflowJobId,
         environment, schedulerArtifactVersion: SCHEDULER_ARTIFACT_VERSION,
       });
       recordIndex += 1;

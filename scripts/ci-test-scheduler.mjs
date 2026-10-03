@@ -227,6 +227,36 @@ export function validateRunMetadata(metadata, expected) {
   return metadata.created_at;
 }
 
+export function resolveTriggerHeadSha(eventName, event, sourceCommit) {
+  if (!COMMIT.test(sourceCommit ?? "") || !event || typeof event !== "object") throw new Error("Workflow checkout or event identity is invalid.");
+  if (eventName === "pull_request") {
+    const headSha = event.pull_request?.head?.sha;
+    if (!COMMIT.test(headSha ?? "")) throw new Error("Pull request event does not contain a valid head commit SHA.");
+    return headSha;
+  }
+  if (eventName === "push") {
+    const after = event.after;
+    if (!COMMIT.test(after ?? "") || after !== sourceCommit) throw new Error("Push event commit does not match the workflow checkout.");
+    return after;
+  }
+  if (eventName === "workflow_dispatch") {
+    if (typeof event.ref !== "string" || !event.ref) throw new Error("Workflow dispatch event does not contain a ref.");
+    return sourceCommit;
+  }
+  throw new Error(`Unsupported workflow event: ${String(eventName)}`);
+}
+
+export function validateWorkflowIdentity(identity, expected) {
+  const baseKeys = ["schemaVersion", "repository", "runId", "runAttempt", "sourceCommit", "triggerHeadSha", "createdAt"];
+  const keys = identity?.workflowJobId === undefined ? baseKeys : [...baseKeys, "workflowJobId"];
+  if (!identity || typeof identity !== "object" || Array.isArray(identity) || Object.keys(identity).sort(ordinal).join("\0") !== keys.sort(ordinal).join("\0")) throw new Error("Workflow identity file schema is invalid.");
+  if (identity.schemaVersion !== 1 || identity.repository !== expected.repository || identity.runId !== expected.runId || identity.runAttempt !== expected.runAttempt) throw new Error("Workflow identity repository, run id, attempt, or schema does not match this run.");
+  if (!COMMIT.test(identity.sourceCommit ?? "") || identity.sourceCommit !== expected.sourceCommit || !COMMIT.test(identity.triggerHeadSha ?? "")) throw new Error("Workflow identity source or triggering commit does not match.");
+  assertUtc(identity.createdAt, "workflow identity createdAt");
+  if (identity.workflowJobId !== undefined && (!Number.isSafeInteger(identity.workflowJobId) || identity.workflowJobId <= 0)) throw new Error("Workflow identity job id is invalid.");
+  return identity;
+}
+
 export function validateRuntimeFingerprint(plan, currentFingerprint) {
   if (plan.mode === "optimized" && currentFingerprint !== plan.fingerprint) throw new Error("Measured environment or fingerprint differs from the shared scheduler plan.");
   return true;
@@ -286,13 +316,24 @@ async function getRunMetadata() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required to validate the triggering commit.");
   const event = JSON.parse(await readFile(eventPath, "utf8"));
-  const triggerHeadSha = event.pull_request?.head?.sha ?? event.after;
-  if (!COMMIT.test(triggerHeadSha ?? "")) throw new Error("Workflow event does not contain a valid triggering commit SHA.");
+  const triggerHeadSha = resolveTriggerHeadSha(process.env.GITHUB_EVENT_NAME, event, sourceCommit);
   const response = await fetch(`https://api.github.com/repos/${repository}/actions/runs/${runId}`, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" } });
   if (!response.ok) throw new Error(`Workflow run metadata request failed with HTTP ${response.status}.`);
   const metadata = await response.json();
   const createdAt = validateRunMetadata(metadata, { repository, runId, runAttempt, sourceCommit, triggerHeadSha });
-  return { repository, runId, runAttempt, sourceCommit, createdAt };
+  const identity = { schemaVersion: 1, repository, runId, runAttempt, sourceCommit, triggerHeadSha, createdAt };
+  const jobName = process.env.CI_JOB_NAME;
+  if (jobName) {
+    const jobsResponse = await fetch(`https://api.github.com/repos/${repository}/actions/runs/${runId}/jobs?per_page=100`, {
+      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (!jobsResponse.ok) throw new Error(`Workflow job metadata request failed with HTTP ${jobsResponse.status}.`);
+    const payload = await jobsResponse.json();
+    const matches = payload.jobs?.filter((job) => job.name === jobName && job.run_id === runId) ?? [];
+    if (matches.length !== 1 || !Number.isSafeInteger(matches[0].id) || matches[0].id <= 0) throw new Error("Could not uniquely identify the workflow job.");
+    identity.workflowJobId = matches[0].id;
+  }
+  return identity;
 }
 
 export const getWorkflowRunMetadata = getRunMetadata;
@@ -312,6 +353,16 @@ async function loadManifest(root) {
   }
 }
 
+async function readWorkflowIdentity(root, file) {
+  const identity = JSON.parse(await readFile(path.resolve(root, file), "utf8"));
+  return validateWorkflowIdentity(identity, {
+    repository: process.env.GITHUB_REPOSITORY,
+    runId: Number(process.env.GITHUB_RUN_ID),
+    runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+    sourceCommit: process.env.GITHUB_SHA,
+  });
+}
+
 export function parseArgs(args) {
   const result = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -326,10 +377,16 @@ async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
   const root = path.resolve(args.root ?? process.cwd());
+  if (command === "metadata") {
+    if (!args.output) throw new Error("--output is required for workflow metadata.");
+    const identity = await getRunMetadata();
+    await writeFile(path.resolve(root, args.output), `${JSON.stringify(identity, null, 2)}\n`, { flag: "wx" });
+    return;
+  }
   if (command === "plan") {
     const output = args.output;
     if (!output) throw new Error("--output is required for plan generation.");
-    const identity = await getRunMetadata();
+    const identity = await readWorkflowIdentity(root, args.metadata ?? "ci-artifacts/workflow-metadata.json");
     const files = await getTrackedTestFiles(root);
     const environment = await captureEnvironment(root);
     const fingerprint = await computeFingerprint(root, environment);
