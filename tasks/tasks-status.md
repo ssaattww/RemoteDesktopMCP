@@ -37,7 +37,7 @@
 | F02 | P4 | ノード間相互認証・複数PC経路・再接続 | T08 | L | 登録2台以上、切断・世代交代・再送・転送中継の試験が合格 | 後続 |
 | F03 | P4 | 単一 PC の Tailscale Funnel と ChatGPT 公開接続検証 | F01,F01a,F01b,F01c | M | 実際の公開経路から認証と操作、再起動後の接続を確認 | 公開起動済み。HTTPSの認証案内と未認証401確認、ChatGPT実操作を利用者へ依頼中 |
 | F04 | P4 | 公開接続の通常・独立レビュー | F01a,F01b,F01c | M | Sol / high で公開用変更を確認し、F03 の実運用結果と未検証事項を区別 | 通常10件解消後、3ffd783の独立レビューで追加3件。F01dで対応し同じ独立担当へ限定確認 |
-| T09 | P5 | P1 Issue #46: User Console 自動更新と選択保持 | なし | M | 一覧と交差するlive Rangeの間は破壊的更新を保留し、解除後に最新状態を反映。`pagehide` / 認証失効で保留破棄。PR #50日時表示の開閉・フォーカス保持と共存。通常・独立レビューと現在HEADのCI完了、親によるUI実画面確認を記録 | 実装・通常レビュー・fix verification完了。PR #50統合済み。修正・検証報告: `doc/report/2026-10-03-user-console-auto-refresh-fix.md`, `doc/report/2026-10-03-user-console-auto-refresh-fix-verification.md`。独立最終レビュー/最終CIを進行中。UI実画面確認は親FA780検証待ち。PR #51はDraft・未マージ |
+| T09 | P5 | P1 Issue #46: User Console 自動更新と選択保持 | なし | M | 一覧と交差するlive Rangeの間は破壊的更新を保留し、解除後に最新状態を反映。`pagehide` / 認証失効で保留破棄。PR #50日時表示の開閉・フォーカス保持と共存。通常・独立レビューと現在HEADのCI完了、親によるUI実画面確認を記録 | 実装・通常レビュー・fix verification完了。PR #50統合済み。修正・検証報告: `doc/report/2026-10-03-user-console-auto-refresh-fix.md`, `doc/report/2026-10-03-user-console-auto-refresh-fix-verification.md`。full local gate初回のDR003試験失敗と限定調査は `reports/2026-10-03-pr51-pre-freeze-gate-investigation.md` 参照。最終候補の検証と独立レビュー開始前。UI実画面確認は親FA780検証待ち。PR #51はDraft・未マージ |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。

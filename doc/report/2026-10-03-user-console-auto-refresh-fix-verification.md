@@ -70,3 +70,14 @@
 - 判定: **pass（マージ後再確認）**。`RDMCP-PR51-REV-001` は指定範囲とPR #50連携を含め解消状態を維持。新たなblocking findingなし。
 - 限界: 境界選択延期と日時details復元はそれぞれ実行試験で確認したが、両条件を同一fixture内で同時に組み合わせた試験はない。相互作用はマージ後の実装経路を読んで確認した。現HEADに一致するCI run、reviewer role/前回担当との独立性、および実適用profileは観測できず未確認。role選択・照会欄の不在は作業を止める条件にせず記録した。
 - 実行profile: user requested `gpt-6-luna` / `medium` / fork `none`。この実行環境では最終適用profileの信頼できる証跡を観測できないため、適用状態は未検証。
+
+## 2026-10-03 T09 tracking / gate report 同期確認追補
+
+- 対象HEAD: `67e526dd2c678d03b62d904ebbba7cfda49cf604`（確認時のbranch `issue46-user-console-auto-refresh-design`）。`git diff b098af2..HEAD` はレポート、`tasks/tasks-status.md`、`tasks/phases-status.md` の追跡変更で、製品コード・テスト変更は含まない。依頼範囲に従い、ゲートや製品試験を再実行していない。
+- `tasks/tasks-status.md` のT09と `tasks/phases-status.md` のP5は、実装・通常レビュー・fix verificationの完了とPR #50統合済みを記載し、full local gateのDR003初回失敗・限定調査およびUI実画面確認待ちを参照している。これは本レポートのREV-001 passと両立する。前回のREV-001 passおよびマージ後確認passは保持し、新しい製品findingは追加しない。
+- `reports/2026-10-03-pr51-pre-freeze-gate-investigation.md` は、初回 full local gate が `npm run lint && npm run check && npm run build && npm test` のtest段階で139件中127 pass / 1 fail / 11 skipとなり、DR003 setupの `link(protectedPath, stableTargetAlias)` で `ENOENT` が発生したことを記録している。DR003単独再実行はpassだが、初回事象の具体的競合主体・root causeは未確定であり、full gateはpass扱いにしていない。
+- 調査報告の「製品欠陥の証拠なし」は、調査したDR003の失敗が製品の保護動作を検査する assertion ではなく、試験前提のsetup段階に起き、対象ケース単独は再実行成功したという限定された証拠評価である。これは製品全体の無欠陥認定やfull local gate passを意味しない。報告本文・結論・後続扱いはいずれもこの区別を保っており、記載は妥当。
+- Tracking差分との不一致: `tasks/tasks-status.md` T09の状態欄は「独立最終レビュー/最終CIを進行中」と記す一方、実状態はfull local gate再通過前でindependent-review HEADのfreeze自体が未実施である。P5欄の「独立最終レビューと最終CI進行前」はpending状態をより正確に表す。task表はこのレビューでは編集せず、不一致を記録する。タスクの前進状況を示すなら、freeze/開始前にそろえる必要がある。
+- 判定: tracking/reportのgate説明は、単独試験のpass、製品欠陥未立証、未確定root cause、full gate未passを区別しており正確。残る同期懸念はT09 task表の「進行中」という独立レビュー/CI状態表現のみで、製品findingではない。
+- Reviewer continuity/profile: 既存normal fix-verification reviewerとして継続した。parent-owned `Dispatch profile` 節および過去のprofile記録は変更していない。前回同様、runtimeの最終profile・reviewer role選択/照会が観測できないため、過去の適用profile不確実性を保持し、再選択・再主張していない。
+- 対象外・未実施: 製品/テスト/設計の変更、tracking更新、full gate再実行、CI待ち、independent reviewのfreeze/開始、最終レビュー予約・attestation、push/comment/commit/merge。
