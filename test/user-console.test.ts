@@ -144,6 +144,9 @@ test("user console lists each active connection's working directory and purpose 
     assert.doesNotMatch(html, /http-equiv="refresh"/, "log history does not use whole-page periodic reloads");
     assert.match(html, /作成日時.*最終アクセス日時/);
     assert.match(html, /<th>内容<\/th><th>作成日時/);
+    assert.match(html, /data-session-time="created"/, "the session list shows the creation time disclosure");
+    assert.match(html, /data-session-time="last-access"/, "the session list shows the last access time disclosure");
+    assert.match(html, /<summary><time datetime="[^"]+" data-session-relative="true">[^<]+<\/time><\/summary><time datetime="[^"]+">[^<]+ JST<\/time>/, "the disclosure exposes a relative label and an exact JST value");
     assert.match(html, /Second task/);
     assert.match(html, /終了/);
     assert.match(html, /現在実行中の操作: <span id="running-count">0/);

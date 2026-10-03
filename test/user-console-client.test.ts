@@ -16,6 +16,7 @@ test("client paging helpers preserve cursor order, deduplicate, and cap retained
 });
 
 class FakeElement {
+  static activeElement: FakeElement | null = null;
   dataset: Record<string, string> = {};
   hidden = false;
   disabled = false;
@@ -24,6 +25,8 @@ class FakeElement {
   className = "";
   tagName: string;
   href = "";
+  dateTime = "";
+  focusOptions?: { preventScroll?: boolean };
   colSpan = 1;
   children: FakeElement[] = [];
   parentElement: FakeElement | null = null;
@@ -35,24 +38,30 @@ class FakeElement {
   classList = { toggle: (name: string, force?: boolean) => Boolean(name && force !== false) };
   constructor(tagName = "div") { this.tagName = tagName.toLowerCase(); }
   checked = false;
+  focus(options?: { preventScroll?: boolean }) { FakeElement.activeElement = this; this.focusOptions = options; }
   addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
   click(name = "click") { this.listeners.get(name)?.({ target: this }); }
   replaceChildren(...children: FakeElement[]) { this.onReplaceChildren?.(this.children); this.children = children; for (const child of children) child.parentElement = this; }
   append(child: FakeElement) { this.children.push(child); child.parentElement = this; }
   insertRow() { const row = new FakeElement("tr"); this.append(row); return row; }
   insertCell() { const cell = new FakeElement("td"); this.append(cell); return cell; }
+  allDescendants(): FakeElement[] { return this.children.flatMap((child) => [child, ...child.allDescendants()]); }
   querySelectorAll<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return [override] as T[];
     if (selector.startsWith(".process-block")) return this.children.filter((child) => child.className === "process-block" && (!selector.includes("data-events-json") || child.dataset.eventsJson !== undefined)) as T[];
     if (selector.startsWith("tr[data-event-json]")) return this.children.filter((child) => child.tagName === "tr" && child.dataset.eventJson !== undefined) as T[];
     if (selector === "tr[data-session-id]") return this.children.filter((child) => child.tagName === "tr" && child.dataset.sessionId !== undefined) as T[];
+    const descendants = this.allDescendants();
+    if (selector === "details[data-session-time]") return descendants.filter((child) => child.tagName === "details" && child.dataset.sessionTime !== undefined) as T[];
+    if (selector === "time[data-session-relative]") return descendants.filter((child) => child.tagName === "time" && child.dataset.sessionRelative !== undefined) as T[];
     return [] as T[];
   }
   querySelector<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return override as T;
     if (selector === "h2") return (this.children.find((child) => child.tagName === "h2") ?? null) as T | null;
+    if (selector === "summary") return (this.children.find((child) => child.tagName === "summary") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     if (selector === ".process-block") return (this.children.find((child) => child.className === "process-block") ?? null) as T | null;
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     return null;
@@ -80,20 +89,32 @@ class FakeEventSource {
 }
 
 class FakeClock {
-  now = 10_000;
+  now: number;
+  constructor(now = 10_000) { this.now = now; }
   nextId = 0;
   timers = new Map<number, { due: number; callback: () => void }>();
+  intervals = new Map<number, { due: number; delay: number; callback: () => void }>();
   setTimeout = (callback: () => void, delay = 0) => {
     const id = ++this.nextId;
     this.timers.set(id, { due: this.now + Math.max(0, delay), callback });
     return id;
   };
   clearTimeout = (id: number | undefined) => { if (id !== undefined) this.timers.delete(id); };
+  setInterval = (callback: () => void, delay = 0) => { const id = ++this.nextId; this.intervals.set(id, { due: this.now + delay, delay, callback }); return id; };
+  clearInterval = (id: number | undefined) => { if (id !== undefined) this.intervals.delete(id); };
   async advance(milliseconds: number) {
     const target = this.now + milliseconds;
     while (true) {
       const next = [...this.timers.entries()].sort((a, b) => a[1].due - b[1].due)[0];
-      if (!next || next[1].due > target) break;
+      const interval = [...this.intervals.entries()].sort((a, b) => a[1].due - b[1].due)[0];
+      if ((!next || next[1].due > target) && (!interval || interval[1].due > target)) break;
+      if (interval && (!next || interval[1].due <= next[1].due) && interval[1].due <= target) {
+        this.now = interval[1].due;
+        interval[1].due += interval[1].delay;
+        interval[1].callback();
+        await settle();
+        continue;
+      }
       this.now = next[1].due;
       this.timers.delete(next[0]);
       next[1].callback();
@@ -111,6 +132,7 @@ async function settle() { await new Promise((resolve) => setTimeout(resolve, 0))
 
 function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; toString: () => string; getRangeAt?: (index: number) => { intersectsNode?: (node: FakeElement) => boolean }; setBaseAndExtent?: (...args: unknown[]) => void; collapse?: (node: FakeElement, offset: number) => void; extend?: (node: FakeElement, offset: number) => void; removeAllRanges: () => void; addRange: (...args: unknown[]) => void } } = {}) {
   FakeEventSource.instances = [];
+  FakeElement.activeElement = null;
   const root = new FakeElement(); root.dataset = { sessionId, newestCursor: initialItems[0]?.cursor ?? "c0", oldestCursor: initialItems.at(-1)?.cursor ?? "c-older", hasMoreOlder: String(initialItems.length > 0), initialItems: JSON.stringify(initialItems) };
   const status = new FakeElement();
   const newest = new FakeElement(); newest.hidden = true;
@@ -118,15 +140,17 @@ function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType
   const elements = new Map<string, FakeElement>([["log-console", root], ["log-status", status], ["log-new-button", newest], ["log-older-button", older], ...Object.entries(extras)]);
   const scrollY = 0; let scrollCalls = 0;
   const windowListeners = new Map<string, (event?: unknown) => void>();
-  const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: (name: string, listener: (event?: unknown) => void) => windowListeners.set(name, listener), scrollTo: () => { scrollCalls += 1; }, scrollBy: () => { scrollCalls += 1; }, getSelection: () => options.selection ?? ({ toString: () => "", isCollapsed: true }) };
+  const clock = options.clock ?? new FakeClock();
+  const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: (name: string, listener: (event?: unknown) => void) => windowListeners.set(name, listener), setInterval: clock ? clock.setInterval : setInterval, clearInterval: clock ? clock.clearInterval : clearInterval, setTimeout: clock ? clock.setTimeout : setTimeout, clearTimeout: clock ? clock.clearTimeout : clearTimeout, scrollTo: () => { scrollCalls += 1; }, scrollBy: () => { scrollCalls += 1; }, getSelection: () => options.selection ?? ({ toString: () => "", isCollapsed: true }) };
   const documentListeners = new Map<string, (event?: unknown) => void>();
   const createTreeWalker = (rootNode: FakeElement) => { const nodes: FakeElement[] = []; const visit = (element: FakeElement) => { if (element.textContent && element.children.length === 0) { const textNode = new FakeElement("#text"); textNode.textContent = element.textContent; textNode.parentElement = element; nodes.push(textNode); } for (const child of element.children) visit(child); }; visit(rootNode); let index = 0; return { nextNode: () => nodes[index++] ?? null }; };
   const createRange = () => { let startNode: FakeElement | null = null; let startOffset = 0; let endNode: FakeElement | null = null; let endOffset = 0; const compare = (left: FakeElement | null, leftOffset: number, right: FakeElement | null, rightOffset: number) => { if (!left || !right) return 0; const leftRow = left.closest<FakeElement>("tr[data-session-id]"); const rightRow = right.closest<FakeElement>("tr[data-session-id]"); const rowOrder = (leftRow?.dataset.sessionId ?? "").localeCompare(rightRow?.dataset.sessionId ?? ""); if (rowOrder) return rowOrder; const leftCell = left.closest<FakeElement>("td"); const rightCell = right.closest<FakeElement>("td"); const cellOrder = (leftRow?.cells.indexOf(leftCell!) ?? 0) - (rightRow?.cells.indexOf(rightCell!) ?? 0); return cellOrder || leftOffset - rightOffset; }; const range = { selectNodeContents: () => undefined, setEnd: (node: FakeElement, at: number) => { endNode = node; endOffset = at; }, setStart: (node: FakeElement, at: number) => { startNode = node; startOffset = at; }, collapse: () => { endNode = startNode; endOffset = startOffset; }, compareBoundaryPoints: (_how: number, other: typeof range) => compare(startNode, startOffset, other.startContainer, other.startOffset), get startContainer() { return startNode; }, get startOffset() { return startOffset; }, get endContainer() { return endNode; }, get endOffset() { return endOffset; }, toString: () => "x".repeat(endOffset) }; return range as unknown as Range; };
-  const documentStub = { hidden: options.hidden ?? false, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), createRange, createTreeWalker, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
-  const clock = options.clock;
-  const ClockDate = clock ? class extends Date { constructor(value?: string | number) { super(value ?? clock.now); } static now() { return clock.now; } } : Date;
-  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock ? clock.setTimeout : setTimeout, clearTimeout: clock ? clock.clearTimeout : clearTimeout });
-  return { root, status, newest, older, windowStub, documentStub, documentListeners, windowListeners, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
+  const documentStub = { hidden: options.hidden ?? false, get activeElement() { return FakeElement.activeElement; }, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), createRange, createTreeWalker, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
+  const ClockDate = class extends Date { constructor(value?: string | number) { super(value ?? clock.now); } static now() { return clock.now; } };
+  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  const emptyTimers = new Map<number, { callback: () => void; delay: number }>();
+  const emptyTimeouts = new Map<number, { due: number; callback: () => void }>();
+  return { root, status, newest, older, windowStub, documentStub, documentListeners, windowListeners, intervals: clock?.intervals ?? emptyTimers, timeouts: clock?.timers ?? emptyTimeouts, tickIntervals: () => { for (const timer of [...(clock?.intervals.values() ?? [])]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...(clock?.intervals.values() ?? [])]) if (timer.delay === delay) timer.callback(); }, advanceTime: async (milliseconds: number) => clock?.advance(milliseconds), setNow: (value: number) => { if (clock) clock.now = value; }, get scrollCalls() { return scrollCalls; }, sources: FakeEventSource.instances };
 }
 
 test("browser bootstrap treats SSE as a notice, pages logs, and restarts from the applied cursor", async () => {
@@ -306,6 +330,45 @@ test("older paging slides a full window toward history and refresh re-fetches th
   assert.equal(processWindow.some((event) => event.output === "out-998"), true, "the newer page restores pruned process history");
   renderedOperationIds = operationRows.children.map((row) => row.dataset.operationId);
   assert.equal(renderedOperationIds.includes("op-999"), true, "the newer page restores pruned operation history");
+});
+
+test("session timestamp disclosure, relative value, open state, and focus survive automatic state refresh", async () => {
+  const rows = new FakeElement("tbody");
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const now = Date.parse("2026-10-02T02:00:00.000Z");
+  const clock = new FakeClock(now);
+  let stateCalls = 0;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") {
+      stateCalls += 1;
+      return response(200, { ...emptyState, sessions: [{ session_id: "stable-session", created_at: "2026-10-02T01:59:01Z", last_used_at: "2026-09-20T00:00:00Z", state: "active", active: true }] });
+    }
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": rows, "auto-refresh": toggle }, "", { clock });
+  await settle(); await settle();
+  let details = rows.children[0]?.children[1]?.children[0];
+  assert.equal(details?.tagName, "details");
+  assert.equal(details?.open, false);
+  assert.equal(details?.children[0]?.children[0]?.textContent, "59秒前");
+  assert.match(details?.children[1]?.textContent ?? "", /JST/);
+
+  const oldSummary = details?.children[0];
+  assert.ok(oldSummary);
+  details!.open = true;
+  oldSummary.focus();
+  ui.newest.click();
+  await settle(); await settle(); await settle();
+  details = rows.children[0]?.children[1]?.children[0];
+  const newSummary = details?.children[0];
+  assert.equal(stateCalls, 2);
+  assert.notEqual(newSummary, oldSummary);
+  assert.equal(details?.open, true, "the disclosure stays open across automatic refresh");
+  assert.equal(FakeElement.activeElement, newSummary, "focus returns to the same timestamp disclosure");
+  assert.equal(newSummary?.focusOptions?.preventScroll, true);
+  await clock.advance(1_000);
+  assert.equal(newSummary?.children[0]?.textContent, "1分前", "relative time updates in place without another state request");
+  assert.equal(stateCalls, 2);
 });
 
 test("state refresh updates only session and running rows with the selected filter", async () => {
