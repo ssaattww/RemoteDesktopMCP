@@ -4,7 +4,7 @@
 
 - 目的: Issue 45 / PR #52 の current-main 統合後の通常レビュー。URL取得の安全境界、セッション認可/秘匿、画面表示、共有API、設計、PR50/51/60統合とテストを確認する。
 - タスク種別: current-main統合後の再通常レビュー / fix-verification cycle。
-- initial normal-review HEAD: `d9fc3b3bf8c9f057f02678e728468b3552648c99`; fix-verification HEAD: `b03c72b8d9772805c766aada607f016801539402`。
+- initial normal-review HEAD: `d9fc3b3bf8c9f057f02678e728468b3552648c99`; first fix-verification HEAD: `b03c72b8d9772805c766aada607f016801539402`; current fix-verification HEAD: `ce52d8bbdc389cd069bd5701b82cba57644fe880`。
 - PR base: current `main` `bfe3793309e09acdd180ffe22a4e4a81e87fc668`。
 
 ## sub-agentを使う理由
@@ -66,15 +66,16 @@
 
 ## 結果
 
-- Fix-verification verdict: `pass_with_held` for finding closure. The sole finding ISSUE45-NR-001 is closed; its source severity remains P2 (no reclassification).
-- Reviewed closure identity: exact HEAD `b03c72b8d9772805c766aada607f016801539402`; base `bfe3793309e09acdd180ffe22a4e4a81e87fc668`. The target source is unchanged during this review.
-- Direct fix evidence: `src/user-console-client.ts:936` gates the SSE state refresh on `autoEnabled()` as well as event generation. The existing enabled-event regression retains state-only refresh and safe URL/title rendering. New paused-event regression verifies no additional `/api/console-state` request, no log-page fetch, and no automatic redraw. Parent-supplied execution evidence reports the regression was Red before the fix, then enabled/paused tests pass 2/2.
-- Supplied post-fix full validation: `npm test` 158 total, 147 passed, 0 failed, 11 platform skips; `npm run check`, `npm run lint`, and `npm run build` pass. Reviewer did not rerun commands.
-- Exact-HEAD GitHub CI has not been started; the prior `d9fc3b3` CI is stale for this fix. This remains held validation, not a code finding. No new finding was identified in direct side effects.
-- Finding completeness matrix for ISSUE45-NR-001: (1) gate notification refresh when paused — implemented at `src/user-console-client.ts:936`, verified by source inspection; (2) focused paused-toggle regression with enabled case retained — implemented at `test/user-console-client.test.ts:377-425`, supplied focused execution 2/2 pass. All required actions complete.
-- No product or task-tracking edits were made. Only the review report was updated. `reserved_report_paths`: none. `report_attestation_allowed`: false.
+- Latest fix-verification verdict: `pass_with_held`. The normal finding ISSUE45-NR-001 remains closed at `b03c72b8d9772805c766aada607f016801539402` (P2; no reclassification). The independent closure finding ISSUE45-IFR-CLOSURE-001 is now also closed at `ce52d8bbdc389cd069bd5701b82cba57644fe880` with its original Medium severity preserved.
+- Reviewed current closure identity: exact HEAD `ce52d8bbdc389cd069bd5701b82cba57644fe880`; base `bfe3793309e09acdd180ffe22a4e4a81e87fc668`. Product fix is commit `03cc09d`; `ce52` is docs/tracking-only beyond that code/test commit. The source target is unchanged during this review.
+- ISSUE45-IFR-CLOSURE-001 required behavior is complete: `src/user-console-client.ts:936-940` sets `statePending` if the current-generation link SSE arrives while auto-refresh is unavailable. When the toggle becomes enabled, the existing scheduler observes `statePending` and performs a state-only cycle; it does not fetch `/api/logs` for this event.
+- Regression evidence in `test/user-console-client.test.ts:426-455` demonstrates no request while paused and old title remains, then exactly one `/api/console-state` request on resume, the latest title rendered, and no `/api/logs` request. The preceding paused and enabled cases at lines 377-424 remain. Parent-supplied focused execution: 3/3 pass; the pre-fix Red reproduced absence of the post-resume state request (`1 !== 2`).
+- Supplied full validation at exact product content: `npm test` 159 total, 148 passed, 0 failed, 11 platform skips; `npm run check`, `npm run lint` (106 Markdown files, 0 issues), `npm run build`, and `git diff --check` pass. Reviewer did not rerun commands.
+- Exact-HEAD GitHub CI has not started. The earlier `eeb09f2` run is stale for this fix and is not counted. This is held validation, not a code finding. No direct side-effect regressions found.
+- Finding completeness matrix for ISSUE45-IFR-CLOSURE-001: (1) retain valid update while paused — implemented at `src/user-console-client.ts:939`, source-checked; (2) no fetch while paused — covered at `test/user-console-client.test.ts:443-448`; (3) resume produces exactly one state-only refresh with latest title — covered at lines 449-455; (4) no `/api/logs` fetch — covered at line 453. Supplied focused run passes 3/3. All required actions complete.
+- No product or task-tracking edits were made by reviewer. Only the review report was updated. `reserved_report_paths`: none. `report_attestation_allowed`: false.
 
 ## リスク
 
-- The pause-setting bypass is fixed and its finding closed at the reviewed closure HEAD.
-- CI is pending on exact closure HEAD; the reported browser evidence is headless at a 390px viewport, not a physical handset or speech-output test.
+- Both the normal pause-setting bypass finding and independent paused-event retention finding are closed at their reviewed fix-verification HEADs.
+- CI is pending on exact closure HEAD `ce52d8bbdc389cd069bd5701b82cba57644fe880`; the reported browser evidence is headless at a 390px viewport, not a physical handset or speech-output test.
