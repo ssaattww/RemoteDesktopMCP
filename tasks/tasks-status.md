@@ -29,7 +29,7 @@
 | T08c | P3 | 設計の固定版表記 | T07 | S | MVP-IFR-007 の0.2.51への一致と文書 lint | 完了 |
 | T08d | P3 | Windows ファイル識別番号の精度保持 | T08a | M | bigint 由来の損失のない識別、manifest 検証、設定・転送の衝突回帰が合格 | 通常 reviewer による解消確認完了 |
 | T08 | P3 | 独立最終レビューと PR 更新 | T07,T08a,T08b,T08c,T08d | M | 別 reviewer による確認、コミット、push、PR に証拠と未検証範囲を記載 | 通常工程完了。最終判定・提出 HEAD は独立レビュー報告と PR #1 を参照 |
-| T09 | P5 | Project #4 とIssue分類の優先度・状態同期 | #58 | M | 双方向同期と復旧、競合時刻、許可labelを検証しPRへ反映 | REV001〜007対応、専用49件・check・lint成功。全体165件:163 pass/1 fail/1 skip。NR003/NR004失敗は単独再試験pass。10個だけのlabel初期化を実装（実repo変更なし）。実同期/workflow実行なし。 |
+| T09 | P5 | Project #4 とIssue分類の優先度・状態同期 | #58 | M | 双方向同期と復旧、競合時刻、許可labelを検証しPRへ反映 | REV001〜008対応。同期専用52/52 pass。全体 npm.cmd test（HEAD b1ee42a4da47bb0b5474b520c48f2ff2fb9f6b16）169件:168 pass/0 fail/1 skip。NR003/NR004もこの1回の全体実行でpass（以前の全体実行時失敗は別HEADの記録）。check/lint/diff-check pass。CI run 37116983656はこのHEADでUbuntu・Windows shard 1/3,2/3 success、3/3実行中（確認時点）。PROJECTS_TOKEN secret名あり（値未読）。文書のみ更新し、製品コード不変。実同期/workflow手動実行/mergeなし。 |
 | F01 | P4 | Google OIDC、CIMD、refresh token | T08 | L | 公開用認証設計と一致し、実アカウントとの接続を確認 | 実 Google 本人登録成功、通常コード指摘解消、ChatGPT 認証待ち |
 | F01a | P4 | 公開認証の回帰・再起動・拒否試験 | F01 | M | 誤ユーザー、改ざん、再利用、期限、クライアントと対象資源の照合を検証 | 公開16件を含む全体43件中42件成功・POSIX1件除外。実アカウントの接続はF03 |
 | F01b | P4 | 設定補助と Windows 起動手順 | F01 | M | 秘密を公開せず設定し、継続起動と停止・再起動を確認 | 実設定・本人登録・保存領域保護・公開起動済み。接続後の実再起動確認はF03 |
