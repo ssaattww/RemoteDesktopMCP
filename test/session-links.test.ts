@@ -68,6 +68,22 @@ test("fetches a bounded UTF-8 HTML title through a pinned public address without
   assert.equal(Object.keys(fake.requests[0]!.headers).some((key) => /cookie|authorization|referer/i.test(key)), false);
 });
 
+test("accepts quoted UTF-8 charset parameters and rejects malformed or other charsets", async () => {
+  const quoted = transport([{ status: 200, contentType: 'text/html; charset="UTF-8"', body: "<title>Quoted UTF-8</title>" }]);
+  assert.equal(await fetchSessionLinkTitle("https://example.com/", { transport: quoted }), "Quoted UTF-8");
+  const additionalParameter = transport([{ status: 200, contentType: 'text/html; note="contains; charset=latin1"; charset="utf-8"', body: "<title>Quoted parameter</title>" }]);
+  assert.equal(await fetchSessionLinkTitle("https://example.com/", { transport: additionalParameter }), "Quoted parameter");
+  for (const contentType of [
+    'text/html; charset="utf-16"',
+    'text/html; charset="utf-8',
+    "text/html; charset='utf-8'",
+    "text/html; charset=utf-8x",
+    "text/html; charset=utf-8; charset=latin1",
+  ]) {
+    await assert.rejects(fetchSessionLinkTitle("https://example.com/", { transport: transport([{ status: 200, contentType, body: "<title>must reject</title>" }]) }), /UTF-8 HTML/i, contentType);
+  }
+});
+
 test("validates every redirect and does not contact private destinations", async () => {
   const redirect = transport([{ status: 302, location: "https://privately-resolved.com/" }], { "example.com": [publicIpv4], "privately-resolved.com": ["10.0.0.4"] });
   await assert.rejects(fetchSessionLinkTitle("https://example.com/", { transport: redirect }), /address|destination|network/i);
