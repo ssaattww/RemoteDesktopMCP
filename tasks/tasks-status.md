@@ -37,7 +37,7 @@
 | F02 | P4 | ノード間相互認証・複数PC経路・再接続 | T08 | L | 登録2台以上、切断・世代交代・再送・転送中継の試験が合格 | 後続 |
 | F03 | P4 | 単一 PC の Tailscale Funnel と ChatGPT 公開接続検証 | F01,F01a,F01b,F01c | M | 実際の公開経路から認証と操作、再起動後の接続を確認 | 公開起動済み。HTTPSの認証案内と未認証401確認、ChatGPT実操作を利用者へ依頼中 |
 | F04 | P4 | 公開接続の通常・独立レビュー | F01a,F01b,F01c | M | Sol / high で公開用変更を確認し、F03 の実運用結果と未検証事項を区別 | 通常10件解消後、3ffd783の独立レビューで追加3件。F01dで対応し同じ独立担当へ限定確認 |
-| I45 | P5 | Issue 45 / PR #52 のセッション外部URLとタイトル機能 | 既存セッション・コンソール基盤。PR #54 / Issue 48 の後編集機能が依存 | M | 任意URL/タイトル、未入力タイトルの安全な取得、タイトル単独表示、後編集APIとの共有契約、SSRF/認可/ログ秘匿、TDD、通常・独立レビュー、最終PR CIを確認 | main との通常統合中。旧最終確認を撤回し、統合TDD・再レビュー・同じ独立reviewer closure・一致HEAD CIを再実施 |
+| I45 | P5 | Issue 45 / PR #52 のセッション外部URLとタイトル機能 | 既存セッション・コンソール基盤。PR #54 / Issue 48 の後編集機能が依存 | M | 任意URL/タイトル、未入力タイトルの安全な取得、タイトル単独表示、後編集APIとの共有契約、SSRF/認可/ログ秘匿、TDD、通常・独立レビュー、最終PR CIを確認 | 現行 main `ed4d9b9` を通常 merge（`f1d4db7`）。合成TDD red/green、全体135/124/0/11、check/lint/build、headless Chromium確認済。新HEADの通常review・同一独立closure・CI待ち |
 | T09 | P4 | Issue #55: 長時間実行プロセスの目的・コマンド表示 | T08 | M | 設計レビュー、Red/Green、所有者・認可・マスク回帰、Windows実画面手順と証拠、Draft PR | 設計レビューpass。通常reviewのNR55-1/2はfix-verification pass_with_held。最新全体試験120件中109成功・skip 11・失敗0、lint/build成功。FA780実画面・画像証拠とDraft更新・push待ち |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
