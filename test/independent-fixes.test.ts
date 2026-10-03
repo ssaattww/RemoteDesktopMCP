@@ -26,8 +26,7 @@ function pauseProcessWatchers(service: RemoteDesktopService) {
 }
 
 async function processService(adapter: ProcessAdapter) {
-  const f = await fixture();
-  await f.service.close();
+  const f = await fixture({ initializeService: false });
   const service = new RemoteDesktopService({ ...f.service.cfg, processAdapter: adapter });
   await service.initialize();
   return { f, service, api: await mcp(service) };

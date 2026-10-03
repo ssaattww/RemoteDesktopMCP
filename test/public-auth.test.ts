@@ -361,7 +361,7 @@ test("REMOTE-NR-001: a v1 state with one approved subject and no refresh records
 });
 
 test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, REMOTE-NR-008, and IFR001/P2: loopback HTTP flow reaches actual protected MCP tools", async () => {
-  const f = await fixture();
+  const f = await fixture({ initializeService: false });
   let server: ReturnType<ReturnType<typeof createApp>["listen"]> | undefined;
   let client: Client | undefined;
   let publicService: RemoteDesktopService | undefined;
@@ -369,7 +369,6 @@ test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, REMOTE-NR-008, a
   let stateLoads = 0;
   let state: OAuthState = { version: 1, epoch: 1, allowedSubjects: [subject], refreshes: [], families: {} };
   try {
-    await f.service.close();
     publicService = new RemoteDesktopService({
       ...f.service.cfg, baseUrl, users: [], authMode: "google",
       publicAuth: { baseUrl, tokenSecret: sentinel, dataDir: f.data, googleClientId: "google-client", googleClientSecret: sentinel, googleRedirectUri: `${baseUrl}/google/callback` },

@@ -6,9 +6,9 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { hashPassword } from "../src/hash-password.js";
 import { RemoteDesktopService, configFromEnv, createApp, type RuntimeConfig } from "../src/index.js";
 import { protectPrivateDirectory } from "../src/private-storage.js";
+import { FIXTURE_PASSWORD_HASH } from "./fixture.js";
 
 async function fixture(): Promise<{ service: RemoteDesktopService; root: string; cleanup: () => Promise<void> }> {
   const workspace = path.resolve(process.cwd());
@@ -22,7 +22,7 @@ async function fixture(): Promise<{ service: RemoteDesktopService; root: string;
   const root = path.join(base, "files"); const data = path.join(base, "data");
   await mkdir(root); await mkdir(data);
   await protectPrivateDirectory(data);
-  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
+  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: FIXTURE_PASSWORD_HASH }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
   const service = new RemoteDesktopService(cfg);
   try { await service.initialize(); }
   catch (error) { await service.close().catch(() => undefined); await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined); throw error; }

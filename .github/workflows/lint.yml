@@ -115,16 +115,61 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  windows-scheduler:
+    name: Prepare test assignment (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CI_RUNNER_LABEL: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve workflow metadata
+        shell: pwsh
+        env:
+          CI_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
+          & node scripts/ci-test-scheduler.mjs metadata --root . --output ci-artifacts/workflow-metadata.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare assignment
+        shell: pwsh
+        run: |
+          $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
+          & node scripts/ci-test-scheduler.mjs plan --root . --metadata ci-artifacts/workflow-metadata.json --output ci-artifacts/test-scheduler.json --shard-count 3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload shared assignment
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-scheduler-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ci-artifacts/test-scheduler.json
+          if-no-files-found: error
+          retention-days: 1
+
   windows:
     name: Check, build, and test (Windows shard ${{ matrix.shard }}/3)
     runs-on: windows-latest
     timeout-minutes: 15
+    needs: windows-scheduler
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
     env:
-      TEST_SHARD: ${{ matrix.shard }}
+      CI_RUNNER_LABEL: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -138,8 +183,16 @@ jobs:
       - name: Prepare diagnostics
         shell: pwsh
         run: |
+          $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
           'check=not_run', 'build=not_run', 'test=not_run' | Set-Content ci-artifacts/test-results.txt
+
+      - name: Download shared assignment
+        uses: actions/download-artifact@v4
+        with:
+          name: test-scheduler-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ci-artifacts
 
       - name: Install dependencies
         shell: pwsh
@@ -179,12 +232,27 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $testFiles = @(Get-ChildItem -Path test -Recurse -File -Filter '*.test.ts' | Sort-Object FullName | ForEach-Object { $_.FullName })
-          if ($testFiles.Count -eq 0) { throw 'No test/**/*.test.ts files were discovered.' }
-          & node --import tsx --test "--test-shard=$env:TEST_SHARD/3" $testFiles 1> ci-artifacts/test.stdout.log 2> ci-artifacts/test.stderr.log
+          $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dispatchJson = & node scripts/ci-test-scheduler.mjs dispatch --root . --plan ci-artifacts/test-scheduler.json --shard-id '${{ matrix.shard }}' --shard-count 3
+          $status = $LASTEXITCODE
+          if ($status -ne 0) {
+            "test_exit_code=$status" | Add-Content ci-artifacts/test-results.txt
+            "command=node scripts/ci-test-scheduler.mjs dispatch`nexit_code=$status" | Set-Content ci-artifacts/test.result.txt
+            exit $status
+          }
+          $dispatch = $dispatchJson | ConvertFrom-Json
+          $testFiles = @($dispatch.files)
+          if ($testFiles.Count -eq 0) {
+            "test_exit_code=0`nempty_shard=true" | Add-Content ci-artifacts/test-results.txt
+            "command=skipped empty shard`nfiles=0`nexit_code=0" | Set-Content ci-artifacts/test.result.txt
+            exit 0
+          }
+          $testArgs = @('--import', 'tsx', '--test') + $testFiles
+          & node @testArgs 1> ci-artifacts/test.stdout.log 2> ci-artifacts/test.stderr.log
           $status = $LASTEXITCODE
           "test_exit_code=$status" | Add-Content ci-artifacts/test-results.txt
-          "command=node --import tsx --test --test-shard=$env:TEST_SHARD/3 test/**/*.test.ts`nfiles=$($testFiles.Count)`nexit_code=$status" | Set-Content ci-artifacts/test.result.txt
+          "command=node --import tsx --test explicit-assignment-files`nshard=${{ matrix.shard }}`nfiles=$($testFiles.Count)`nexit_code=$status" | Set-Content ci-artifacts/test.result.txt
           Get-Content ci-artifacts/test.stdout.log
           Get-Content ci-artifacts/test.stderr.log | ForEach-Object { [Console]::Error.WriteLine($_) }
           exit $status
