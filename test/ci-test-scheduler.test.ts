@@ -205,18 +205,28 @@ test("measurement child process cannot inherit credentials and keeps safe run me
   assert.deepEqual(JSON.parse(probe.stdout), { hasToken: false, runId: "7" });
 });
 
-test("measurement gate skips only a completed successful run for the exact PR head", async () => {
+test("measurement gate skips only a completed run with a successful measurement step and live artifact", async () => {
   const headSha = "a".repeat(40);
-  const runs = [
-    { event: "pull_request", head_sha: headSha, status: "completed", conclusion: "success", pull_requests: [{ number: 41 }] },
-    { event: "workflow_dispatch", head_sha: headSha, status: "completed", conclusion: "success", pull_requests: [{ number: 42 }] },
-    { event: "pull_request", head_sha: "b".repeat(40), status: "completed", conclusion: "success", pull_requests: [{ number: 42 }] },
-    { event: "pull_request", head_sha: headSha, status: "in_progress", conclusion: null, pull_requests: [{ number: 42 }] },
-    { event: "pull_request", head_sha: headSha, status: "completed", conclusion: "failure", pull_requests: [{ number: 42 }] },
-    { event: "pull_request", head_sha: headSha, status: "completed", conclusion: "success", pull_requests: [{ number: 42 }] },
-  ];
-  assert.equal(hasSuccessfulMeasurementRun(runs, { prNumber: 42, headSha }), true);
-  assert.equal(hasSuccessfulMeasurementRun(runs.slice(0, -1), { prNumber: 42, headSha }), false);
+  const validRun = { id: 100, run_attempt: 2, event: "pull_request", head_sha: headSha, status: "completed", conclusion: "success", pull_requests: [{ number: 42 }] };
+  const validJobs = { total_count: 1, jobs: [{ name: "Measure individual Windows tests", status: "completed", conclusion: "success", steps: [
+    { name: "Measure each tracked test file", status: "completed", conclusion: "success" },
+    { name: "Upload measurement evidence", status: "completed", conclusion: "success" },
+  ] }] };
+  const validArtifacts = { total_count: 1, artifacts: [{ name: "test-runtime-measurement-100-2-merge-sha", expired: false }] };
+  assert.equal(hasSuccessfulMeasurementRun(validRun, { prNumber: 42, headSha }, validJobs, validArtifacts), true);
+  assert.equal(hasSuccessfulMeasurementRun(validRun, { prNumber: 41, headSha }, validJobs, validArtifacts), false);
+  assert.equal(hasSuccessfulMeasurementRun({ ...validRun, event: "workflow_dispatch" }, { prNumber: 42, headSha }, validJobs, validArtifacts), false);
+  assert.equal(hasSuccessfulMeasurementRun({ ...validRun, head_sha: "b".repeat(40) }, { prNumber: 42, headSha }, validJobs, validArtifacts), false);
+  assert.equal(hasSuccessfulMeasurementRun({ ...validRun, status: "in_progress" }, { prNumber: 42, headSha }, validJobs, validArtifacts), false);
+  assert.equal(hasSuccessfulMeasurementRun({ ...validRun, conclusion: "failure" }, { prNumber: 42, headSha }, validJobs, validArtifacts), false);
+
+  // A successful workflow with the measurement job skipped must be measured, not deduplicated.
+  const skippedMeasurement = { total_count: 1, jobs: [{ ...validJobs.jobs[0], conclusion: "success", steps: [
+    { name: "Measure each tracked test file", status: "completed", conclusion: "skipped" },
+    { name: "Upload measurement evidence", status: "completed", conclusion: "skipped" },
+  ] }] };
+  assert.equal(hasSuccessfulMeasurementRun(validRun, { prNumber: 42, headSha }, skippedMeasurement, { total_count: 0, artifacts: [] }), false);
+  assert.equal(hasSuccessfulMeasurementRun(validRun, { prNumber: 42, headSha }, validJobs, { total_count: 1, artifacts: [{ ...validArtifacts.artifacts[0], expired: true }] }), false);
 
   const root = await mkdtemp(path.join(os.tmpdir(), "ci-measurement-gate-"));
   try {
@@ -224,22 +234,51 @@ test("measurement gate skips only a completed successful run for the exact PR he
     await writeFile(eventPath, JSON.stringify({ pull_request: {
       number: 42, head: { sha: headSha, repo: { full_name: "ssaattww/RemoteDesktopMCP" } },
     } }));
-    let requestUrl: URL | undefined;
-    let requestHeaders: Record<string, string> | undefined;
-    const skip = await shouldSkipMeasurement({
+    const gateEnvironment = {
       GITHUB_REPOSITORY: "ssaattww/RemoteDesktopMCP",
       GITHUB_EVENT_PATH: eventPath,
       CI_GITHUB_TOKEN: "synthetic-read-token",
-    }, async (input, init) => {
-      requestUrl = new URL(String(input));
+    };
+    const requests: Array<{ url: URL; headers: Record<string, string> }> = [];
+    let requestHeaders: Record<string, string> | undefined;
+    const skip = await shouldSkipMeasurement(gateEnvironment, async (input, init) => {
+      const url = new URL(String(input));
       requestHeaders = init?.headers as Record<string, string>;
-      return { ok: true, json: async () => ({ total_count: runs.length, workflow_runs: runs }) } as Response;
+      requests.push({ url, headers: requestHeaders });
+      if (url.pathname.endsWith("/actions/workflows/test-runtime-measurement.yml/runs")) {
+        return { ok: true, json: async () => ({ total_count: 1, workflow_runs: [validRun] }) } as Response;
+      }
+      if (url.pathname.endsWith("/actions/runs/100/jobs")) return { ok: true, json: async () => validJobs } as Response;
+      if (url.pathname.endsWith("/actions/runs/100/artifacts")) return { ok: true, json: async () => validArtifacts } as Response;
+      throw new Error(`Unexpected request: ${url}`);
     });
     assert.equal(skip, true);
-    assert.match(requestUrl?.pathname ?? "", /actions\/workflows\/test-runtime-measurement\.yml\/runs$/);
-    assert.equal(requestUrl?.searchParams.get("event"), "pull_request");
-    assert.equal(requestUrl?.searchParams.get("head_sha"), headSha);
+    assert.match(requests[0]?.url.pathname ?? "", /actions\/workflows\/test-runtime-measurement\.yml\/runs$/);
+    assert.equal(requests[0]?.url.searchParams.get("event"), "pull_request");
+    assert.equal(requests[0]?.url.searchParams.get("head_sha"), headSha);
     assert.equal(requestHeaders?.Authorization, "Bearer synthetic-read-token");
+    assert.deepEqual(requests.map(({ url }) => url.pathname).sort(), [
+      "/repos/ssaattww/RemoteDesktopMCP/actions/workflows/test-runtime-measurement.yml/runs",
+      "/repos/ssaattww/RemoteDesktopMCP/actions/runs/100/jobs",
+      "/repos/ssaattww/RemoteDesktopMCP/actions/runs/100/artifacts",
+    ].sort());
+
+    await assert.rejects(shouldSkipMeasurement(gateEnvironment, async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/actions/workflows/test-runtime-measurement.yml/runs")) {
+        return { ok: true, json: async () => ({ total_count: 1, workflow_runs: [validRun] }) } as Response;
+      }
+      return { ok: false, status: 403 } as Response;
+    }), /Measurement jobs request failed with HTTP 403/);
+
+    let pageCount = 0;
+    await assert.rejects(shouldSkipMeasurement(gateEnvironment, async (input) => {
+      pageCount = Number(new URL(String(input)).searchParams.get("page"));
+      return { ok: true, json: async () => ({ total_count: 1001, workflow_runs: Array.from({ length: 100 }, (_, index) => ({
+        event: "pull_request", head_sha: "b".repeat(40), status: "completed", conclusion: "success", pull_requests: [{ number: index + 1 }],
+      })) }) } as Response;
+    }), /Measurement history exceeds the guarded page limit/);
+    assert.equal(pageCount, 10);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
