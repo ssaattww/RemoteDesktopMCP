@@ -9,7 +9,7 @@
 
 - Repository: `ssaattww/RemoteDesktopMCP`
 - Branch: `design/issue48-session-edit`
-- PR: https://github.com/ssaattww/RemoteDesktopMCP/pull/54 (must remain Draft and unmerged)
+- PR: [#54](https://github.com/ssaattww/RemoteDesktopMCP/pull/54) (must remain Draft and unmerged)
 - Main merge target: `bfe3793309e09acdd180ffe22a4e4a81e87fc668`
 - Pre-integration PR54 head: `ca2d50d10df5778f0f5b07b5716f6f99b587d8bf`
 - Latest PR52 session-link source inspected: `b03c72b8d9772805c766aada607f016801539402`
