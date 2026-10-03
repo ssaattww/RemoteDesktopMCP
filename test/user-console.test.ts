@@ -137,6 +137,7 @@ test("user console lists each active connection's working directory and purpose 
     const html = await (await fetch(`${base}/user`, { headers: { cookie: `rdmcp_user=${token}` } })).text();
     assert.match(html, new RegExp(String(own.session_id)));
     assert.match(html, /id="auto-refresh"/);
+    assert.match(html, /自動更新を停止中は新しい情報を自動反映しません。手動更新（↻ 更新）を使用してください。/, "the paused toggle explains that automatic reflection stops and manual refresh remains available");
     assert.match(html, /Build &lt;safe&gt; feature/);
     assert.match(html, /作業ディレクトリ/);
     assert.match(html, /セッション一覧/);

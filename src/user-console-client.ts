@@ -80,6 +80,7 @@ function clientBootstrap(): void {
   let autoPending = false;
   let manualPending = false;
   let noticeGeneration = 0;
+  let stateRequestGeneration = 0;
   let statePending = false;
   let resyncPending = false;
   let pageHidden = document.hidden;
@@ -477,12 +478,13 @@ function clientBootstrap(): void {
         else if (completed) autoPending = true;
       }
       if (needsState) {
+        const stateRequest = ++stateRequestGeneration;
         const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
-        if (!current()) return;
+        if (!current() || stateRequest !== stateRequestGeneration) return;
         if (isAuthenticationFailure(response)) return;
         if (!response.ok) throw new Error("state request failed");
         const state = await response.json();
-        if (!current()) return;
+        if (!current() || stateRequest !== stateRequestGeneration) return;
         statePending = false;
         await refreshStateFrom(state);
         if (!current()) return;
@@ -570,6 +572,19 @@ function clientBootstrap(): void {
         const focusedElement = document.activeElement as HTMLElement | null;
         const focusedRow = focusedElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null;
         const focusedSessionId = focusedRow?.dataset.sessionId;
+        const selection = window.getSelection();
+        const selectionRow = selection && !selection.isCollapsed ? (selection.anchorNode as Node | null)?.parentElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null : null;
+        const selectionFocusRow = selection && !selection.isCollapsed ? (selection.focusNode as Node | null)?.parentElement?.closest("tr[data-session-id]") as HTMLTableRowElement | null : null;
+        const textOffset = (row: HTMLTableRowElement, node: Node, offset: number) => {
+          const range = document.createRange(); range.selectNodeContents(row); range.setEnd(node, offset); return range.toString().length;
+        };
+        const savedSelection = selection && selectionRow && selectionFocusRow === selectionRow && sessionRows.contains(selection.anchorNode) && sessionRows.contains(selection.focusNode)
+          ? { sessionId: selectionRow.dataset.sessionId ?? "", anchor: textOffset(selectionRow, selection.anchorNode!, selection.anchorOffset), focus: textOffset(selectionRow, selection.focusNode!, selection.focusOffset) }
+          : undefined;
+        const visibleRows = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")];
+        const anchorRow = visibleRows.find((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > 0 && rect.top < window.innerHeight; });
+        const scrollAnchor = anchorRow ? { sessionId: anchorRow.dataset.sessionId ?? "", top: anchorRow.getBoundingClientRect().top } : undefined;
+        const priorScrollY = window.scrollY;
         const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
         sessionRows.replaceChildren();
         if (!visibleSessions.length) {
@@ -589,7 +604,35 @@ function clientBootstrap(): void {
         }
         if (focusedSessionId) {
           const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === focusedSessionId);
-          restoredRow?.querySelector("a")?.focus();
+          if (!savedSelection) restoredRow?.querySelector("a")?.focus();
+        }
+        if (savedSelection && selection) {
+          const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === savedSelection.sessionId);
+          if (restoredRow) {
+            const locate = (target: number) => {
+              const walker = document.createTreeWalker(restoredRow, 4);
+              let remaining = target;
+              let text = walker.nextNode();
+              let last: Node | null = null;
+              while (text) {
+                last = text;
+                const length = text.textContent?.length ?? 0;
+                if (remaining <= length) return { node: text, offset: remaining };
+                remaining -= length; text = walker.nextNode();
+              }
+              return last ? { node: last, offset: last.textContent?.length ?? 0 } : undefined;
+            };
+            const anchor = locate(savedSelection.anchor); const focus = locate(savedSelection.focus);
+            if (anchor && focus && selection.setBaseAndExtent) selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+            else if (anchor && focus) { const range = document.createRange(); range.setStart(anchor.node, anchor.offset); range.setEnd(focus.node, focus.offset); selection.removeAllRanges(); selection.addRange(range); }
+          }
+        }
+        const restoredAnchor = scrollAnchor && [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === scrollAnchor.sessionId);
+        if (restoredAnchor) {
+          const delta = restoredAnchor.getBoundingClientRect().top - scrollAnchor.top;
+          if (delta) window.scrollBy(0, delta);
+        } else if (window.scrollY !== priorScrollY) {
+          window.scrollTo(window.scrollX, priorScrollY);
         }
       }
       const runningRows = document.getElementById("running-rows") as HTMLTableSectionElement | null;
@@ -623,12 +666,13 @@ function clientBootstrap(): void {
   const refreshState = async () => {
     if (!readsAllowed()) return;
     const screenGeneration = pageGeneration;
+    const stateRequest = ++stateRequestGeneration;
     try {
       const response = await fetch(apiPath("/api/console-state"), { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (isAuthenticationFailure(response)) return;
-      if (!response.ok || !readsAllowed() || screenGeneration !== pageGeneration) return;
+      if (!response.ok || !readsAllowed() || screenGeneration !== pageGeneration || stateRequest !== stateRequestGeneration) return;
       const state = await response.json();
-      if (!readsAllowed() || screenGeneration !== pageGeneration) return;
+      if (!readsAllowed() || screenGeneration !== pageGeneration || stateRequest !== stateRequestGeneration) return;
       await refreshStateFrom(state);
     } catch { /* Keep the last successful state visible. */ }
   };

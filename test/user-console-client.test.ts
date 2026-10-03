@@ -26,6 +26,7 @@ class FakeElement {
   href = "";
   colSpan = 1;
   children: FakeElement[] = [];
+  parentElement: FakeElement | null = null;
   listeners = new Map<string, (event?: unknown) => void>();
   queries = new Map<string, FakeElement>();
   closestNodes = new Map<string, FakeElement>();
@@ -35,15 +36,16 @@ class FakeElement {
   checked = false;
   addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
   click(name = "click") { this.listeners.get(name)?.({ target: this }); }
-  replaceChildren(...children: FakeElement[]) { this.children = children; }
-  append(child: FakeElement) { this.children.push(child); }
-  insertRow() { const row = new FakeElement("tr"); this.children.push(row); return row; }
-  insertCell() { const cell = new FakeElement("td"); this.children.push(cell); return cell; }
+  replaceChildren(...children: FakeElement[]) { this.children = children; for (const child of children) child.parentElement = this; }
+  append(child: FakeElement) { this.children.push(child); child.parentElement = this; }
+  insertRow() { const row = new FakeElement("tr"); this.append(row); return row; }
+  insertCell() { const cell = new FakeElement("td"); this.append(cell); return cell; }
   querySelectorAll<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return [override] as T[];
     if (selector.startsWith(".process-block")) return this.children.filter((child) => child.className === "process-block" && (!selector.includes("data-events-json") || child.dataset.eventsJson !== undefined)) as T[];
     if (selector.startsWith("tr[data-event-json]")) return this.children.filter((child) => child.tagName === "tr" && child.dataset.eventJson !== undefined) as T[];
+    if (selector === "tr[data-session-id]") return this.children.filter((child) => child.tagName === "tr" && child.dataset.sessionId !== undefined) as T[];
     return [] as T[];
   }
   querySelector<T extends FakeElement>(selector: string) {
@@ -54,7 +56,8 @@ class FakeElement {
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     return null;
   }
-  closest<T extends FakeElement>(selector: string) { return (this.closestNodes.get(selector) ?? null) as T | null; }
+  closest<T extends FakeElement>(selector: string) { let current: FakeElement | null = this; while (current) { if (selector === "tr[data-session-id]" && current.tagName === "tr" && current.dataset.sessionId !== undefined) return current as T; if (current.closestNodes.has(selector)) return current.closestNodes.get(selector) as T; current = current.parentElement; } return null; }
+  contains(node: FakeElement | null) { let current = node; while (current) { if (current === this) return true; current = current.parentElement; } return false; }
   getBoundingClientRect() { return this.rect; }
 }
 
@@ -104,7 +107,7 @@ function response(status: number, body: unknown) {
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
-function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean } = {}) {
+function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; setBaseAndExtent: (...args: unknown[]) => void; removeAllRanges: () => void; addRange: () => void } } = {}) {
   FakeEventSource.instances = [];
   const root = new FakeElement(); root.dataset = { sessionId, newestCursor: initialItems[0]?.cursor ?? "c0", oldestCursor: initialItems.at(-1)?.cursor ?? "c-older", hasMoreOlder: String(initialItems.length > 0), initialItems: JSON.stringify(initialItems) };
   const status = new FakeElement();
@@ -113,9 +116,9 @@ function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType
   const elements = new Map<string, FakeElement>([["log-console", root], ["log-status", status], ["log-new-button", newest], ["log-older-button", older], ...Object.entries(extras)]);
   const scrollY = 0; let scrollCalls = 0;
   const windowListeners = new Map<string, (event?: unknown) => void>();
-  const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: (name: string, listener: (event?: unknown) => void) => windowListeners.set(name, listener), scrollTo: () => { scrollCalls += 1; }, getSelection: () => ({ toString: () => "" }) };
+  const windowStub = { scrollY, scrollX: 0, innerHeight: 600, addEventListener: (name: string, listener: (event?: unknown) => void) => windowListeners.set(name, listener), scrollTo: () => { scrollCalls += 1; }, scrollBy: () => { scrollCalls += 1; }, getSelection: () => options.selection ?? ({ toString: () => "", isCollapsed: true }) };
   const documentListeners = new Map<string, (event?: unknown) => void>();
-  const documentStub = { hidden: options.hidden ?? false, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
+  const documentStub = { hidden: options.hidden ?? false, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), createRange: () => { let endpoint: FakeElement | null = null; let offset = 0; return { selectNodeContents: () => undefined, setEnd: (node: FakeElement, at: number) => { endpoint = node; offset = at; }, setStart: () => undefined, toString: () => "x".repeat(offset), } as unknown as Range; }, createTreeWalker: (rootNode: FakeElement) => { const nodes: FakeElement[] = []; const visit = (element: FakeElement) => { if (element.textContent) { const textNode = new FakeElement("#text"); textNode.textContent = element.textContent; textNode.parentElement = element; nodes.push(textNode); } for (const child of element.children) visit(child); }; for (const child of rootNode.children) visit(child); let index = 0; return { nextNode: () => nodes[index++] ?? null }; }, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
   const clock = options.clock;
   const ClockDate = clock ? class extends Date { constructor(value?: string | number) { super(value ?? clock.now); } static now() { return clock.now; } } : Date;
   runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock ? clock.setTimeout : setTimeout, clearTimeout: clock ? clock.clearTimeout : clearTimeout });
@@ -855,4 +858,44 @@ test("queued manual refresh is discarded after page departure or authentication 
     assert.equal(calls.filter((url) => url.pathname === "/api/logs").length, 1, `${ending} discards queued manual work`);
     assert.equal(ui.root.dataset.newestCursor, "c0");
   }
+});
+
+test("a late initial state response cannot overwrite newer state from an SSE refresh", async () => {
+  const initialState = deferred<unknown>();
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const activeCount = new FakeElement();
+  let stateCalls = 0;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") {
+      stateCalls += 1;
+      if (stateCalls === 1) return { status: 200, ok: true, json: () => initialState.promise };
+      return response(200, { ...emptyState, activeSessions: 5 });
+    }
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "auto-refresh": toggle, "active-session-count": activeCount }, "", { clock: new FakeClock() });
+  await settle();
+  ui.sources[0]!.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c1" }));
+  await settle(); await settle();
+  assert.equal(activeCount.textContent, "5", "the newer automatic snapshot should render first");
+  initialState.resolve({ ...emptyState, activeSessions: 1 });
+  await settle(); await settle();
+  assert.equal(activeCount.textContent, "5", "the older initial response must not roll the page back");
+});
+
+test("session row redraw restores its text selection and visible scroll anchor", async () => {
+  const rows = new FakeElement("tbody");
+  const oldRow = new FakeElement("tr"); oldRow.dataset.sessionId = "session-1"; oldRow.rect = { top: 20, bottom: 40, left: 0, right: 100 };
+  const cell = new FakeElement("td"); const oldText = new FakeElement("#text"); oldText.textContent = "session text"; cell.append(oldText); oldRow.append(cell); rows.append(oldRow);
+  let restored: unknown[] | undefined;
+  const selection = { anchorNode: oldText, focusNode: oldText, anchorOffset: 2, focusOffset: 6, isCollapsed: false, setBaseAndExtent: (...args: unknown[]) => { restored = args; }, removeAllRanges: () => undefined, addRange: () => undefined };
+  const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+    ? response(200, { ...emptyState, sessions: [{ session_id: "session-1", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "test", working_directory: "C:/work" }] })
+    : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+  await settle(); await settle();
+  assert.ok(restored, "the selected text endpoints should be rebound to the recreated row");
+  assert.equal((restored![0] as FakeElement).tagName, "#text");
+  assert.equal(restored![1], 2);
+  assert.equal(restored![3], 1, "the focus endpoint is restored at the same row-relative character offset across cells");
+  assert.equal(ui.scrollCalls, 1, "the same visible session row keeps its viewport position");
 });
