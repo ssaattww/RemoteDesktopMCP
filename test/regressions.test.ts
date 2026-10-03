@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { link, mkdir, readFile, readdir, rename, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { once } from "node:events";
@@ -12,6 +12,25 @@ import { absent, captureProtectedConfigPin, fixture, mcp } from "./fixture.js";
 const sha256 = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const old = () => Date.now() - 31 * 60_000;
 const configFile = (data: string) => path.join(data, "desktop-commander-home", ".claude-server-commander", "config.json");
+const prepareAuditTestCommander = async ({ base, data }: { base: string; data: string }) => {
+  const stub = path.join(base, "audit-test-desktop-commander.mjs");
+  await writeFile(stub, `
+import { readFile } from "node:fs/promises";
+import readline from "node:readline";
+const names = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") reply(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "audit-test-stub", version: "1" } });
+  else if (request.method === "tools/list") reply(request.id, { tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
+  else if (request.method === "tools/call") {
+    const text = request.params.name === "get_config" ? await readFile(${JSON.stringify(configFile(data))}, "utf8") : "{}";
+    reply(request.id, { content: [{ type: "text", text }] });
+  }
+}
+`);
+  return { dcCommand: process.execPath, dcArgs: [stub], dcManagedConfig: false };
+};
 const nodeScriptCommand = (file: string) => process.platform === "win32"
   ? `node "${file.replaceAll("\"", "\"\"")}"`
   : `'${process.execPath.replaceAll("'", "'\\''")}' '${file.replaceAll("'", "'\\''")}'`;
@@ -125,6 +144,15 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
     await writeFile(script, `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(outside)}, 'utf8'))`);
     const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(script), timeout_ms: 10_000 });
     assert.match(String(started.output), /reachable-through-command/, "process_start keeps the server OS user's file access outside configured file roots");
+  } finally { await api.close(); await f.cleanup(); }
+});
+
+test("Issue 13: upload description identifies the single-call path", async () => {
+  const f = await fixture({}, prepareAuditTestCommander);
+  const api = await mcp(f.service);
+  try {
+    const tools = new Map((await api.listTools()).tools.map((tool) => [tool.name, tool.description ?? ""]));
+    assert.match(tools.get("file_transfer_upload_begin") ?? "", /single call/i);
   } finally { await api.close(); await f.cleanup(); }
 });
 
@@ -621,6 +649,49 @@ test("DR001: downloads use one immutable multi-chunk snapshot and clean failed s
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("RDMCP-25-DR-001: lost download chunk responses can be replayed after reconnect", async () => {
+  const f = await fixture();
+  let api = await mcp(f.service);
+  try {
+    const source = path.join(f.root, "replayable-download.bin");
+    const original = Buffer.concat([Buffer.alloc(1024, 0x51), Buffer.alloc(777, 0x52)]);
+    await writeFile(source, original);
+    const session = await openSession(api);
+    const begun = await api.call("file_transfer_download_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "replayable-download.bin",
+    });
+    const id = begun.transfer_id as string;
+
+    await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 0 });
+    await api.close();
+    api = await mcp(f.service);
+
+    const middleStatus = await api.call("file_transfer_status", { session_id: session, transfer_id: id });
+    assert.equal(middleStatus.next_offset, 1024, "executor state may advance even when the response is lost");
+    const replayedFirst = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 0 });
+    assert.deepEqual(Buffer.from(replayedFirst.data as string, "base64"), original.subarray(0, 1024));
+    assert.equal(replayedFirst.next_offset, 1024);
+    assert.equal(replayedFirst.complete, false);
+
+    await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 1024 });
+    await api.close();
+    api = await mcp(f.service);
+
+    const finalStatus = await api.call("file_transfer_status", { session_id: session, transfer_id: id });
+    assert.equal(finalStatus.state, "complete");
+    assert.equal(finalStatus.next_offset, original.length);
+    const replayedFinal = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: id, offset: 1024 });
+    assert.deepEqual(Buffer.from(replayedFinal.data as string, "base64"), original.subarray(1024));
+    assert.equal(replayedFinal.next_offset, original.length);
+    assert.equal(replayedFinal.complete, true);
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
+
 test("DR002: no-replace commit preserves a winner and removes the losing temp", async () => {
   const f = await fixture(); const api = await mcp(f.service);
   try {
@@ -1110,8 +1181,90 @@ test("configuration rejects resolved overlap and traversal aliases", async () =>
   } finally { await f.cleanup(); }
 });
 
+test("Stage A inline download completes through the selected local node", async () => {
+  const f = await fixture({}, async ({ base, data }) => {
+    const stub = path.join(base, "stage-a-desktop-commander-stub.mjs");
+    await writeFile(stub, `
+import { readFile } from "node:fs/promises";
+import readline from "node:readline";
+const names = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
+const configPath = ${JSON.stringify(configFile(data))};
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") reply(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "stage-a-stub", version: "1" } });
+  else if (request.method === "tools/list") reply(request.id, { tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
+  else if (request.method === "tools/call") {
+    const text = request.params.name === "get_config" ? await readFile(configPath, "utf8") : "{}";
+    reply(request.id, { content: [{ type: "text", text }] });
+  }
+}
+`);
+    return { dcCommand: process.execPath, dcArgs: [stub], dcManagedConfig: false };
+  });
+  const api = await mcp(f.service);
+  try {
+    const session = await openSession(api);
+    const bytes = Buffer.from("stage-a-inline-node-contract");
+    await writeFile(path.join(f.root, "stage-a-inline-node.bin"), bytes);
+    const downloaded = await api.call("file_transfer_download_begin", {
+      session_id: session,
+      root_id: "files",
+      relative_path: "stage-a-inline-node.bin",
+      node_id: "local",
+      inline: true,
+    });
+    assert.equal(downloaded.complete, true);
+    assert.deepEqual(Buffer.from(downloaded.data as string, "base64"), bytes);
+    assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: downloaded.transfer_id as string })).state, "complete");
+    const uploadBytes = Buffer.from("stage-a-inline-upload");
+    const uploaded = await api.call("file_transfer_upload_begin", {
+      session_id: session,
+      node_id: "local",
+      root_id: "files",
+      relative_path: "stage-a-inline-upload.bin",
+      size: uploadBytes.length,
+      sha256: sha256(uploadBytes),
+      overwrite: false,
+      data: uploadBytes.toString("base64"),
+    });
+    assert.equal(uploaded.complete, true);
+    assert.deepEqual(await readFile(path.join(f.root, "stage-a-inline-upload.bin")), uploadBytes);
+    assert.equal((await api.call("file_transfer_status", { session_id: session, transfer_id: uploaded.transfer_id as string })).state, "complete");
+
+    const largeBytes = Buffer.alloc(1025, 0x5a);
+    await writeFile(path.join(f.root, "stage-a-chunked-fallback.bin"), largeBytes);
+    const largeDownload = await api.call("file_transfer_download_begin", { session_id: session, node_id: "local", root_id: "files", relative_path: "stage-a-chunked-fallback.bin", inline: true });
+    assert.equal(largeDownload.complete, false);
+    assert.equal(largeDownload.data, undefined);
+    const firstChunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: largeDownload.transfer_id as string, offset: 0 });
+    const secondChunk = await api.call("file_transfer_download_chunk", { session_id: session, transfer_id: largeDownload.transfer_id as string, offset: 1024 });
+    assert.equal(firstChunk.complete, false);
+    assert.equal(secondChunk.complete, true);
+    await assert.rejects(api.call("file_transfer_upload_begin", {
+      session_id: session,
+      node_id: "local",
+      root_id: "files",
+      relative_path: "stage-a-oversized-inline-upload.bin",
+      size: largeBytes.length,
+      sha256: sha256(largeBytes),
+      overwrite: false,
+      data: largeBytes.toString("base64"),
+    }));
+    const auditEvents = (await readFile(path.join(f.data, "audit.jsonl"), "utf8")).split(/\r?\n/).flatMap((line) => {
+      try { return [JSON.parse(line) as { event?: string; transferId?: string }]; } catch { return []; }
+    });
+    for (const transferId of [downloaded.transfer_id, uploaded.transfer_id]) {
+      assert.ok(auditEvents.some((entry) => entry.event === "transfer.complete" && entry.transferId === transferId));
+    }
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
+});
+
 test("REV001: operation correlation ownership only accepts active owned sessions", async () => {
-  const f = await fixture();
+  const f = await fixture({}, prepareAuditTestCommander);
   try {
     await f.service.audit("session.open", { user: "owner@example.test", sessionId: "historical-session" });
     assert.equal(f.service.userOwnsActiveSession("owner@example.test", "historical-session"), false);
@@ -1123,7 +1276,7 @@ test("REV001: operation correlation ownership only accepts active owned sessions
 });
 
 test("REV001: accepted and rejected operations preserve safe correlation contracts", async () => {
-  const f = await fixture();
+  const f = await fixture({}, prepareAuditTestCommander);
   try {
     const api = await mcp(f.service);
     const session = await openSession(api);

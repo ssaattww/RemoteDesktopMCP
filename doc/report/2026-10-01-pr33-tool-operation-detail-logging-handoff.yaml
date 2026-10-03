@@ -132,5 +132,4 @@ publication:
     - Verify PR #33 current HEAD.
     - Verify only the CI run whose headSha matches that final HEAD.
     - Post a concise PR comment with implementation and validation results.
-    - Do not merge.
-
+    - Do not merge.\r\n

@@ -16,6 +16,7 @@
     "benchmark:transfer": "tsx scripts/benchmark-file-transfer.ts",
     "user:hash": "tsx src/hash-password.ts",
     "remote-auth": "tsx src/remote-auth-cli.ts",
+    "node-config": "tsx src/node-config-cli.ts",
     "lint": "npm run lint:ts && npm run lint:md && npm run lint:md:terms:design",
     "lint:ts": "eslint \"src/**/*.ts\"",
     "lint:md": "node scripts/lint-markdown.mjs",

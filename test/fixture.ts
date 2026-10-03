@@ -1,5 +1,5 @@
-import assert from "node:assert/strict";
-import { link, mkdtemp, mkdir, readdir, rm, stat } from "node:fs/promises";
+﻿import assert from "node:assert/strict";
+import { link, mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -8,8 +8,13 @@ import { RemoteDesktopService, type RuntimeConfig } from "../src/index.js";
 import { protectPrivateDirectory } from "../src/private-storage.js";
 
 export type Fixture = { service: RemoteDesktopService; root: string; data: string; base: string; cleanup: () => Promise<void> };
+export type FixtureOptions = { startDesktopCommander?: boolean };
 
-export async function fixture(): Promise<Fixture> {
+export async function fixture(
+  overrides: Partial<RuntimeConfig> = {},
+  prepare?: (paths: Pick<Fixture, "base" | "root" | "data">) => Partial<RuntimeConfig> | Promise<Partial<RuntimeConfig>>,
+  options: FixtureOptions = {},
+): Promise<Fixture> {
   // Node 22 does not keep the test process alive for an in-memory MCP handshake.
   // This referenced timer belongs to the fixture and is always cleared by cleanup.
   const keepAlive = setInterval(() => undefined, 1_000);
@@ -25,6 +30,7 @@ export async function fixture(): Promise<Fixture> {
   const data = path.join(base, "data");
   await Promise.all([mkdir(root), mkdir(data)]);
   await protectPrivateDirectory(data);
+  const prepared = prepare ? await prepare({ base, root, data }) : {};
   const cfg: RuntimeConfig = {
     baseUrl: "http://127.0.0.1",
     tokenSecret: "x".repeat(32),
@@ -34,9 +40,16 @@ export async function fixture(): Promise<Fixture> {
     dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"],
     dcManagedConfig: true,
     allowedRedirectOrigins: new Set(["https://chatgpt.com"]),
+    ...overrides,
+    ...prepared,
   };
+  if (options.startDesktopCommander === false) {
+    const config = path.join(data, "desktop-commander-home", ".claude-server-commander", "config.json");
+    await mkdir(path.dirname(config), { recursive: true, mode: 0o700 });
+    await writeFile(config, JSON.stringify({ allowedDirectories: [root], telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }), { mode: 0o600 });
+  }
   const service = new RemoteDesktopService(cfg);
-  try { await service.initialize(); }
+  try { await service.initialize(options); }
   catch (error) {
     await service.close().catch(() => undefined);
     await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
