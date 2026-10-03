@@ -39,6 +39,11 @@ New RED tests were observed before fixing (a) acceptance of `2620:4f:8000::/48`,
 - Browser rendering was verified through server-generated HTML assertions and client-state unit tests, not by visual inspection in a real browser. A device/browser check remains: open the owner console with (1) a URL plus fetched title, (2) a title without URL, and (3) an invalid/private URL plus manual title; verify links open a new tab with `noopener noreferrer`, while both title-only labels are escaped text without an anchor.
 - Windows-specific behavior is not established by this Linux execution; require exact-HEAD Windows CI evidence.
 
+## End-of-Issue Skill-gap decision
+
+- Decision: no Skill action needed. The existing development, work-context, TDD, report, and review Skills cover this task. The user supplied the Luna/medium override and it was passed in the reviewer spawn; the runtime does not expose the applied model metadata, so the report preserves `spawn_succeeded_profile_unverified`. That is an observability limit, not an observed workflow failure requiring a Skill change.
+- Feedback: no new cross-project process lesson was established for the active ledger. Do not change the Skill repository for this feature.
+
 ## Next action
 
 Complete normal review and fix verification, then independent final review and exact-HEAD PR CI. Keep PR #52 Draft until the lifecycle is complete.
