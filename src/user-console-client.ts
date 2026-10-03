@@ -582,9 +582,14 @@ function clientBootstrap(): void {
           const range = document.createRange(); range.selectNodeContents(cell); range.setEnd(node, offset);
           return { sessionId: row.dataset.sessionId ?? "", cellIndex, cellText: cell.textContent ?? "", offset: range.toString().length };
         };
-        const savedSelection = selection && !selection.isCollapsed && selection.anchorNode && selection.focusNode
-          ? { text: selection.toString(), anchor: selectionPoint(selection.anchorNode, selection.anchorOffset), focus: selectionPoint(selection.focusNode, selection.focusOffset) }
-          : undefined;
+        const savedSelection = (() => {
+          if (!selection || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) return undefined;
+          const anchor = selectionPoint(selection.anchorNode, selection.anchorOffset);
+          const focus = selectionPoint(selection.focusNode, selection.focusOffset);
+          // Only selections wholly owned by session rows are managed during this redraw.
+          if (!anchor || !focus) return undefined;
+          return { text: selection.toString(), anchor, focus };
+        })();
         const visibleRows = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")];
         const anchorRow = visibleRows.find((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > 0 && rect.top < window.innerHeight; });
         const scrollAnchor = anchorRow ? { sessionId: anchorRow.dataset.sessionId ?? "", top: anchorRow.getBoundingClientRect().top } : undefined;
@@ -608,7 +613,7 @@ function clientBootstrap(): void {
         }
         if (focusedSessionId) {
           const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === focusedSessionId);
-          if (!savedSelection) restoredRow?.querySelector("a")?.focus();
+          if (!selection || selection.isCollapsed) restoredRow?.querySelector("a")?.focus();
         }
         if (savedSelection && selection) {
           const locate = (point: NonNullable<typeof savedSelection.anchor>) => {

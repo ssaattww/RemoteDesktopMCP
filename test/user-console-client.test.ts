@@ -989,3 +989,32 @@ test("changed or removed selection targets are cleared instead of moved to diffe
     assert.equal(ui.scrollCalls, 0);
   }
 });
+
+test("selection wholly outside the session list is not touched by list updates", async () => {
+  const rows = new FakeElement("tbody");
+  const outside = new FakeElement("p"); const first = new FakeElement("#text"); first.textContent = "log text"; const second = new FakeElement("#text"); second.textContent = "help text"; outside.append(first); outside.append(second);
+  let restoreCount = 0; let clearCount = 0;
+  const selection = { anchorNode: first, focusNode: second, anchorOffset: 1, focusOffset: 3, isCollapsed: false, toString: () => "og text", setBaseAndExtent: () => { restoreCount += 1; }, removeAllRanges: () => { clearCount += 1; }, addRange: () => undefined };
+  boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+    ? response(200, { ...emptyState, sessions: [{ session_id: "new-session", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "test", working_directory: "C:/work" }] })
+    : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+  await settle(); await settle();
+  assert.equal(restoreCount, 0);
+  assert.equal(clearCount, 0, "a selection outside the session rows must never be cleared by their redraw");
+  assert.equal(selection.toString(), "og text");
+});
+
+test("a selection with only one endpoint in the session list is not reset", async () => {
+  const rows = new FakeElement("tbody"); const row = new FakeElement("tr"); row.dataset.sessionId = "session-half";
+  for (const value of ["link", "date", "access", "active", "purpose", "session-half", "directory"]) { const cell = new FakeElement("td"); cell.textContent = value; const text = new FakeElement("#text"); text.textContent = value; cell.append(text); row.append(cell); }
+  rows.append(row);
+  const outside = new FakeElement("p"); const outsideText = new FakeElement("#text"); outsideText.textContent = "external"; outside.append(outsideText);
+  const insideText = row.cells[5]!.children[0]!; let restoreCount = 0; let clearCount = 0;
+  const selection = { anchorNode: outsideText, focusNode: insideText, anchorOffset: 2, focusOffset: 4, isCollapsed: false, toString: () => "ternal session", setBaseAndExtent: () => { restoreCount += 1; }, removeAllRanges: () => { clearCount += 1; }, addRange: () => undefined };
+  boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+    ? response(200, { ...emptyState, sessions: [{ session_id: "session-half", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, purpose: "purpose", working_directory: "directory" }] })
+    : response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false }), [], { "session-rows": rows }, "", { selection });
+  await settle(); await settle();
+  assert.equal(restoreCount, 0, "a selection crossing the list boundary is not partially rebound");
+  assert.equal(clearCount, 0, "a selection crossing the list boundary is not explicitly cleared");
+});
