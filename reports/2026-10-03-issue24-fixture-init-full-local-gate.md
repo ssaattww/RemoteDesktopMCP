@@ -3,6 +3,7 @@
 ## タスク
 
 - 目的: R24-02の通常review後、repository-defined Ubuntu local gate全体を最終candidate codeで一度実行する。
+- 文書だけのnormal-report commit後にも同じfull gateを再実行し、最終候補HEAD `f0f93f9b6220eef8136fa437b30fb753b64c203d` で成功した。
 - タスク種別: verification / build and test execution
 - 対象HEAD: `44c8bc2c8d660cd4129ae38be97fec7240579ce0`
 - 対象ブランチ: `issue-24-runtime-reduction-followup`
@@ -46,6 +47,7 @@
   3. `npm_config_cache=/tmp/remote-desktop-mcp-npm-cache npm run build` — exit `0`; stdout: `tsc -p tsconfig.json`; stderr empty.
   4. `npm_config_cache=/tmp/remote-desktop-mcp-npm-cache npm test` — exit `0`; stdout TAP summary: tests `134`, suites `0`, pass `123`, fail `0`, cancelled `0`, skipped `11`, todo `0`, duration `126918.181087 ms`; stderr empty. No name filters used.
 - Separate diagnostics: `/tmp/issue24-fullgate-lint.stdout`, `/tmp/issue24-fullgate-lint.stderr`, `/tmp/issue24-fullgate-check.stdout`, `/tmp/issue24-fullgate-check.stderr`, `/tmp/issue24-fullgate-build.stdout`, `/tmp/issue24-fullgate-build.stderr`, `/tmp/issue24-fullgate-test.stdout`, `/tmp/issue24-fullgate-test.stderr`.
+- Final publication-candidate rerun at `f0f93f9b6220eef8136fa437b30fb753b64c203d`: `npm_config_cache=/tmp/remote-desktop-mcp-npm-cache npm run lint && npm_config_cache=/tmp/remote-desktop-mcp-npm-cache npm run check && npm_config_cache=/tmp/remote-desktop-mcp-npm-cache npm run build && npm_config_cache=/tmp/remote-desktop-mcp-npm-cache npm test` — exit `0`; lint/check/build each passed; TAP tests `134`, pass `123`, fail `0`, cancelled `0`, skipped `11`, todo `0`, duration `121271.317862 ms`. The execution transcript retained the command output; the 11 skips remain platform-conditioned Windows tests.
 - Final docs-only validation after parent tracking/report updates: `npm_config_cache=/tmp/remote-desktop-mcp-npm-cache npm run lint:md`; branch `issue-24-runtime-reduction-followup`; HEAD `44c8bc2c8d660cd4129ae38be97fec7240579ce0`; requested diff fingerprint (`git diff --binary HEAD -- test/regressions.test.ts tasks/tasks-status.md tasks/phases-status.md | sha256sum`) `b97e03f3b7280e44f0c1e88d9615e971275d77f31072f1375f0010489e3f6e83`.
 - Exit code `0`; markdownlint reported `90 file(s), 0 issue(s)`. stdout also contained the npm script banner (`node scripts/lint-markdown.mjs`); stderr empty.
 - Captures: `/tmp/issue24-fullgate-final-mdlint.stdout`, `/tmp/issue24-fullgate-final-mdlint.stderr`.
