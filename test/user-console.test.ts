@@ -425,24 +425,45 @@ test("Issue 48: session metadata edits require owner and CSRF, compare versions,
 test("Issue 48: emergency stop is accepted while a session working directory is being validated", async () => {
   const f = await fixture();
   const owner = await mcp(f.service);
+  let releasePathCheck!: (value: string) => void;
+  let releaseStopMarker!: () => void;
+  let stop: Promise<unknown> | undefined;
+  let update: Promise<unknown> | undefined;
+  let stopMarkerWasEntered = false;
+  let enterPathCheck!: () => void;
+  const pathCheckEntered = new Promise<void>((resolve) => { enterPathCheck = resolve; });
+  const delayedPathCheck = new Promise<string>((resolve) => { releasePathCheck = resolve; });
+  const delayedStopMarker = new Promise<void>((resolve) => { releaseStopMarker = resolve; });
   try {
     const opened = await owner.call("session_open", { working_directory: f.root, purpose: "Delayed path validation" });
-    let entered!: () => void;
-    let release!: (value: string) => void;
-    const pathCheckEntered = new Promise<void>((resolve) => { entered = resolve; });
-    const delayedPathCheck = new Promise<string>((resolve) => { release = resolve; });
-    const service = f.service as unknown as { resolveSessionWorkingDirectory: (path: string) => Promise<string | undefined> };
-    service.resolveSessionWorkingDirectory = async () => { entered(); return delayedPathCheck; };
-    const update = f.service.updateSessionMetadata("owner@example.test", String(opened.session_id), { expectedVersion: 1, workingDirectory: f.base });
+    const service = f.service as unknown as {
+      resolveSessionWorkingDirectory: (path: string) => Promise<string | undefined>;
+      writeExecutionStopMarker: (state: unknown) => Promise<void>;
+    };
+    service.resolveSessionWorkingDirectory = async () => { enterPathCheck(); return delayedPathCheck; };
+    update = f.service.updateSessionMetadata("owner@example.test", String(opened.session_id), { expectedVersion: 1, workingDirectory: f.base });
     await pathCheckEntered;
-    let stopFinished = false;
-    const stop = f.service.stopUserExecution("owner@example.test").then((state) => { stopFinished = true; return state; });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(stopFinished, true, "stop state must not wait for filesystem path validation");
-    release(f.base);
-    assert.deepEqual(await update, { ok: false, status: 404, error: "session_unavailable" });
-    assert.equal((await stop).stopped, true);
-  } finally { await owner.close().catch(() => undefined); await f.cleanup(); }
+    const writeStopMarker = service.writeExecutionStopMarker.bind(f.service);
+    service.writeExecutionStopMarker = async (state) => {
+      stopMarkerWasEntered = true;
+      await delayedStopMarker;
+      await writeStopMarker(state);
+    };
+    stop = f.service.stopUserExecution("owner@example.test");
+    await Promise.resolve();
+    assert.equal(f.service.userExecutionState("owner@example.test").stopped, true, "stop must latch before persistence while path validation is still pending");
+    assert.equal(stopMarkerWasEntered, true, "stop must reach persistence while path validation is still pending");
+    releaseStopMarker();
+    assert.equal((await stop as { stopped: boolean }).stopped, true);
+    releasePathCheck(f.base);
+    assert.deepEqual(await update as { ok: boolean; status: number; error: string }, { ok: false, status: 404, error: "session_unavailable" });
+  } finally {
+    releaseStopMarker();
+    releasePathCheck(f.base);
+    await Promise.allSettled([...(stop ? [stop] : []), ...(update ? [update] : [])]);
+    await owner.close().catch(() => undefined);
+    await f.cleanup();
+  }
 });
 
 test("session edit and process start use one ordering boundary and preserve each start snapshot", async () => {
