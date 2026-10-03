@@ -15,6 +15,10 @@ export const SUPPORTED_LABELS = Object.freeze([
   ...SUPPORTED_VALUES.priority.map((value) => `priority:${value}`),
   ...SUPPORTED_VALUES.status.map((value) => `status:${value}`),
 ]);
+const SUPPORTED_LABEL_COLORS = Object.freeze([
+  "f85149", "d29922", "e3b341", "3fb950",
+  "8b949e", "58a6ff", "bc8cff", "d29922", "f85149", "3fb950",
+]);
 
 const FIELD_LABELS = Object.freeze({
   priority: new Map(SUPPORTED_VALUES.priority.map((value) => [`priority:${value}`, value])),
@@ -173,24 +177,39 @@ export function recoverPendingOperation(pending, current, timeline = []) {
     const nowProject = current.project;
     const fieldChanged = nowProject?.valueId !== beforeProject?.valueId
       || nowProject?.updatedAt !== beforeProject?.updatedAt;
-    const projectWriteObserved = nowProject?.value === pending.intent.projectValue && isTimestamp(nowProject.updatedAt) && fieldChanged;
+    const mutation = pending.intent.projectMutation;
+    const hasRecordedProjectWrite = isPlainObject(pending.resultProject)
+      && (pending.resultProject.valueId ?? null) === (nowProject?.valueId ?? null)
+      && (pending.resultProject.updatedAt ?? null) === (nowProject?.updatedAt ?? null);
+    const projectWriteObserved = mutation?.operation === "clear"
+      ? nowProject?.value === null && fieldChanged && hasRecordedProjectWrite
+      : mutation?.operation === "set"
+        ? nowProject?.value === pending.intent.projectValue && isTimestamp(nowProject.updatedAt) && fieldChanged
+          && (!pending.resultProject || hasRecordedProjectWrite)
+        : mutation === null
+          ? nowProject?.value === pending.intent.projectValue && !projectObservationChanged(beforeProject, nowProject)
+          : mutation === undefined
+            ? (pending.intent.projectValue === undefined
+              ? !projectObservationChanged(beforeProject, nowProject)
+              : nowProject?.value === pending.intent.projectValue && isTimestamp(nowProject.updatedAt) && fieldChanged)
+          : false;
     const plannedLabelMutations = pending.intent.labelMutations ?? { add: [], remove: [] };
     const hasLabelMutations = plannedLabelMutations.add.length > 0 || plannedLabelMutations.remove.length > 0;
     let labelsRecovered = !hasLabelMutations;
+    let issueAtResult = null;
+    let labelsAtResult = null;
     if (hasLabelMutations) {
-      const mapping = getFieldLabels(field);
-      const events = orderTimeline(timeline.map((entry, index) => normalizeTimelineEntry(entry, index)))
-        .filter((entry) => mapping.has(entry.label) && ["labeled", "unlabeled"].includes(entry.type)
-          && !(isTimestamp(pending.startedAt) && isTimestamp(entry.createdAt) && Date.parse(entry.createdAt) < Date.parse(pending.startedAt)));
-      const allEventsAreOurs = events.every((entry) => isAutomationActor(entry.actor));
-      const expectedOperations = [
-        ...plannedLabelMutations.remove.map((label) => ({ type: "unlabeled", label })),
-        ...plannedLabelMutations.add.map((label) => ({ type: "labeled", label })),
-      ];
-      const seenOperations = events.map((entry) => `${entry.type}:${entry.label}`);
-      const allOperationsObserved = expectedOperations.every(({ type, label }) => seenOperations.includes(`${type}:${label}`));
-      const expectedLabels = [...pending.intent.issueLabels].sort();
-      labelsRecovered = allEventsAreOurs && allOperationsObserved && sameStringArray(current.issue.labels, expectedLabels);
+      const classified = classifyPendingLabelEvents(pending, timeline, plannedLabelMutations);
+      const allOperationsObserved = classified.valid && classified.ownEvents.length === plannedLabelMutations.remove.length + plannedLabelMutations.add.length;
+      const lastOwn = classified.ownEvents.at(-1);
+      const noHumanBeforeCompletion = !lastOwn || !classified.foreignEvents.some((entry) => entry.order <= lastOwn.order);
+      labelsRecovered = allOperationsObserved && noHumanBeforeCompletion;
+      if (labelsRecovered && lastOwn) {
+        labelsAtResult = activeLabelsAtResult(pending.before.labels ?? [], classified.ownEvents, classified.ownEvents.map((entry) => entry.id));
+        const resultRelevant = timeline.map((entry, index) => normalizeTimelineEntry(entry, index))
+          .filter((entry) => getFieldLabels(field).has(entry.label) && ["labeled", "unlabeled"].includes(entry.type) && entry.order <= lastOwn.order);
+        issueAtResult = observeIssueField(field, [...labelsAtResult], resultRelevant);
+      }
     }
     if (projectWriteObserved && labelsRecovered) {
       return {
@@ -198,7 +217,7 @@ export function recoverPendingOperation(pending, current, timeline = []) {
         baseline: {
           ...pending.before,
           project: { ...nowProject },
-          ...(hasLabelMutations ? { issue: { ...current.issue }, labels: [...current.labels] } : {}),
+          ...(issueAtResult ? { issue: issueAtResult, labels: [...labelsAtResult] } : {}),
         },
         resultEventIds: [],
         result: { projectValueId: nowProject.valueId ?? null, projectUpdatedAt: nowProject.updatedAt },
@@ -210,22 +229,28 @@ export function recoverPendingOperation(pending, current, timeline = []) {
   if (pending.direction === "project_to_issue") {
     const mapping = getFieldLabels(field);
     const expected = [...new Set(pending.intent.issueLabels ?? [])].sort();
-    const active = new Set(pending.before.labels ?? []);
     const relevant = timeline.map((entry, index) => normalizeTimelineEntry(entry, index))
       .filter((entry) => mapping.has(entry.label) && ["labeled", "unlabeled"].includes(entry.type));
+    const desiredValue = Object.hasOwn(pending.intent, "projectValue")
+      ? pending.intent.projectValue
+      : (pending.intent.issueLabels ?? []).map((label) => [...mapping.keys()].find((supported) => supported === label)).filter(Boolean)
+        .map((label) => mapping.get(label))[0] ?? null;
+    const planned = pending.intent.labelMutations ?? expectedIssueLabels(field, pending.before.labels ?? [], desiredValue);
+    const classified = classifyPendingLabelEvents(pending, timeline, planned);
+    if (!classified.valid) return { status: "ambiguous", baseline: pending.before, resultEventIds: [] };
+    const active = new Set(pending.before.labels ?? []);
     let candidates = [];
     let recoveredSnapshot = null;
     let recoveryIds = [];
 
-    for (const entry of orderTimeline(relevant)) {
-      if (isTimestamp(pending.startedAt) && isTimestamp(entry.createdAt) && Date.parse(entry.createdAt) < Date.parse(pending.startedAt)) continue;
-      if (!isAutomationActor(entry.actor)) continue;
+    for (const entry of classified.ownEvents) {
       if (entry.type === "labeled") active.add(entry.label);
       else active.delete(entry.label);
       candidates.push(entry.id);
       const familyActive = [...mapping.keys()].filter((label) => active.has(label)).sort();
-      if (sameStringArray(familyActive, expected)) {
-        recoveredSnapshot = observeIssueField(field, [...active], orderTimeline(relevant).filter((item) => item.order <= entry.order));
+      const humanPrecededCompletion = classified.foreignEvents.some((foreign) => foreign.order <= entry.order);
+      if (sameStringArray(familyActive, expected) && !humanPrecededCompletion) {
+        recoveredSnapshot = observeIssueField(field, [...active], relevant.filter((item) => item.order <= entry.order));
         recoveryIds = [...candidates];
       }
     }
@@ -242,10 +267,8 @@ export function recoverPendingOperation(pending, current, timeline = []) {
     // Resume only when every post-start event in this field family can be
     // attributed to this workflow and the observed labels equal that replay.
     // A human edit after a partial write makes the pending intent ambiguous.
-    const afterStart = orderTimeline(relevant).filter((entry) =>
-      !(isTimestamp(pending.startedAt) && isTimestamp(entry.createdAt) && Date.parse(entry.createdAt) < Date.parse(pending.startedAt)));
-    const botEvents = afterStart.filter((entry) => isAutomationActor(entry.actor));
-    const onlyBotEvents = afterStart.length === botEvents.length;
+    const botEvents = classified.ownEvents;
+    const onlyBotEvents = classified.foreignEvents.length === 0;
     const replay = new Set(pending.before.labels ?? []);
     for (const entry of botEvents) {
       if (entry.type === "labeled") replay.add(entry.label);
@@ -261,6 +284,49 @@ export function recoverPendingOperation(pending, current, timeline = []) {
   }
 
   return { status: "ambiguous", baseline: pending.before, resultEventIds: [] };
+}
+
+function classifyPendingLabelEvents(pending, timeline, labelMutations) {
+  const mapping = getFieldLabels(pending.field);
+  const relevant = orderTimeline(timeline.map((entry, index) => normalizeTimelineEntry(entry, index))
+    .filter((entry) => mapping.has(entry.label) && ["labeled", "unlabeled"].includes(entry.type)));
+  const cursor = pending.beforeEventCursor ?? pending.before?.issue?.latestEvent?.id ?? null;
+  let afterCursor = relevant;
+  if (cursor !== null) {
+    const cursorIndex = relevant.findIndex((entry) => String(entry.id) === String(cursor));
+    if (cursorIndex < 0) return { valid: false, ownEvents: [], foreignEvents: relevant };
+    afterCursor = relevant.slice(cursorIndex + 1);
+  }
+  const expected = [
+    ...(labelMutations.remove ?? []).map((label) => ({ type: "unlabeled", label })),
+    ...(labelMutations.add ?? []).map((label) => ({ type: "labeled", label })),
+  ];
+  const resultIds = new Set((pending.resultEventIds ?? []).map(String));
+  if ([...resultIds].some((id) => !afterCursor.some((entry) => String(entry.id) === id))) {
+    return { valid: false, ownEvents: [], foreignEvents: afterCursor };
+  }
+  const startSecond = isTimestamp(pending.startedAt) ? Math.floor(Date.parse(pending.startedAt) / 1000) * 1000 : null;
+  const ownEvents = [];
+  const foreignEvents = [];
+  let nextOperation = 0;
+  for (const entry of afterCursor) {
+    const recorded = resultIds.has(String(entry.id));
+    const matches = (operation) => operation?.type === entry.type && operation.label === entry.label;
+    if (recorded) {
+      if (!isAutomationActor(entry.actor) || !expected.some(matches)) return { valid: false, ownEvents, foreignEvents: [...foreignEvents, entry] };
+      const matchIndex = expected.findIndex((operation, index) => index >= nextOperation && matches(operation));
+      if (matchIndex < 0) return { valid: false, ownEvents, foreignEvents: [...foreignEvents, entry] };
+      nextOperation = matchIndex + 1;
+      ownEvents.push(entry);
+    } else if (isAutomationActor(entry.actor) && startSecond !== null && Date.parse(entry.createdAt) >= startSecond
+      && matches(expected[nextOperation])) {
+      nextOperation += 1;
+      ownEvents.push(entry);
+    } else {
+      foreignEvents.push(entry);
+    }
+  }
+  return { valid: true, ownEvents, foreignEvents };
 }
 
 export async function planFromFixture(fixture) {
@@ -515,6 +581,28 @@ export function createGitHubAdapter({ projectToken, githubToken, fetchImpl = glo
     };
   };
 
+  const ensureSupportedLabels = async () => {
+    const existing = await readRestCollection(`/repos/${REPOSITORY}/labels`);
+    const byFoldedName = new Map(existing.filter((label) => typeof label.name === "string")
+      .map((label) => [label.name.toLowerCase(), label]));
+    for (const name of SUPPORTED_LABELS) {
+      const current = byFoldedName.get(name.toLowerCase());
+      if (current && current.name !== name) throw new Error(`Repository label casing conflicts with supported label ${name}.`);
+    }
+    const created = [];
+    for (const [index, name] of SUPPORTED_LABELS.entries()) {
+      const current = byFoldedName.get(name.toLowerCase());
+      if (current) continue;
+      await request(githubToken, `/repos/${REPOSITORY}/labels`, {
+        method: "POST",
+        body: { name, color: SUPPORTED_LABEL_COLORS[index], description: "Managed by Project #4 synchronization." },
+      });
+      created.push(name);
+      byFoldedName.set(name.toLowerCase(), { name });
+    }
+    return created;
+  };
+
   const readRestCollection = async (route) => {
     const values = [];
     for (let page = 1; page <= 1000; page += 1) {
@@ -621,6 +709,7 @@ export function createGitHubAdapter({ projectToken, githubToken, fetchImpl = glo
     readProjectItems,
     readProjectItem,
     readIssue,
+    ensureSupportedLabels,
     updateProjectField,
     clearProjectField,
     addIssueLabels,
@@ -678,7 +767,8 @@ function isValidPending(pending, field) {
   if (!isPlainObject(pending) || pending.field !== field || !["project_to_issue", "issue_to_project"].includes(pending.direction)
     || !isValidSnapshot(pending.before, field) || !isPlainObject(pending.intent) || !isNullableString(pending.intent.projectValue)
     || !Array.isArray(pending.intent.issueLabels) || !pending.intent.issueLabels.every((label) => typeof label === "string")
-    || !isTimestamp(pending.startedAt) || !Array.isArray(pending.resultEventIds) || !pending.resultEventIds.every((id) => typeof id === "string")) return false;
+    || !isTimestamp(pending.startedAt) || !Array.isArray(pending.resultEventIds) || !pending.resultEventIds.every((id) => typeof id === "string")
+    || (pending.beforeEventCursor !== undefined && !isNullableString(pending.beforeEventCursor))) return false;
   const supportedValues = new Set(SUPPORTED_VALUES[field]);
   const supportedLabels = new Set(SUPPORTED_VALUES[field].map((value) => `${field}:${value}`));
   if ((pending.intent.projectValue !== null && !supportedValues.has(pending.intent.projectValue))
@@ -748,6 +838,7 @@ function pendingForPlan(field, current, planResult, runId) {
     field,
     direction,
     startedAt: new Date().toISOString(),
+    beforeEventCursor: current.issue.latestEvent?.id ?? null,
     before: current,
     intent: {
       projectValue: desiredValue,
@@ -815,6 +906,8 @@ export async function synchronizeProject({ adapter, dryRun = false, issueNumber 
     }
   }
 
+  if (!dryRun && targets.length > 0 && typeof adapter.ensureSupportedLabels === "function") await adapter.ensureSupportedLabels();
+
   for (const target of targets) {
     state.items[target.id] ??= {
       issueNumber: target.number,
@@ -845,7 +938,11 @@ export async function synchronizeProject({ adapter, dryRun = false, issueNumber 
               plans.push({ issueNumber: target.number, field, source: "pending", reason: "resume-after-interruption", dryRun: true });
               break;
             }
-            refSha = await resumePending(adapter, state, itemState, storedField, recovered, target, project.id, metadata.fields[field], field, refSha);
+            refSha = await resumePending(adapter, state, itemState, storedField, {
+              ...recovered,
+              observedSnapshot: current,
+              observedTimeline: issue.timeline,
+            }, target, project.id, metadata.fields[field], field, refSha);
             continue;
           }
         }
@@ -907,6 +1004,10 @@ async function resumePending(adapter, state, itemState, storedField, recovery, t
     refSha = await adapter.writeState(state, projectId, refSha);
   }
   const current = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
+  if (!snapshotEqual(field, recovery.observedSnapshot, current.current)
+    || timelineSignature(field, recovery.observedTimeline) !== timelineSignature(field, current.issue.timeline)) {
+    throw new Error(`Issue #${target.number} changed while resuming ${field}; pending state retained.`);
+  }
   if (!sourceUnchanged(pending, current.current)) {
     storedField.pending = null;
     refSha = await adapter.writeState(state, projectId, refSha);
@@ -955,6 +1056,13 @@ function sourceUnchanged(pending, current) {
   if (pending.direction === "project_to_issue") return !projectObservationChanged(pending.before.project, current.project);
   if (pending.direction === "issue_to_project") return !issueObservationChanged(pending.before.issue, current.issue);
   return false;
+}
+
+function timelineSignature(field, timeline = []) {
+  const mapping = getFieldLabels(field);
+  return JSON.stringify(orderTimeline(timeline.map((entry, index) => normalizeTimelineEntry(entry, index))
+    .filter((entry) => mapping.has(entry.label) && ["labeled", "unlabeled"].includes(entry.type))
+    .map(({ id, label, type, actor, createdAt }) => ({ id, label, type, actor, createdAt }))));
 }
 
 async function executePending(adapter, state, itemState, storedField, pending, target, projectId, fieldMetadata, field, initialRefSha) {

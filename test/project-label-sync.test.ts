@@ -303,6 +303,88 @@ test("pending Project update with planned duplicate cleanup recovers only after 
   assert.equal(recoverPendingOperation(pending, beforeCleanup, partialTimeline.slice(0, 2)).status, "ambiguous");
 });
 
+test("pending recovery uses saved operation event IDs at second precision and distinguishes same-second human events", () => {
+  const startedAt = "2026-10-03T10:02:00.500Z";
+  const before = snapshot("priority", "P1", times.t0,
+    ["priority:P1", "priority:P2"], [event("cursor", "priority:P2", "labeled", times.t0)]);
+  const pending = {
+    field: "priority", direction: "project_to_issue", startedAt, before, beforeEventCursor: "cursor",
+    intent: { projectValue: "P2", issueLabels: ["priority:P2"], labelMutations: { add: [], remove: ["priority:P1"] } },
+    resultEventIds: ["bot-remove"], resultProject: null,
+  };
+  const botRemove = event("bot-remove", "priority:P1", "unlabeled", "2026-10-03T10:02:00Z", "github-actions[bot]");
+  const afterRemove = snapshot("priority", "P1", times.t0, ["priority:P2"], [
+    event("cursor", "priority:P2", "labeled", times.t0), botRemove,
+  ]);
+  const recovered = recoverPendingOperation(pending, afterRemove, [
+    event("cursor", "priority:P2", "labeled", times.t0), botRemove,
+  ]);
+  assert.equal(recovered.status, "recovered");
+  assert.deepEqual(recovered.resultEventIds, ["bot-remove"]);
+  const inferred = recoverPendingOperation({ ...pending, resultEventIds: [] }, afterRemove, [
+    event("cursor", "priority:P2", "labeled", times.t0), botRemove,
+  ]);
+  assert.equal(inferred.status, "recovered");
+  assert.deepEqual(inferred.resultEventIds, ["bot-remove"]);
+
+  const humanSameSecond = event("human-p3", "priority:P3", "labeled", "2026-10-03T10:02:00Z", "ssaattww");
+  const changed = snapshot("priority", "P3", times.t0, ["priority:P2", "priority:P3"], [
+    event("cursor", "priority:P2", "labeled", times.t0), botRemove, humanSameSecond,
+  ]);
+  const ambiguous = recoverPendingOperation(pending, changed, [
+    event("cursor", "priority:P2", "labeled", times.t0), botRemove, humanSameSecond,
+  ]);
+  assert.equal(ambiguous.status, "recovered");
+  assert.deepEqual(ambiguous.resultEventIds, ["bot-remove"]);
+  assert.deepEqual(ambiguous.baseline.issue.labels, ["priority:P2"]);
+  assertDecision(plan(changed, ambiguous.baseline), "issue", "P3");
+});
+
+test("issue-to-Project recovery handles second-precision cleanup events and null Project clear receipts", () => {
+  const startedAt = "2026-10-03T10:02:00.500Z";
+  const before = snapshot("priority", "P1", times.t0,
+    ["priority:P1", "priority:P2"], [event("cursor", "priority:P2", "labeled", times.t0)]);
+  const remove = event("bot-remove", "priority:P1", "unlabeled", "2026-10-03T10:02:00Z", "github-actions[bot]");
+  const current = snapshot("priority", "P2", times.t2, ["priority:P2"], [
+    event("cursor", "priority:P2", "labeled", times.t0), remove,
+  ]);
+  const common = {
+    field: "priority", direction: "issue_to_project", startedAt, before, beforeEventCursor: "cursor",
+    intent: { projectValue: "P2", issueLabels: ["priority:P2"], projectMutation: { operation: "set", value: "P2" }, labelMutations: { add: [], remove: ["priority:P1"] } },
+    resultEventIds: ["bot-remove"], resultProject: { valueId: current.project.valueId, updatedAt: times.t2 },
+  };
+  assert.equal(recoverPendingOperation(common, current, [event("cursor", "priority:P2", "labeled", times.t0), remove]).status, "recovered");
+
+  const clearBefore = snapshot("priority", "P1", times.t0, ["priority:P1"], [event("p1", "priority:P1", "labeled", times.t0)]);
+  const clearPending = {
+    field: "priority", direction: "issue_to_project", startedAt, before: clearBefore,
+    intent: { projectValue: null, issueLabels: [], projectMutation: { operation: "clear" }, labelMutations: { add: [], remove: [] } },
+    resultEventIds: [], resultProject: { valueId: null, updatedAt: null },
+  };
+  const afterClearWithLaterIssueChange = snapshot("priority", null, null, ["priority:P2"], [
+    event("p1", "priority:P1", "labeled", times.t0),
+    event("human-p2", "priority:P2", "labeled", "2026-10-03T10:03:00Z", "ssaattww"),
+  ]);
+  const clearRecovery = recoverPendingOperation(clearPending, afterClearWithLaterIssueChange, afterClearWithLaterIssueChange.timeline);
+  assert.equal(clearRecovery.status, "recovered");
+  assert.equal(clearRecovery.baseline.project.value, null);
+  assert.equal(clearRecovery.baseline.issue.value, "P1");
+  assert.equal(recoverPendingOperation({ ...clearPending, resultProject: null }, afterClearWithLaterIssueChange, afterClearWithLaterIssueChange.timeline).status, "ambiguous");
+
+  const cleanupBefore = snapshot("priority", "P2", times.t2, ["priority:P1", "priority:P2"], [event("cursor", "priority:P2", "labeled", times.t0)]);
+  const cleanupOnly = { ...common, before: cleanupBefore, intent: { ...common.intent, projectMutation: null }, resultProject: null };
+  assert.equal(recoverPendingOperation(cleanupOnly, current, [event("cursor", "priority:P2", "labeled", times.t0), remove]).status, "recovered");
+  const laterHumanEvent = event("human-p3", "priority:P3", "labeled", "2026-10-03T10:02:00Z", "ssaattww");
+  const currentAfterHuman = snapshot("priority", "P2", times.t2, ["priority:P2", "priority:P3"], [
+    event("cursor", "priority:P2", "labeled", times.t0), remove, laterHumanEvent,
+  ]);
+  const cleanupWithHuman = recoverPendingOperation(cleanupOnly, currentAfterHuman, [
+    event("cursor", "priority:P2", "labeled", times.t0), remove, laterHumanEvent,
+  ]);
+  assert.equal(cleanupWithHuman.status, "recovered");
+  assertDecision(plan(currentAfterHuman, cleanupWithHuman.baseline), "issue", "P3");
+});
+
 test("pending label write recovers its bot event and keeps a later human edit as the new change", () => {
   const before = snapshot("priority", "P2", times.t0,
     ["priority:P1"], [event("e1", "priority:P1", "labeled", times.t0)]);
@@ -349,8 +431,9 @@ test("unidentifiable pending Project result is not assumed self-authored and use
 test("pending label operation can resume safely when no write happened yet", () => {
   const before = snapshot("priority", "P2", times.t0, ["priority:P1"], [event("e1", "priority:P1", "labeled", times.t0)]);
   const pending = { field: "priority", direction: "project_to_issue", startedAt: times.t1, before, intent: { issueLabels: ["priority:P2"] } };
-  const current = snapshot("priority", "P2", times.t0, ["priority:P1"], [event("e1", "priority:P1", "labeled", times.t0)]);
-  assert.equal(recoverPendingOperation(pending, current, current.timeline).status, "resume");
+  const timeline = [event("e1", "priority:P1", "labeled", times.t0)];
+  const current = snapshot("priority", "P2", times.t0, ["priority:P1"], timeline);
+  assert.equal(recoverPendingOperation(pending, current, timeline).status, "resume");
 });
 
 test("partial bot label operation can resume only while issue still matches observed bot changes", () => {
