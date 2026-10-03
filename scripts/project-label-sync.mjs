@@ -173,10 +173,33 @@ export function recoverPendingOperation(pending, current, timeline = []) {
     const nowProject = current.project;
     const fieldChanged = nowProject?.valueId !== beforeProject?.valueId
       || nowProject?.updatedAt !== beforeProject?.updatedAt;
-    if (nowProject?.value === pending.intent.projectValue && isTimestamp(nowProject.updatedAt) && fieldChanged) {
+    const projectWriteObserved = nowProject?.value === pending.intent.projectValue && isTimestamp(nowProject.updatedAt) && fieldChanged;
+    const plannedLabelMutations = pending.intent.labelMutations ?? { add: [], remove: [] };
+    const hasLabelMutations = plannedLabelMutations.add.length > 0 || plannedLabelMutations.remove.length > 0;
+    let labelsRecovered = !hasLabelMutations;
+    if (hasLabelMutations) {
+      const mapping = getFieldLabels(field);
+      const events = orderTimeline(timeline.map((entry, index) => normalizeTimelineEntry(entry, index)))
+        .filter((entry) => mapping.has(entry.label) && ["labeled", "unlabeled"].includes(entry.type)
+          && !(isTimestamp(pending.startedAt) && isTimestamp(entry.createdAt) && Date.parse(entry.createdAt) < Date.parse(pending.startedAt)));
+      const allEventsAreOurs = events.every((entry) => isAutomationActor(entry.actor));
+      const expectedOperations = [
+        ...plannedLabelMutations.remove.map((label) => ({ type: "unlabeled", label })),
+        ...plannedLabelMutations.add.map((label) => ({ type: "labeled", label })),
+      ];
+      const seenOperations = events.map((entry) => `${entry.type}:${entry.label}`);
+      const allOperationsObserved = expectedOperations.every(({ type, label }) => seenOperations.includes(`${type}:${label}`));
+      const expectedLabels = [...pending.intent.issueLabels].sort();
+      labelsRecovered = allEventsAreOurs && allOperationsObserved && sameStringArray(current.issue.labels, expectedLabels);
+    }
+    if (projectWriteObserved && labelsRecovered) {
       return {
         status: "recovered",
-        baseline: { ...pending.before, project: { ...nowProject } },
+        baseline: {
+          ...pending.before,
+          project: { ...nowProject },
+          ...(hasLabelMutations ? { issue: { ...current.issue }, labels: [...current.labels] } : {}),
+        },
         resultEventIds: [],
         result: { projectValueId: nowProject.valueId ?? null, projectUpdatedAt: nowProject.updatedAt },
       };
@@ -392,9 +415,10 @@ export function createGitHubAdapter({ projectToken, githubToken, fetchImpl = glo
     do {
       const query = `query ProjectSyncItems($projectId: ID!, $cursor: String) {
         node(id: $projectId) {
+          __typename
           ... on ProjectV2 {
             items(first: 100, after: $cursor) {
-              nodes {
+      nodes {
                 id
                 content {
                   __typename
@@ -432,8 +456,10 @@ export function createGitHubAdapter({ projectToken, githubToken, fetchImpl = glo
   const readProjectItem = async (itemId, projectId) => {
     const query = `query ProjectSyncItem($itemId: ID!) {
       node(id: $itemId) {
+        __typename
         ... on ProjectV2Item {
           id
+          project { id }
           content {
             __typename
             ... on Issue { number repository { nameWithOwner } }
@@ -443,7 +469,7 @@ export function createGitHubAdapter({ projectToken, githubToken, fetchImpl = glo
             nodes {
               __typename
               ... on ProjectV2ItemFieldSingleSelectValue {
-                id name optionId updatedAt field { id name }
+                id name optionId updatedAt field { ... on ProjectV2SingleSelectField { id name } }
               }
             }
             pageInfo { hasNextPage }
@@ -454,6 +480,7 @@ export function createGitHubAdapter({ projectToken, githubToken, fetchImpl = glo
     const result = await graphql(query, { itemId });
     const node = result?.node;
     if (!node || node.__typename !== "ProjectV2Item" || node.id !== itemId) throw new Error("Project item could not be re-read.");
+    if (!node.project || node.project.id !== projectId) throw new Error("Project item membership changed or could not be verified.");
     if (node.fieldValues?.pageInfo?.hasNextPage) throw new Error("Project item has too many field values; no changes were made.");
     const content = node.content;
     return {
@@ -603,12 +630,71 @@ export function createGitHubAdapter({ projectToken, githubToken, fetchImpl = glo
   };
 }
 
-function validateState(state, expectedProjectId) {
-  if (!state || state.schemaVersion !== 1 || state.repository !== REPOSITORY || state.projectId !== expectedProjectId || typeof state.items !== "object" || Array.isArray(state.items)) {
+export function validateState(state, expectedProjectId) {
+  if (!isPlainObject(state) || state.schemaVersion !== 1 || state.repository !== REPOSITORY || state.projectId !== expectedProjectId || !isPlainObject(state.items)) {
     throw new Error("Synchronization state does not match this repository, Project, or schema.");
+  }
+  for (const [itemId, item] of Object.entries(state.items)) {
+    if (!itemId || !isPlainObject(item) || !Number.isInteger(item.issueNumber) || item.issueNumber < 1 || !isPlainObject(item.fields)) {
+      throw new Error("Synchronization state contains a malformed item record.");
+    }
+    for (const field of ["priority", "status"]) {
+      const fieldState = item.fields[field];
+      if (!isPlainObject(fieldState) || !(fieldState.baseline === null || isValidSnapshot(fieldState.baseline, field))
+        || !(fieldState.pending === null || isValidPending(fieldState.pending, field))) {
+        throw new Error(`Synchronization state contains an invalid ${field} baseline or pending record.`);
+      }
+    }
   }
   const json = JSON.stringify(state);
   if (/"(?:token|secret|authorization|headers)"\s*:/i.test(json)) throw new Error("Synchronization state contains a forbidden credential field.");
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNullableString(value) {
+  return value === null || typeof value === "string";
+}
+
+function isValidSnapshot(snapshot, field) {
+  if (!isPlainObject(snapshot) || !isPlainObject(snapshot.project) || !isPlainObject(snapshot.issue)) return false;
+  if (!SUPPORTED_VALUES[field]) return false;
+  if (!isNullableString(snapshot.project.value) || !isNullableString(snapshot.project.updatedAt)
+    || !isNullableString(snapshot.project.valueId) || (snapshot.project.optionId !== undefined && !isNullableString(snapshot.project.optionId))) return false;
+  if (!isNullableString(snapshot.issue.value) || typeof snapshot.issue.ambiguous !== "boolean"
+    || !Array.isArray(snapshot.issue.labels) || !snapshot.issue.labels.every((label) => typeof label === "string")
+    || !Array.isArray(snapshot.labels) || !snapshot.labels.every((label) => typeof label === "string")) return false;
+  const allowed = new Set(SUPPORTED_VALUES[field].map((value) => `${field}:${value}`));
+  if ((snapshot.project.value !== null && !SUPPORTED_VALUES[field].includes(snapshot.project.value))
+    || (snapshot.issue.value !== null && !SUPPORTED_VALUES[field].includes(snapshot.issue.value))
+    || !snapshot.issue.labels.every((label) => allowed.has(label))) return false;
+  const latest = snapshot.issue.latestEvent;
+  return latest === null || (isPlainObject(latest) && isNullableString(latest.id) && isNullableString(latest.createdAt));
+}
+
+function isValidPending(pending, field) {
+  if (!isPlainObject(pending) || pending.field !== field || !["project_to_issue", "issue_to_project"].includes(pending.direction)
+    || !isValidSnapshot(pending.before, field) || !isPlainObject(pending.intent) || !isNullableString(pending.intent.projectValue)
+    || !Array.isArray(pending.intent.issueLabels) || !pending.intent.issueLabels.every((label) => typeof label === "string")
+    || !isTimestamp(pending.startedAt) || !Array.isArray(pending.resultEventIds) || !pending.resultEventIds.every((id) => typeof id === "string")) return false;
+  const supportedValues = new Set(SUPPORTED_VALUES[field]);
+  const supportedLabels = new Set(SUPPORTED_VALUES[field].map((value) => `${field}:${value}`));
+  if ((pending.intent.projectValue !== null && !supportedValues.has(pending.intent.projectValue))
+    || !pending.intent.issueLabels.every((label) => supportedLabels.has(label))) return false;
+  const projectMutation = pending.intent.projectMutation;
+  if (projectMutation !== null && projectMutation !== undefined
+    && !(isPlainObject(projectMutation) && (projectMutation.operation === "clear"
+      || (projectMutation.operation === "set" && supportedValues.has(projectMutation.value))))) return false;
+  const labelMutations = pending.intent.labelMutations;
+  if (!isPlainObject(labelMutations) || !Array.isArray(labelMutations.add) || !Array.isArray(labelMutations.remove)
+    || !labelMutations.add.every((label) => supportedLabels.has(label)) || !labelMutations.remove.every((label) => supportedLabels.has(label))) return false;
+  if (pending.direction === "project_to_issue" && projectMutation) return false;
+  if (pending.direction === "issue_to_project" && labelMutations.add.length > 0) return false;
+  const resultProject = pending.resultProject;
+  return resultProject === null || resultProject === undefined
+    || (isPlainObject(resultProject) && isNullableString(resultProject.valueId) && isNullableString(resultProject.updatedAt));
 }
 
 function emptyState(projectId) {
@@ -644,7 +730,10 @@ async function readCurrentSnapshot(adapter, target, projectId, fieldMetadata, fi
 function snapshotEqual(field, left, right) {
   return !projectObservationChanged(left.project, right.project)
     && !issueObservationChanged(left.issue, right.issue)
-    && sameStringArray(left.labels ?? [], right.labels ?? []);
+    && sameStringArray(
+      (left.labels ?? []).filter((label) => getFieldLabels(field).has(label)),
+      (right.labels ?? []).filter((label) => getFieldLabels(field).has(label)),
+    );
 }
 
 function expectedIssueLabels(field, currentLabels, desiredValue) {
@@ -678,6 +767,10 @@ function targetSideBaseline(field, pending, after) {
     baseline.labels = after.labels;
   } else {
     baseline.project = after.project;
+    if (pending.intent.labelMutations?.add.length || pending.intent.labelMutations?.remove.length) {
+      baseline.issue = after.issue;
+      baseline.labels = after.labels;
+    }
   }
   return baseline;
 }
@@ -709,9 +802,18 @@ export async function synchronizeProject({ adapter, dryRun = false, issueNumber 
   const targets = selectTargetIssues(await adapter.readProjectItems(project.id), project.id, REPOSITORY)
     .filter((item) => issueNumber === null || item.number === issueNumber);
   const stored = await adapter.readState(project.id);
+  if (stored) validateState(stored.state, project.id);
   const state = stored?.state ?? emptyState(project.id);
   let refSha = stored?.refSha ?? null;
   const plans = [];
+  const initialSnapshots = new Map();
+
+  // Read every target and both fields before the first persistent or content write.
+  for (const target of targets) {
+    for (const field of ["priority", "status"]) {
+      initialSnapshots.set(`${target.id}:${field}`, await readCurrentSnapshot(adapter, target, project.id, metadata.fields[field], field));
+    }
+  }
 
   for (const target of targets) {
     state.items[target.id] ??= {
@@ -729,7 +831,9 @@ export async function synchronizeProject({ adapter, dryRun = false, issueNumber 
       let attempts = 0;
       while (attempts < maxRetries) {
         attempts += 1;
-        const { current, issue } = await readCurrentSnapshot(adapter, target, project.id, metadata.fields[field], field);
+        const { current, issue } = attempts === 1
+          ? initialSnapshots.get(`${target.id}:${field}`)
+          : await readCurrentSnapshot(adapter, target, project.id, metadata.fields[field], field);
         if (storedField.pending) {
           const recovered = recoverPendingOperation(storedField.pending, current, issue.timeline);
           if (recovered.status === "recovered") {
@@ -773,6 +877,10 @@ export async function synchronizeProject({ adapter, dryRun = false, issueNumber 
           continue;
         }
 
+        pending.before = preflight.current;
+        storedField.pending = pending;
+        refSha = await adapter.writeState(state, project.id, refSha);
+
         await executePending(adapter, state, itemState, storedField, pending, target, project.id, metadata.fields[field], field, refSha);
         refSha = storedField._refSha ?? refSha;
         storedField._refSha = refSha;
@@ -811,17 +919,30 @@ async function resumePending(adapter, state, itemState, storedField, recovery, t
     storedField.pending = null;
     return await adapter.writeState(state, projectId, refSha);
   }
+  let expectedLabels = [...current.current.labels];
   for (const label of remaining.remove) {
+    const beforeAction = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
+    if (!sourceUnchanged(pending, beforeAction.current) || !sameStringArray(beforeAction.current.labels, expectedLabels)) {
+      throw new Error(`Issue #${target.number} changed while resuming ${field}; pending state retained.`);
+    }
     await adapter.removeIssueLabel(target.number, label);
+    expectedLabels = expectedLabels.filter((existing) => existing !== label);
     const after = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
     recordNewBotEvents(pending, current.issue.timeline, after.issue.timeline, label, "unlabeled");
     refSha = await adapter.writeState(state, projectId, refSha);
+    if (!sourceUnchanged(pending, after.current) || !sameStringArray(after.current.labels, expectedLabels)) throw new Error(`Issue #${target.number} changed while resuming ${field}; pending state retained.`);
   }
   if (remaining.add.length > 0) {
+    const beforeAction = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
+    if (!sourceUnchanged(pending, beforeAction.current) || !sameStringArray(beforeAction.current.labels, expectedLabels)) {
+      throw new Error(`Issue #${target.number} changed while resuming ${field}; pending state retained.`);
+    }
     await adapter.addIssueLabels(target.number, remaining.add);
+    expectedLabels = [...new Set([...expectedLabels, ...remaining.add])];
     const after = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
     for (const label of remaining.add) recordNewBotEvents(pending, current.issue.timeline, after.issue.timeline, label, "labeled");
     refSha = await adapter.writeState(state, projectId, refSha);
+    if (!sourceUnchanged(pending, after.current) || !sameStringArray(after.current.labels, expectedLabels)) throw new Error(`Issue #${target.number} changed while resuming ${field}; pending state retained.`);
   }
   const final = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
   if (!isExpectedIssueState(field, final.current, pending.intent.projectValue)) throw new Error(`Issue #${target.number} labels did not match the pending Project value.`);
@@ -838,8 +959,10 @@ function sourceUnchanged(pending, current) {
 
 async function executePending(adapter, state, itemState, storedField, pending, target, projectId, fieldMetadata, field, initialRefSha) {
   let refSha = initialRefSha;
-  if (pending.projectMutation) {
-    const mutation = pending.projectMutation;
+  if (pending.intent.projectMutation) {
+    const mutation = pending.intent.projectMutation;
+    const beforeWrite = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
+    if (!snapshotEqual(field, pending.before, beforeWrite.current)) throw new Error(`Issue #${target.number} changed before Project ${field} update; pending state retained.`);
     if (mutation.operation === "set") {
       const optionId = fieldMetadata.optionIds[mutation.value];
       if (!optionId) throw new Error(`Project option for ${field} is unavailable; refusing to write.`);
@@ -850,30 +973,55 @@ async function executePending(adapter, state, itemState, storedField, pending, t
     const updated = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
     pending.resultProject = { valueId: updated.current.project.valueId, updatedAt: updated.current.project.updatedAt };
     if (updated.current.project.value !== pending.intent.projectValue) throw new Error(`Project ${field} did not match the pending value after update.`);
+    if (pending.direction === "issue_to_project" && issueObservationChanged(pending.before.issue, updated.current.issue)) {
+      refSha = await adapter.writeState(state, projectId, refSha);
+      throw new Error(`Issue #${target.number} changed after the Project ${field} update; pending state retained.`);
+    }
     refSha = await adapter.writeState(state, projectId, refSha);
-  } else {
+  }
+  let expectedLabels = [...pending.before.labels];
+  const labelMutations = pending.intent.labelMutations;
+  for (const label of labelMutations.remove) {
     const before = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
-    for (const label of pending.labelMutations.remove) {
-      await adapter.removeIssueLabel(target.number, label);
-      const after = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
-      recordNewBotEvents(pending, before.issue.timeline, after.issue.timeline, label, "unlabeled");
-      refSha = await adapter.writeState(state, projectId, refSha);
-    }
-    if (pending.labelMutations.add.length > 0) {
-      await adapter.addIssueLabels(target.number, pending.labelMutations.add);
-      const after = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
-      for (const label of pending.labelMutations.add) recordNewBotEvents(pending, before.issue.timeline, after.issue.timeline, label, "labeled");
-      refSha = await adapter.writeState(state, projectId, refSha);
-    }
+    if (!executionStillMatches(pending, before.current, expectedLabels)) throw new Error(`Issue #${target.number} changed before label removal; pending state retained.`);
+    await adapter.removeIssueLabel(target.number, label);
+    expectedLabels = expectedLabels.filter((existing) => existing !== label);
+    const after = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
+    recordNewBotEvents(pending, before.issue.timeline, after.issue.timeline, label, "unlabeled");
+    refSha = await adapter.writeState(state, projectId, refSha);
+    if (!executionStillMatches(pending, after.current, expectedLabels)) throw new Error(`Issue #${target.number} changed after label removal; pending state retained.`);
+  }
+  if (labelMutations.add.length > 0) {
+    const before = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
+    if (!executionStillMatches(pending, before.current, expectedLabels)) throw new Error(`Issue #${target.number} changed before label addition; pending state retained.`);
+    await adapter.addIssueLabels(target.number, labelMutations.add);
+    expectedLabels = [...new Set([...expectedLabels, ...labelMutations.add])];
+    const after = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
+    for (const label of labelMutations.add) recordNewBotEvents(pending, before.issue.timeline, after.issue.timeline, label, "labeled");
+    refSha = await adapter.writeState(state, projectId, refSha);
+    if (!executionStillMatches(pending, after.current, expectedLabels)) throw new Error(`Issue #${target.number} changed after label addition; pending state retained.`);
   }
   const final = await readCurrentSnapshot(adapter, target, projectId, fieldMetadata, field);
-  const verified = pending.direction === "project_to_issue"
-    ? isExpectedIssueState(field, final.current, pending.intent.projectValue)
-    : final.current.project.value === pending.intent.projectValue;
+  const verified = isExpectedIssueState(field, final.current, pending.intent.projectValue)
+    && (pending.intent.projectMutation === null || final.current.project.value === pending.intent.projectValue);
   if (!verified) throw new Error(`Issue #${target.number} ${field} update failed post-write verification; pending state retained.`);
   storedField.baseline = targetSideBaseline(field, pending, final.current);
   storedField.pending = null;
   storedField._refSha = await adapter.writeState(state, projectId, refSha);
+}
+
+function executionStillMatches(pending, current, expectedLabels) {
+  if (!sameStringArray(current.labels ?? [], expectedLabels)) return false;
+  if (pending.direction === "project_to_issue") return !projectObservationChanged(pending.before.project, current.project);
+  if (pending.direction === "issue_to_project") {
+    if (current.project.value !== pending.intent.projectValue) return false;
+    if (pending.intent.projectMutation) {
+      return (current.project.valueId ?? null) === (pending.resultProject?.valueId ?? null)
+        && (current.project.updatedAt ?? null) === (pending.resultProject?.updatedAt ?? null);
+    }
+    return !projectObservationChanged(pending.before.project, current.project);
+  }
+  return false;
 }
 
 function recordNewBotEvents(pending, beforeTimeline, afterTimeline, label, type) {

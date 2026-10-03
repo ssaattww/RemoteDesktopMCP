@@ -281,6 +281,28 @@ test("pending Project write is recovered as self-update before later issue edits
   assertDecision(next, "issue", "P3");
 });
 
+test("pending Project update with planned duplicate cleanup recovers only after its bot label result is present", () => {
+  const before = snapshot("priority", "P1", times.t0,
+    ["priority:P1", "priority:P2"], [event("e1", "priority:P1", "labeled", times.t0), event("e2", "priority:P2", "labeled", times.t0)]);
+  const pending = {
+    field: "priority", direction: "issue_to_project", startedAt: times.t1, before,
+    intent: { projectValue: "P2", issueLabels: ["priority:P2"], projectMutation: { operation: "set", value: "P2" }, labelMutations: { add: [], remove: ["priority:P1"] } },
+    resultEventIds: [], resultProject: null,
+  };
+  const partialTimeline = [
+    event("e1", "priority:P1", "labeled", times.t0),
+    event("e2", "priority:P2", "labeled", times.t0),
+    event("bot-remove", "priority:P1", "unlabeled", times.t2, "github-actions[bot]"),
+  ];
+  const after = snapshot("priority", "P2", times.t2, ["priority:P2"], partialTimeline);
+  const recovered = recoverPendingOperation(pending, after, partialTimeline);
+  assert.equal(recovered.status, "recovered");
+  assert.deepEqual(recovered.baseline.labels, ["priority:P2"]);
+
+  const beforeCleanup = snapshot("priority", "P2", times.t2, ["priority:P1", "priority:P2"], partialTimeline.slice(0, 2));
+  assert.equal(recoverPendingOperation(pending, beforeCleanup, partialTimeline.slice(0, 2)).status, "ambiguous");
+});
+
 test("pending label write recovers its bot event and keeps a later human edit as the new change", () => {
   const before = snapshot("priority", "P2", times.t0,
     ["priority:P1"], [event("e1", "priority:P1", "labeled", times.t0)]);
