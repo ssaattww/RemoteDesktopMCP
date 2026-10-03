@@ -129,8 +129,14 @@ async function assertPrivate(target: string, expected: PrivateKind): Promise<voi
 
 async function protectPrivate(target: string, expected: PrivateKind): Promise<void> {
   if (await kind(target) !== expected) throw new Error("Private storage path type is invalid.");
-  if (process.platform === "win32") await windowsAcl(target, "protect");
-  else await chmod(target, expected === "directory" ? 0o700 : 0o600);
+  if (process.platform === "win32") {
+    // The protect operation verifies the resulting owner and complete ACL in
+    // the same PowerShell process after Set-Acl, so a second assert process is
+    // redundant and adds substantial startup cost on Windows.
+    await windowsAcl(target, "protect");
+    return;
+  }
+  await chmod(target, expected === "directory" ? 0o700 : 0o600);
   await assertPrivate(target, expected);
 }
 
