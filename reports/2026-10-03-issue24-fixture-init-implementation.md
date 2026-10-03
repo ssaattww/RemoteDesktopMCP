@@ -41,5 +41,8 @@
 - Implementation and focused local validation: complete.
 - Normal review: `pass_with_held`, no required findings; report `reports/2026-10-03-issue24-fixture-init-normal-review.md`. Held: Windows/Node 22 CI and the new Windows measurement are outstanding.
 - Full local equivalence gate: passed at `44c8bc2c8d660cd4129ae38be97fec7240579ce0` (`npm run lint`, `npm run check`, `npm run build`, `npm test`; 134 total, 123 pass, 0 fail, 11 platform skips). Evidence: `reports/2026-10-03-issue24-fixture-init-full-local-gate.md`.
-- New PR/push, matching Node 22/Windows CI, new measurement run, and Issue #24 follow-up update: pending.
+- PR #62 is open/draft on base `issue-24-ci-phase1`. Exact-head CI run `37138712212` for `f661db1c4136ef86ab4a64662144b006801f2949` succeeded: Ubuntu plus Windows shards 1/3, 2/3, and 3/3.
+- Windows/Node 22 measurement run `37138740545` succeeded with 48/48 records and artifact `11280895030`; the new fingerprint, medians, environment, and comparison limits are recorded in `reports/2026-10-03-issue24-fixture-init-pr-ci-measurement.md` and [Issue #24](https://github.com/ssaattww/RemoteDesktopMCP/issues/24#issuecomment-5971795281).
+- The measurement overlapped the required PR CI until 17:07:47 UTC. The results are exploratory and do not establish the causal effect of this fixture change. No additional measurement was started and no manifest was applied.
+- The normal review report's `pass_with_held` is historical; the Windows/Node 22 CI and measurement collection have since completed. Independent final review remains pending.
 - No PR merge, manifest update, or independent-final reservation/freeze was performed.
