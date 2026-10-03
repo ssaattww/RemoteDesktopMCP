@@ -24,6 +24,28 @@ Uは版管理対象の`test/**/*.test.ts`全ファイルを正規化して昇順
 
 割当の生成時と各分割での実行前に、名前の正規化、許可範囲、重複、Uとの全体一致、分割同士の重複なし、全ファイル各一度を検証する。実行時に再検索してファイルを加えず、明示された名前だけを渡す。分割数は正整数とする。対象が空の分割は許可し、試験を起動せず、空であることを記録する。Uが空である状態とは区別する。
 
+### 回帰試験の意味単位への配置
+
+`test/regressions.test.ts` の29件は、次の7ファイルへ意味単位で分ける。この整理ではテスト集合U、テスト名、関数本体、検証項目、実際の`Commander`使用、各テストのサービス、MCP接続、一時領域、後片付けを変えない。各テストは移動先に一度だけ置き、旧ファイルには残さない。共有する可変状態を導入しない。
+
+| 新しいファイル | 移動する既存テスト | 維持する境界 |
+| --- | --- | --- |
+| `test/tool-root-contracts.test.ts` | `Issue 13: published tool descriptions match session, file-root, transfer, and process boundaries`; `Issue 20: root-scoped file operations expose their canonical path when the session CWD differs`; `Issue 9: sessions require a working directory and purpose, and commands start there` | 公開ツールの仕様、rootと作業場所が異なるときのパス、接続開始時の作業場所と目的 |
+| `test/operation-audit-details.test.ts` | `built-in file tools persist structured operation details for user monitoring`; `failed upload commit does not expose existing destination content in operation detail`; `schema validation rejections persist safe operation detail`; `schema validation rejection bounds oversized comments before audit persistence`; `schema validation rejection bounds variable-length bodies before detail processing`; `successful upload commit detail is pinned to verified upload bytes`; `file transfer cancel detail includes the transferred position`; `long UTF-8 transfer previews remain text when the byte limit splits a code point`; `Issue 29: small transfers complete in one MCP call while large transfers keep the chunked fallback` | 操作記録の個人情報保護と関連付け、転送操作の詳細、単一呼出しと分割転送 |
+| `test/config-transfer-integrity.test.ts` | `DR001: downloads use one immutable multi-chunk snapshot and clean failed snapshots`; `DR002: no-replace commit preserves a winner and removes the losing temp`; `DR002: upload begin fails safely when the destination lacks atomic no-replace support`; `DR003: protected config aliases cannot be read, searched, or reached by a swapped upload temp`; `DR003: a config replacement during pin linking preserves known history and the final config`; `DR003: exact bigint identity keys distinguish adjacent unsafe ids while preserving ordinary reads`; `DR003: protected identity manifests accept safe legacy values and fail closed on unsafe numeric values` | 変更不能な転送状態、上書きなしの原子的な確定、保護対象の設定識別、整数精度と一覧の検証 |
+| `test/session-filesystem-lifecycle.test.ts` | `NR009: canonical allowed roots work through a symlink or Windows junction`; `NR002 and NR006: expiry sweeps cancel transfers, clean files, and list session state`; `NR008: startup preserves unowned lookalikes and removes only manifest-owned orphan artifacts` | Windowsの`junction`と`symlink`を介した正規root、接続と転送の期限切れ、所有元を確認する起動時清掃 |
+| `test/search-process-lifecycle.test.ts` | `NR003 and NR004: searches return every page and portable Node processes retain output/audit`; `Issue 10: process_start inherits the service user profile environment`; `Desktop Commander stderr is drained before repeated get_config calls can block MCP` | 検索結果の全件、外部プロセスの出力・終了・監査、環境引継ぎ、実際の`Commander`の標準エラー読出し |
+| `test/http-oauth-regression.test.ts` | `NR005: real HTTP OAuth validates PKCE, scope, redirect, replay, claims, and MCP file operations` | 実際のローカルHTTP接続、`OAuth`と`PKCE`、再利用・要求情報の検証、認証後のMCP操作 |
+| `test/config-correlation-regression.test.ts` | `configuration rejects resolved overlap and traversal aliases`; `REV001: operation correlation ownership only accepts active owned sessions`; `REV001: accepted and rejected operations preserve safe correlation contracts` | 設定の重複・上位移動の拒否、有効な接続が所有する操作の関連付け |
+
+分割時は対象版のテスト名一覧を基準に、29件すべてが正確に一度ずつ存在し、各関数の内容が保持されていることを機械的に照合する。移動先ごとの試験を実行してから必須のUbuntu全件試験とWindowsの3分割実行を確認する。分割前後の測定は次の手順で行い、結果を区別して記録する。
+
+1. **同じ環境でのファイル実行時間**: Windows・Node 22の測定処理で、分割前の`test/regressions.test.ts`と分割後の7ファイルを各々明示して実行する。分割後は各ファイル3回の成功値の中央値を求める。分割前の基準値も同じ方法で3回取得する。比較値は、旧ファイル1個と新7ファイルの各中央値、および旧ファイルの中央値と新7ファイル中央値の合計とする。後者は逐次実行時の仕事量の比較であり、並列実行の所要時間とは呼ばない。失敗値は成功値の集計に含めず、別に記録する。環境識別値、`package-lock.json`の照合値、テスト起動方法が一致しない結果は比較しない。
+2. **Windows必須自動処理の並列所要時間**: 同一の成功実行における3つのWindows分割の試験工程経過時間の最大値を並列試験の壁時計指標とする。実行開始から全必須確認完了までの時間は別指標として記録する。分割時間の合計やファイル時間の合計を壁時計値として扱わない。新旧それぞれ最低3回の成功実行の中央値を比較し、各実行の対象変更識別子、実行番号、開始・終了時刻、各分割の試験工程時間を保存する。既存の基準版`adb4e03cbd11bb47ef90d34a840e2ce6922dc572`には成功実行`37128379698`が1回あるため、これを基準標本の一つとして保持し、比較を完了する前に基準版で成功実行をあと2回取得する。1回ずつしか揃わない場合は参考値としてのみ報告し、改善の確証とはしない。
+3. **実行順と同時実行の回避**: 基準版の成功実行を3回揃えた後、同じ版の測定処理を起動し、成功候補の記録を保存する。分割後も候補版の必須自動処理を3回成功させた後に測定処理を起動し、全7ファイル各3回の成功記録を得る。各段階で前の処理が完了したことをGitHub上の実行状態で確認してから次を起動する。必須自動処理と測定処理は同時に実行しない。測定処理は開始前に対象変更識別子と追跡済みファイル集合を確認し、実行記録および成果物の変更識別子が予定値と一致することを確認する。比較可能な基準記録が不足する間は速度改善を確定しない。
+
+既存の基準版の測定実行`37131069186`は成功し、必須実行`37128379698`完了後に開始したため、同時実行のない基準測定記録として利用できる。ただし、これだけではWindows必須自動処理の3回比較条件を満たさない。新しい`test/**/*.test.ts`の集合には新しい照合値を用い、旧ファイル集合の実行時間表は再利用・適用しない。
+
 ## 割当計画と分割間の一致
 
 計画生成はWindowsの前段に置く単一の準備処理で一度だけ行う。共通入力は完全な変更識別子、追跡済み対象一覧と内容照合値、実行時間表、対象環境、および同じ自動処理実行記録の`created_at`である。準備処理は`GITHUB_REPOSITORY`と`GITHUB_RUN_ID`から実行記録を取得し、`head_sha`、`run_attempt`、`created_at`を検証する。取得や検証に失敗した場合は割当計画を作らず失敗する。3つのWindows処理には同じ成果物を渡し、各処理はその内容を検証した後にのみ自身の明示されたファイル一覧を実行する。
