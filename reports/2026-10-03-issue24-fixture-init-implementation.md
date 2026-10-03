@@ -40,5 +40,6 @@
 
 - Implementation and focused local validation: complete.
 - Normal review: `pass_with_held`, no required findings; report `reports/2026-10-03-issue24-fixture-init-normal-review.md`. Held: Windows/Node 22 CI and the new Windows measurement are outstanding.
-- Full local equivalence gate, commit, push, Windows CI, new measurement run, and Issue #24 follow-up update: pending.
+- Full local equivalence gate: passed at `44c8bc2c8d660cd4129ae38be97fec7240579ce0` (`npm run lint`, `npm run check`, `npm run build`, `npm test`; 134 total, 123 pass, 0 fail, 11 platform skips). Evidence: `reports/2026-10-03-issue24-fixture-init-full-local-gate.md`.
+- New PR/push, matching Node 22/Windows CI, new measurement run, and Issue #24 follow-up update: pending.
 - No PR merge, manifest update, or independent-final reservation/freeze was performed.
