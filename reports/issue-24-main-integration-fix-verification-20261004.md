@@ -6,7 +6,7 @@
 - Pull request: #69, draft and open; base `main` at `8d9c77a49d342e15f7ce63802d3a1550eb158930`.
 - Branch: `issue-24-main-integration`.
 - Implementation base: `ecbb9f8e231f9bd5b728c4dce0792673daa8bbdd` (the current public PR head at review start).
-- Fix-verification reviewed implementation content: the uncommitted working-tree diff based on that HEAD. The commit identity will be recorded after normal convergence.
+- Fix-verification review target: working-tree content based on the implementation base above; that content was committed without code changes as `a9b928cfa5e2b835d0927bf9c262ff65ae115436`.
 - Review mode: bounded normal-review fix verification by the same reviewer as the R24-08 latest-main review.
 - Verification capability: `local_execution_available`; local source at `/tmp/issue24-main-integration`, Linux, Bash, Node.js 22 / npm 11.9.0. No dependency or lockfile change.
 - Scope: findings `KERO-R24-08-001` and `KERO-R24-08-002`, plus the historical 12-case correction in the previous report.
@@ -43,6 +43,7 @@ The previous latest-main review report contained an incorrect count of 13 cases 
 - TDD red for the symlink-safe initialization change: focused scheduler suite exited 1 before implementation because `init-diagnostic` was not supported, the workflow still initialized through PowerShell, and the symlink-output contract failed.
 - Focused green on the current implementation: `./node_modules/.bin/tsx --test test/ci-test-scheduler.test.ts` — 19 tests, 19 passed, 0 skipped, 0 failed. Includes outside-root output rejection and both symlink targets.
 - Final current-candidate local validation: `npm test` — 226 tests, 215 passed, 11 skipped, 0 failed; `npm run check`, `npm run build`, `npm run lint`, and `git diff --check` all exited 0. Markdown lint reported 143 files and 0 issues; design terminology lint passed.
+- Exact-HEAD PR workflow `37197042561` on `a9b928cfa5e2b835d0927bf9c262ff65ae115436` completed successfully. Ubuntu lint/check/build/test, Windows assignment preparation, and Windows shards 1–8 all succeeded; every shard uploaded diagnostics. This is the required workflow result for the implementation commit.
 - An earlier full run on the intermediate 225-test candidate passed 214/225 (11 skipped), but scheduler/workflow/test content changed afterward. It is retained as historical evidence only and is superseded by the final successful run above.
 - The final commands ran against the tracked tree based on `ecbb9f8e231f9bd5b728c4dce0792673daa8bbdd` with the seven modified tracked paths and the new fix-verification report. Command output contained the recorded test and lint results plus standard npm update notices.
 
@@ -51,4 +52,4 @@ The previous latest-main review report contained an incorrect count of 13 cases 
 - Exact-head PR CI for the new committed candidate is not yet available; the prior `ecbb9f8` run does not match the next implementation commit.
 - Windows-specific symlink and ACL behavior remains to be confirmed by the exact-head Windows workflow. Linux local results are not a substitute.
 - Issue #24 remains open; the 180-second goal has not been established by these fixes.
-- Next: finish current-candidate full local validation, commit and push the normal-review candidate, then wait for exact-head PR #69 CI. Return to the parent for cumulative final review. Do not merge or post the previously approval-pending comment.
+- Commit `a9b928c` is pushed to PR #69. The exact-head workflow above passed. Next: return to the parent for cumulative final review and merge decision. PR #69 remains draft/open/unmerged. Do not merge or post the previously approval-pending comment.
