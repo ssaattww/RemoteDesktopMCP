@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { getDefaultAutoSelectFamily, setDefaultAutoSelectFamily } from "node:net";
 import { test } from "node:test";
-import { applySessionLinkFetchResult, captureSessionLinkFetchLease, createSessionLink, fetchSessionLinkTitle, updateSessionLink, type SessionLinkOwnerState, type SessionLinkTransport } from "../src/session-links.js";
+import { applySessionLinkFetchResult, captureSessionLinkFetchLease, createSessionLink, fetchSessionLinkTitle, requestPinnedSessionLink, updateSessionLink, type SessionLinkOwnerState, type SessionLinkTransport } from "../src/session-links.js";
 
 const publicIpv4 = "93.184.216.34";
 
@@ -66,6 +68,34 @@ test("fetches a bounded UTF-8 HTML title through a pinned public address without
   assert.equal(fake.requests[0]?.address, publicIpv4);
   assert.equal(fake.requests[0]?.headers.Connection, "close");
   assert.equal(Object.keys(fake.requests[0]!.headers).some((key) => /cookie|authorization|referer/i.test(key)), false);
+});
+
+test("pinned HTTP transport honors Node autoSelectFamily lookup contract using only the selected IP", async () => {
+  const previousAutoSelectFamily = getDefaultAutoSelectFamily();
+  setDefaultAutoSelectFamily(true);
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end("<title>local fixture</title>");
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const result = await requestPinnedSessionLink(
+      new URL(`http://example.com:${address.port}/`),
+      "127.0.0.1",
+      { Connection: "close" },
+      new AbortController().signal,
+    );
+    assert.equal(result.status, 200);
+    assert.match(new TextDecoder().decode(result.body), /local fixture/u);
+  } finally {
+    if (server.listening) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    setDefaultAutoSelectFamily(previousAutoSelectFamily);
+  }
 });
 
 test("accepts quoted UTF-8 charset parameters and rejects malformed or other charsets", async () => {
