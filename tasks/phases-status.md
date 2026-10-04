@@ -12,6 +12,8 @@
 | P6 | Issue #56 共有作業一覧と更新期限制御 | T11 | セッション単位・初期有効・有効化後5分猶予の設計、TDD、通常レビュー、mainとPR #60統合後の回帰・レビューを完了 | Issue #56 Todo remains in main through PR #54 squash merge `8d9c77a`; keep T11 as a distinct tracked workstream unless its closure is separately confirmed. |
 | R24 | Issue #24 Windows CI実行時間の改善（独立workstream） | R24-01〜R24-08 | 必須テスト意味・網羅性・Windows検証を維持してCI時間を評価し、main統合候補の通常reviewとexact-head CIを完了。3分達成まではIssueを閉じない | R24-01〜06は8分割を採用済みだが3分未達。R24-08のPR #69はmain `8d9c77a` 対象のdraft。親最終レビューのKERO-R24-08-001/002を修正し、同一通常reviewerの限定確認はpass。実装candidate `a9b928c` は全体ローカル検証pass（226件中215 pass/11 skip/0 fail、check/build/lint/diff-check成功）とexact-head run `37197042561` 全job成功。PR #69へpush済みで、親の累積最終review/merge判断待ち。PR #62は比較・統合対象外 |
 
-現在の位置: 親確認でPR #54は `8d9c77a` としてmainへsquash merge済み、Issue #48はclosed。PR #54のsession edit、external links、main Todoを保持する。Issue #24は独立phase/workstream `R24` とし、mainのP5/R54とは別区分。3分目標未達のためIssue #24は未完了。
+| P7 | Issue #70 Todoモバイル配置・詳細同期 | T12 | 親承認済み設計をTDDで実装し、回帰、実UI、通常レビューを完了。Draft PR #72は親最終判断まで未merge | 設計承認済み。PR #72の作業branchを最新main `f20c75e` へ追従中。PR #69とは独立。通常reviewerはrole-profile制約でdispatchせず、親にレビューを依頼 |
+
+現在の位置: Issue #24のR24-08はPR #69のexact-head CI成功後、親最終レビュー/merge判断待ち。独立作業のT12は親設計承認を受け、PR #72のbranchを最新main `f20c75e` に追従してTDD実装へ進む。PR #69の成果は取り込まず再実装せず、T12固有差分のみ作成する。
 最小動作版の独立判定と提出証拠は `reports/2026-09-25-independent-review.md` と PR #1 を参照する。
 公開用の通常指摘は `reports/2026-09-25-remote-normal-review.md` で追跡し、ChatGPT の実操作と公開用の独立レビューは未完了。複数PCの F02 は後続であり、単一 PC 接続の完了条件には含めない。
