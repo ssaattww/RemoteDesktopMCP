@@ -12,16 +12,17 @@
 
 ## 実装内容
 
-- セッション詳細上部の作業一覧を複数行 textarea とし、項目本文・状態・操作を画面幅に合わせて配置。追加/編集/状態変更/削除は既存JSON更新APIを利用する。
+- セッション詳細上部の作業一覧を複数行 textarea とし、項目本文・状態・操作を画面幅に合わせて配置。追加/編集/状態変更/削除は既存JSON更新APIを利用する。状態ラベル・select・更新/削除を一列に並べ、タップ高さ44pxと本文相当の文字サイズを保つ。
 - 詳細画面のログ更新が成功したら、新着0件の場合を含め同じセッションの作業一覧を取得する。GETを直列化し、続行中の更新は末尾取得予約へまとめる。失敗時は画面状態を保ち、認証終了・画面離脱では応答と予約を破棄する。
 - 更新要求中に追加入力があっても成功応答で消さない。版競合は利用者が最新内容を使うか入力を残すか選ぶまで再送せず、別端末で削除された未保存入力は削除済みの下書きとして保持する。
-- 既存のセッション所有・CSRF・版照合APIを継続利用し、既存の強制機能切替経路も維持する。
+- 強制機能の状態と切替ボタンを同じインライン領域に表示し、既存フォーム・CSRF経路を維持する。追加フォームはaccessibleなネイティブdetails/summaryで初期折りたたみとし、詳細更新後も開閉状態と下書きを保持する。
+- 既存のセッション所有・CSRF・版照合APIを継続利用する。
 
 ## TDD と検証
 
 初期実装前の回帰試験は4件中3件が期待どおり失敗し、既存APIの改行契約1件は実装前から成功した。失敗は旧HTML入力欄、詳細更新後の作業一覧取得漏れ、JSON保存操作未配線を示した。
 
-親通常レビューは実装HEAD `1cf1985048ea8006add665948cd1425045ad971a` に対してfailし、R70-N01 (High)〜R70-N13 (Medium)を提示した。修正用回帰を加えてこのHEADを基準にした一時worktreeで選択13件を実行し、**12件fail / 1件pass** を確認した。passした遅延GET破棄以外は、SSR共通構造、競合別状態、世代保護、404終端、監査警告などが実装前に失敗した。修正後、R70-N03/N06/N09/N14/N15を狙った回帰6件は **6件fail / 0件pass** となり、追加fixture試験はOrigin不一致403、クライアント試験は追加競合による誤ブロック、secondary choice disabled、focus消失、古い409 snapshotの適用を検出した。修正後の同じ6件はすべてpass。さらに再確認で指摘された `[A,B,C]→[C,B,A]` の中央B移動で、同じindexでもfocus喪失する回帰を単独で再Red（旧処理1 fail / 0 pass）し、実際にfocusされた行をreorder中追跡する修正後は1 pass。重点Todo回帰は元の18件に追加6件を加えて24件を確認した。
+親通常レビューは実装HEAD `1cf1985048ea8006add665948cd1425045ad971a` に対してfailし、R70-N01 (High)〜R70-N13 (Medium)を提示した。修正用回帰を加えてこのHEADを基準にした一時worktreeで選択13件を実行し、**12件fail / 1件pass** を確認した。passした遅延GET破棄以外は、SSR共通構造、競合別状態、世代保護、404終端、監査警告などが実装前に失敗した。修正後、R70-N03/N06/N09/N14/N15を狙った回帰6件は **6件fail / 0件pass** となり、追加fixture試験はOrigin不一致403、クライアント試験は追加競合による誤ブロック、secondary choice disabled、focus消失、古い409 snapshotの適用を検出した。修正後の同じ6件はすべてpass。さらに再確認で指摘された `[A,B,C]→[C,B,A]` の中央B移動で、同じindexでもfocus喪失する回帰を単独で再Red（旧処理1 fail / 0 pass）し、実際にfocusされた行をreorder中追跡する修正後は1 pass。重点Todo回帰は元の18件に追加6件を加えて24件を確認した。R70-F01の変更本文/非並替え回帰は修正前に選択位置が末尾37へ移り1件fail、修正後は保存値・focus・選択開始/終了/方向・scroll保持を確認してpass。ユーザーUI依頼ではSSR/CSS契約が実装前にfailし、画像確認後のレイアウト反映と、開いた追加欄/入力途中draftの詳細更新保持を追加回帰で確認した。
 
 レビュー指摘の対応:
 
@@ -41,14 +42,20 @@
 - R70-N14 Medium: fixtureはlisten後に実際のLoopbackポートから `baseUrl` originを設定。通常ブラウザのOriginでログインできることをcreateApp起動の統合試験で確認。
 - R70-N15 Medium: Todo版を後退させる競合解決を拒否。遅れて届いた古い409は新snapshotを上書きせず、row/addの競合状態も現在版を維持。遅延409 JSONとversion 3 GETの交差試験を追加。
 
+同じPRに追加された独立final-review指摘とユーザーUI依頼:
+
+- R70-F01 Medium: 本文変更でactive textareaの値が変わったとき、行順が同じでも選択範囲・方向を復元し、focus/scrollも保持。既存N09の行移動追跡は変更せず存続。
+- UI依頼: 強制切替を状態右横、状態・select・更新・削除を単一行に配置。コントロールはmin-width/min-height 44px、ボタン文字を本文と同じ継承サイズにする。Todo追加欄は初期折りたたみのネイティブdetails/summaryで、通常refresh中はopen状態と入力draftを保つ。
+- 画像 `IMG_6246.jpg` / `IMG_6247.jpg` を確認し、モバイル操作列と強制切替の参照として利用。#71へのコード変更なし。
+
 実装後の最終検証:
 
-- `npm test`: exit 0、250 tests / 239 pass / 11 skip / 0 fail。
+- `npm test`: exit 0、252 tests / 241 pass / 11 skip / 0 fail。
 - `npm run check`: exit 0。
 - `npm run build`: exit 0。
 - `npm run lint`: exit 0。TypeScript ESLint、Markdown lint（144 files / 0 issues）、設計文書の日本語whitelist検査を含む。
 - `git diff --check`: exit 0。
-- 対象回帰: 元のdirty base保持、本文/状態の往復編集、動的行409、追加409後の別行編集/削除、版順序とmetadata、ログ409 resync、Todo 404、離脱/復帰中の遅延GET/PUT、削除済み下書きの二次確認disabled制御、行並替え中のfocus/caret/selection保持、古い409と新GETの交差、fixtureの実Origin login、audit warningを含む。
+- 対象回帰: 元のdirty base保持、本文/状態の往復編集、動的行409、追加409後の別行編集/削除、版順序とmetadata、ログ409 resync、Todo 404、離脱/復帰中の遅延GET/PUT、削除済み下書きの二次確認disabled制御、本文変更で非並替え時のfocus/caret/selection保持、3行並替え、add disclosureのopen/draft保持、320px向けCSS制約、古い409と新GETの交差、fixtureの実Origin login、audit warningを含む。
 
 ## 実UIの確認と未完了事項
 
@@ -74,5 +81,5 @@
 - 検証能力: `local_execution_available`
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
 - Push: 修正ブランチの最新HEADを通常push済み。PR #72はDraft維持。
-- CI: code HEAD `0859747c51f52626956c7f0df6af128cdf99a34c` の exact-head run `37206981513` はUbuntu lint/check/build/test、Windows準備job、8/8 Windows shardがすべて成功。N09残部を含む最終pushでは新しいexact-head runを確認する。
+- CI: code HEAD `b8f6290304f18c088172af2d0cc99c9456a74ef7` の exact-head run `37208015351` は全10 job成功。F01と追加UIを含む最新HEADのpush後にexact-head CIを再確認する。
 - 独立final review / merge: 未実施。

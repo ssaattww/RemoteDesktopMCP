@@ -40,7 +40,9 @@ class FakeElement {
   classList = { toggle: (name: string, force?: boolean) => Boolean(name && force !== false) };
   constructor(tagName = "div") { this.tagName = tagName.toLowerCase(); }
   checked = false;
-  value = "";
+  private storedValue = "";
+  get value() { return this.storedValue; }
+  set value(value: string) { this.storedValue = value; this.selectionStart = value.length; this.selectionEnd = value.length; this.selectionDirection = "none"; }
   name = "";
   type = "";
   required = false;
@@ -195,6 +197,8 @@ function todoFixture(sessionId = "todo-session", version = 1, text = "server tex
   conflict.append(latest); conflict.append(latestStatus); conflict.append(useLatest); conflict.append(keepDraft);
   row.append(textarea); row.append(status); row.append(save); row.append(remove); row.append(conflict); row.append(deletedNotice); row.append(deletedActions); row.append(readdConfirm);
   list.append(row);
+  const addDetails = new FakeElement("details"); addDetails.dataset.todoAddDetails = "true";
+  const addSummary = new FakeElement("summary"); addSummary.textContent = "作業を追加";
   const addText = new FakeElement("textarea");
   const addButton = new FakeElement("button");
   const addConflict = new FakeElement("div"); addConflict.hidden = true;
@@ -218,8 +222,9 @@ function todoFixture(sessionId = "todo-session", version = 1, text = "server tex
   panel.queries.set('[data-todo-op="use-latest-add"]', useLatestAdd);
   panel.queries.set('[data-todo-op="keep-draft-add"]', keepDraftAdd);
   panel.queries.set('[data-todo-op="add"]', addButton);
-  panel.append(summary); panel.append(notice); panel.append(list); panel.append(addText); panel.append(addButton); panel.append(addConflict);
-  return { panel, summary, notice, list, row, textarea, status, save, remove, conflict, latest, useLatest, keepDraft, addText, addButton, addConflict, addLatest, useLatestAdd, keepDraftAdd, discardDeleted, readdDeleted, readdConfirm, replaceAddDraft, keepAddDraft };
+  addDetails.append(addSummary, addText, addButton, addConflict);
+  panel.append(summary); panel.append(notice); panel.append(list); panel.append(addDetails);
+  return { panel, summary, notice, list, row, textarea, status, save, remove, conflict, latest, useLatest, keepDraft, addDetails, addSummary, addText, addButton, addConflict, addLatest, useLatestAdd, keepDraftAdd, discardDeleted, readdDeleted, readdConfirm, replaceAddDraft, keepAddDraft };
 }
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
@@ -602,6 +607,48 @@ test("Todo snapshot reordering preserves focused textarea selection on a moved r
   assert.equal(secondText.selectionEnd, 5);
   assert.equal(secondText.selectionDirection, "backward");
   assert.equal(secondText.focusOptions?.preventScroll, true);
+  void ui;
+});
+
+test("Todo snapshot text changes preserve an active textarea selection without reordering", async () => {
+  const fixture = todoFixture();
+  let finishSnapshot!: (value: unknown) => void;
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return { status: 200, ok: true, json: async () => await new Promise((resolve) => { finishSnapshot = resolve; }) } as ReturnType<typeof response>;
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle();
+  fixture.textarea.focus(); fixture.textarea.setSelectionRange(3, 8, "backward");
+  finishSnapshot({ version: 2, items: [{ id: "todo-1", text: "server text updated by another client", status: "not_started", order: 0 }], total: 1, completed: 0 });
+  await settle(); await settle();
+  assert.equal(fixture.textarea.value, "server text updated by another client");
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-1"], "the snapshot keeps the existing row order");
+  assert.equal(FakeElement.activeElement, fixture.textarea);
+  assert.equal(fixture.textarea.selectionStart, 3);
+  assert.equal(fixture.textarea.selectionEnd, 8);
+  assert.equal(fixture.textarea.selectionDirection, "backward");
+  void ui;
+});
+
+test("ordinary Todo refresh preserves an open add disclosure and its unfinished draft", async () => {
+  const fixture = todoFixture();
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-1", text: "server text", status: "not_started" }], total: 1, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.addDetails.open = true;
+  fixture.addText.value = "unfinished add draft";
+  fixture.addText.listeners.get("input")?.({ target: fixture.addText });
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.addDetails.open, true, "a detail refresh must not close the user's open disclosure");
+  assert.equal(fixture.addText.value, "unfinished add draft");
+  assert.equal(fixture.addConflict.hidden, false, "the pending draft remains available for explicit conflict resolution");
   void ui;
 });
 

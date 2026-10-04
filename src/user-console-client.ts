@@ -271,7 +271,7 @@ function clientBootstrap(): void {
     const focusedRow = activeElement ? oldRows.find((row) => row.contains(activeElement)) : undefined;
     const activeControl = activeElement as (HTMLInputElement | HTMLTextAreaElement) | null;
     const selection = activeControl && "selectionStart" in activeControl && "selectionEnd" in activeControl
-      ? { start: activeControl.selectionStart, end: activeControl.selectionEnd, direction: activeControl.selectionDirection }
+      ? { start: activeControl.selectionStart, end: activeControl.selectionEnd, direction: activeControl.selectionDirection, value: activeControl.value }
       : undefined;
     const scrollX = window.scrollX; const scrollY = window.scrollY;
     const itemIds = new Set(snapshot.items.map((item) => item.id));
@@ -312,13 +312,14 @@ function clientBootstrap(): void {
         const row = desiredRows[index]!; const current = todoRows();
         if (current[index] !== row) { if (row === focusedRow) movedFocusedRow = true; list.insertBefore(row, current[index] ?? null); }
       }
-      if (focusedRow && movedFocusedRow && desiredRows.includes(focusedRow) && activeElement) {
-        if (document.activeElement !== activeElement) activeElement.focus({ preventScroll: true });
-        if (selection && typeof activeControl?.setSelectionRange === "function") {
-          try { activeControl.setSelectionRange(selection.start ?? 0, selection.end ?? 0, selection.direction ?? "none"); } catch { /* Some input types do not support text selection. */ }
-        }
-        window.scrollTo(scrollX, scrollY);
+    }
+    const activeValueChanged = Boolean(selection && activeControl?.value !== selection.value);
+    if (focusedRow && desiredRows.includes(focusedRow) && activeElement && (movedFocusedRow || activeValueChanged || document.activeElement !== activeElement)) {
+      if (document.activeElement !== activeElement) activeElement.focus({ preventScroll: true });
+      if (selection && typeof activeControl?.setSelectionRange === "function") {
+        try { activeControl.setSelectionRange(selection.start ?? 0, selection.end ?? 0, selection.direction ?? "none"); } catch { /* Some input types do not support text selection. */ }
       }
+      window.scrollTo(scrollX, scrollY);
     }
     todoVersion = snapshot.version; todoPanel.dataset.version = String(todoVersion);
     for (const stateRow of todoRows()) if (!stateFor(stateRow).deletedDraft && !stateFor(stateRow).conflict) stateFor(stateRow).baseVersion = snapshot.version;
