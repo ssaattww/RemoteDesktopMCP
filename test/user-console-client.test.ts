@@ -39,11 +39,18 @@ class FakeElement {
   classList = { toggle: (name: string, force?: boolean) => Boolean(name && force !== false) };
   constructor(tagName = "div") { this.tagName = tagName.toLowerCase(); }
   checked = false;
+  value = "";
+  name = "";
+  type = "";
+  required = false;
+  maxLength = 0;
+  innerHTML = "";
   focus(options?: { preventScroll?: boolean }) { FakeElement.activeElement = this; this.focusOptions = options; }
   addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
   click(name = "click") { this.listeners.get(name)?.({ target: this }); }
-  replaceChildren(...children: FakeElement[]) { this.onReplaceChildren?.(this.children); this.children = children; for (const child of children) child.parentElement = this; }
-  append(child: FakeElement) { this.children.push(child); child.parentElement = this; }
+  replaceChildren(...children: FakeElement[]) { this.onReplaceChildren?.(this.children); for (const child of this.children) child.parentElement = null; this.children = []; for (const child of children) this.append(child); }
+  append(child: FakeElement) { child.parentElement?.remove(child); this.children.push(child); child.parentElement = this; }
+  remove(child: FakeElement) { this.children = this.children.filter((candidate) => candidate !== child); child.parentElement = null; }
   get parent() { return this.parentElement; }
   insertRow() { const row = new FakeElement("tr"); this.append(row); return row; }
   insertCell() { const cell = new FakeElement("td"); this.append(cell); return cell; }
@@ -55,6 +62,7 @@ class FakeElement {
     if (selector.startsWith("tr[data-event-json]")) return this.children.filter((child) => child.tagName === "tr" && child.dataset.eventJson !== undefined) as T[];
     if (selector === "tr[data-session-id]") return this.children.filter((child) => child.tagName === "tr" && child.dataset.sessionId !== undefined) as T[];
     const descendants = this.allDescendants();
+    if (selector === "form[data-session-edit]" || selector === "[data-session-edit]") return descendants.filter((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) as T[];
     if (selector === "details[data-session-time]") return descendants.filter((child) => child.tagName === "details" && child.dataset.sessionTime !== undefined) as T[];
     if (selector === "time[data-session-relative]") return descendants.filter((child) => child.tagName === "time" && child.dataset.sessionRelative !== undefined) as T[];
     return [] as T[];
@@ -62,6 +70,7 @@ class FakeElement {
   querySelector<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return override as T;
+    if (selector === "form[data-session-edit]") return (this.allDescendants().find((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) ?? null) as T | null;
     if (selector === "h2") return (this.children.find((child) => child.tagName === "h2") ?? null) as T | null;
     if (selector === "h3") return (this.children.find((child) => child.tagName === "h3") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     if (selector === "summary") return (this.children.find((child) => child.tagName === "summary") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
@@ -69,7 +78,7 @@ class FakeElement {
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     return null;
   }
-  closest<T extends FakeElement>(selector: string) { let current: FakeElement | null = this; while (current) { if (selector === "tr[data-session-id]" && current.tagName === "tr" && current.dataset.sessionId !== undefined) return current as T; if (selector === "td" && current.tagName === "td") return current as T; if (current.closestNodes.has(selector)) return current.closestNodes.get(selector) as T; current = current.parentElement; } return null; }
+  closest<T extends FakeElement>(selector: string) { let current: FakeElement | null = this; while (current) { if ((selector === "tr" && current.tagName === "tr") || (selector === "tr[data-session-id]" && current.tagName === "tr" && current.dataset.sessionId !== undefined) || (selector === "td" && current.tagName === "td") || (selector === "form[data-session-edit]" && current.tagName === "form" && current.dataset.sessionEdit !== undefined)) return current as T; if (current.closestNodes.has(selector)) return current.closestNodes.get(selector) as T; current = current.parentElement; } return null; }
   contains(node: FakeElement | null) { let current = node; while (current) { if (current === this) return true; current = current.parentElement; } return false; }
   getBoundingClientRect() { return this.rect; }
   get cells() { return this.children.filter((child) => child.tagName === "td"); }
@@ -148,9 +157,9 @@ function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType
   const documentListeners = new Map<string, (event?: unknown) => void>();
   const createTreeWalker = (rootNode: FakeElement) => { const nodes: FakeElement[] = []; const visit = (element: FakeElement) => { if (element.textContent && element.children.length === 0) { const textNode = new FakeElement("#text"); textNode.textContent = element.textContent; textNode.parentElement = element; nodes.push(textNode); } for (const child of element.children) visit(child); }; visit(rootNode); let index = 0; return { nextNode: () => nodes[index++] ?? null }; };
   const createRange = () => { let startNode: FakeElement | null = null; let startOffset = 0; let endNode: FakeElement | null = null; let endOffset = 0; const compare = (left: FakeElement | null, leftOffset: number, right: FakeElement | null, rightOffset: number) => { if (!left || !right) return 0; const leftRow = left.closest<FakeElement>("tr[data-session-id]"); const rightRow = right.closest<FakeElement>("tr[data-session-id]"); const rowOrder = (leftRow?.dataset.sessionId ?? "").localeCompare(rightRow?.dataset.sessionId ?? ""); if (rowOrder) return rowOrder; const leftCell = left.closest<FakeElement>("td"); const rightCell = right.closest<FakeElement>("td"); const cellOrder = (leftRow?.cells.indexOf(leftCell!) ?? 0) - (rightRow?.cells.indexOf(rightCell!) ?? 0); return cellOrder || leftOffset - rightOffset; }; const range = { selectNodeContents: () => undefined, setEnd: (node: FakeElement, at: number) => { endNode = node; endOffset = at; }, setStart: (node: FakeElement, at: number) => { startNode = node; startOffset = at; }, collapse: () => { endNode = startNode; endOffset = startOffset; }, compareBoundaryPoints: (_how: number, other: typeof range) => compare(startNode, startOffset, other.startContainer, other.startOffset), get startContainer() { return startNode; }, get startOffset() { return startOffset; }, get endContainer() { return endNode; }, get endOffset() { return endOffset; }, toString: () => "x".repeat(endOffset) }; return range as unknown as Range; };
-  const documentStub = { hidden: options.hidden ?? false, get activeElement() { return FakeElement.activeElement; }, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), createRange, createTreeWalker, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
+  const documentStub = { hidden: options.hidden ?? false, get activeElement() { return FakeElement.activeElement; }, getElementById: (id: string) => elements.get(id) ?? null, querySelectorAll: (selector: string) => [...elements.values()].flatMap((element) => element.querySelectorAll(selector)), createElement: (tagName: string) => new FakeElement(tagName), createRange, createTreeWalker, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
   const ClockDate = class extends Date { constructor(value?: string | number) { super(value ?? clock.now); } static now() { return clock.now; } };
-  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URL, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
   const emptyTimers = new Map<number, { callback: () => void; delay: number }>();
   const emptyTimeouts = new Map<number, { due: number; callback: () => void }>();
   return { root, status, newest, older, windowStub, documentStub, documentListeners, windowListeners, intervals: clock.intervals, timeouts: clock.timers, tickIntervals: () => { for (const timer of [...clock.intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...clock.intervals.values()]) if (timer.delay === delay) timer.callback(); }, advanceTime: async (milliseconds: number) => clock.advance(milliseconds), setNow: (value: number) => { clock.now = value; }, get scrollCalls() { return scrollCalls; }, scrollTargets, sources: FakeEventSource.instances };
@@ -372,6 +381,27 @@ test("session timestamp disclosure, relative value, open state, and focus surviv
   await clock.advance(1_000);
   assert.equal(newSummary?.children[0]?.textContent, "1分前", "relative time updates in place without another state request");
   assert.equal(stateCalls, 2);
+});
+
+test("session-link-updated does not bypass a paused auto-refresh setting", async () => {
+  const rows = new FakeElement("tbody");
+  const toggle = new FakeElement("input"); toggle.checked = false;
+  const calls: string[] = [];
+  const ui = boot(async (url) => {
+    calls.push(url);
+    return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z",
+      sessions: [{ session_id: "paused-link", created_at: "2026-10-03T00:00:00Z", state: "active", active: true, external_url: "https://example.com/old", external_title: "Old title" }],
+      running: [],
+    });
+  }, [], { "session-rows": rows, "auto-refresh": toggle });
+  await settle();
+  const initialStateCalls = calls.filter((url) => url.startsWith("/api/console-state")).length;
+  ui.sources[0]!.dispatch("session-link-updated", JSON.stringify({ session_id: "paused-link" }));
+  await settle();
+  assert.equal(calls.filter((url) => url.startsWith("/api/console-state")).length, initialStateCalls);
+  assert.equal(calls.some((url) => url.startsWith("/api/logs")), false);
+  assert.equal(rows.children[0]?.children[7]?.children[0]?.textContent, "Old title");
 });
 
 test("state refresh updates only session and running rows with the selected filter", async () => {
@@ -1246,4 +1276,340 @@ test("pagehide and auth expiry discard a deferred session state", async () => {
     await settle();
     assert.equal(rows.children[0], oldRow, `${ending} discards deferred updates`);
   }
+});
+
+
+test("session metadata editor uses the authenticated PATCH contract and preserves input on a version conflict", async () => {
+  const directory = { value: "C:/old" };
+  const purpose = { value: "Old purpose" };
+  const output = { textContent: "" };
+  const button = { disabled: false, addEventListener: () => undefined };
+  const directoryCell = { textContent: "C:/old" };
+  const purposeCell = { textContent: "Old purpose" };
+  const row = { querySelector: (selector: string) => selector === "[data-session-directory]" ? directoryCell : purposeCell };
+  let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  const form = {
+    dataset: { sessionEdit: "owned/session", version: "3" },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf-token" } : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null },
+    addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
+    querySelector: (selector: string) => selector === "output" ? output : button,
+    closest: () => row,
+  };
+  const requests: Array<{ url: string; init: { method: string; headers: Record<string, string>; body: string } }> = [];
+  let patchCount = 0;
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null },
+    encodeURIComponent,
+    fetch: async (url: string, init: { method: string; headers: Record<string, string>; body: string }) => {
+      requests.push({ url, init });
+      if (init.method !== "PATCH") return response(200, { sessions: [{ session_id: "owned/session", active: true, version: 5, working_directory: "C:/latest", purpose: "Latest purpose" }] });
+      patchCount++;
+      return patchCount === 1 ? response(200, { version: 4, working_directory: "C:/canonical", purpose: "New purpose" }) : response(409, { error: "version_conflict" });
+    },
+  });
+  assert.ok(handler);
+  await handler({ preventDefault() {} });
+  assert.equal(requests[0]?.url, "/api/sessions/owned%2Fsession");
+  assert.equal(requests[0]?.init.method, "PATCH");
+  assert.equal(requests[0]?.init.headers["x-csrf-token"], "csrf-token");
+  assert.deepEqual(JSON.parse(requests[0]!.init.body), { expectedVersion: 3, workingDirectory: "C:/old", purpose: "Old purpose" });
+  assert.equal(form.dataset.version, "4");
+  assert.equal(directory.value, "C:/canonical");
+  assert.equal(purpose.value, "New purpose");
+  assert.equal(directoryCell.textContent, "C:/canonical");
+  assert.equal(purposeCell.textContent, "New purpose");
+  purpose.value = "Unsaved conflicting input";
+  await handler({ preventDefault() {} });
+  assert.equal(form.dataset.version, "4");
+  assert.equal(purpose.value, "Unsaved conflicting input");
+  assert.match(output.textContent, /競合しました/);
+  assert.equal(button.disabled, false);
+});
+
+
+test("session metadata editor keeps typing made while a save is pending", async () => {
+  const directory = { value: "C:/old" };
+  const purpose = { value: "Submitted purpose" };
+  const output = { textContent: "" };
+  const form = {
+    dataset: { sessionEdit: "session-1", version: "1" },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null },
+    addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
+    querySelector: (selector: string) => selector === "output" ? output : button,
+    closest: () => row,
+  };
+  const button = { disabled: false, addEventListener: () => undefined };
+  const linkCell = { textContent: "", replaceChildren() {} };
+  const row = { querySelector: () => linkCell };
+  let release!: (value: ReturnType<typeof response>) => void;
+  let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null }, encodeURIComponent,
+    fetch: () => new Promise<ReturnType<typeof response>>((resolve) => { release = resolve; }),
+  });
+  assert.ok(handler);
+  const saving = handler({ preventDefault() {} });
+  purpose.value = "Typed while waiting";
+  release(response(200, { version: 2, working_directory: "C:/old", purpose: "Submitted purpose" }));
+  await saving;
+  assert.equal(purpose.value, "Typed while waiting");
+  assert.equal(form.dataset.version, "2");
+  assert.match(output.textContent, /未保存/);
+});
+
+
+test("link editor sends sparse intent so a fetched title survives unrelated saves and explicit clearing is distinct", async () => {
+  const directory = { value: "C:/work" };
+  const purpose = { value: "Original" };
+  const externalUrl = { value: "https://example.com/page" };
+  const externalTitle = { value: "Fetched title" };
+  const output = { textContent: "" };
+  const button = { disabled: false, addEventListener() {} };
+  const linkCell = { textContent: "", replaceChildren() {} };
+  const row = { querySelector: (selector: string) => selector === "[data-session-external-link]" ? linkCell : null };
+  let handler: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  const form = {
+    dataset: { sessionEdit: "session-1", version: "2" },
+    elements: { namedItem: (name: string) => ({ csrf: { value: "csrf" }, workingDirectory: directory, purpose, externalUrl, externalTitle } as Record<string, { value: string }>)[name] ?? null },
+    addEventListener: (_name: string, listener: (event: { preventDefault(): void }) => Promise<void>) => { handler = listener; },
+    querySelector: (selector: string) => selector === "output" ? output : button,
+    closest: () => row,
+  };
+  const requests: Array<{ body: string }> = [];
+  let calls = 0;
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null }, encodeURIComponent,
+    fetch: async (_url: string, init: { body: string }) => {
+      requests.push(init); calls++;
+      return calls === 1
+        ? response(200, { version: 3, working_directory: "C:/work", purpose: "Updated", external_url: externalUrl.value, external_title: "Fetched title", external_title_source: "fetched", external_title_status: "resolved" })
+        : response(200, { version: 4, working_directory: "C:/work", purpose: "Updated", external_url: externalUrl.value, external_title: null, external_title_source: null, external_title_status: "pending" });
+    },
+  });
+  assert.ok(handler);
+  purpose.value = "Updated";
+  await handler({ preventDefault() {} });
+  const sparse = JSON.parse(requests[0]!.body) as Record<string, unknown>;
+  assert.equal(Object.hasOwn(sparse, "externalUrl"), false);
+  assert.equal(Object.hasOwn(sparse, "externalTitle"), false, "an unrelated save omits fetched title intent");
+  assert.equal(externalTitle.value, "Fetched title");
+  externalTitle.value = "";
+  await handler({ preventDefault() {} });
+  const clearing = JSON.parse(requests[1]!.body) as Record<string, unknown>;
+  assert.equal(Object.hasOwn(clearing, "externalUrl"), false);
+  assert.equal(clearing.externalTitle, null, "an explicit empty title is sent as a clear operation");
+  assert.equal(externalTitle.value, "");
+  assert.equal(form.dataset.version, "4");
+});
+
+
+test("a state snapshot started before a successful save cannot restore its older session version", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const row = new FakeElement("tr"); sessionRows.append(row);
+  const directoryCell = new FakeElement("td"); directoryCell.dataset.sessionDirectory = "true"; row.append(directoryCell);
+  const purposeCell = new FakeElement("td"); purposeCell.dataset.sessionPurpose = "true"; row.append(purposeCell);
+  const editorCell = new FakeElement("td"); row.append(editorCell);
+  const disclosure = new FakeElement("details"); editorCell.append(disclosure);
+  const summary = new FakeElement("summary"); disclosure.append(summary);
+  const form = new FakeElement("form"); form.dataset = { sessionEdit: "session-1", version: "1" }; disclosure.append(form);
+  const directory = new FakeElement("input"); directory.value = "C:/new";
+  const purpose = new FakeElement("input"); purpose.value = "New purpose";
+  const csrf = new FakeElement("input"); csrf.value = "csrf";
+  Object.assign(form, { elements: { namedItem: (name: string) => name === "csrf" ? csrf : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null } });
+  const output = new FakeElement("output"); const submitButton = new FakeElement("button");
+  form.queries.set("output", output); form.queries.set("button[type=submit]", submitButton);
+  row.queries.set("[data-session-directory]", directoryCell); row.queries.set("[data-session-purpose]", purposeCell);
+  let releaseRefresh!: (value: ReturnType<typeof response>) => void;
+  let refreshCount = 0;
+  let patchFinished = false;
+  const ui = boot(async (url, init) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") {
+      if (refreshCount++ === 0) return new Promise((resolve) => { releaseRefresh = resolve; });
+      return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [
+        { session_id: "session-1", working_directory: "C:/stale", purpose: "Stale purpose", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 1 },
+      ] });
+    }
+    if (request.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (request.pathname === "/api/sessions/session-1" && init?.method === "PATCH") { patchFinished = true; return response(200, { version: 2, working_directory: "C:/new", purpose: "New purpose" }); }
+    throw new Error("unexpected request " + request.href);
+  }, [], { "session-rows": sessionRows, form });
+  await settle();
+  const submit = form.listeners.get("submit") as unknown as (event: { preventDefault(): void }) => Promise<void>;
+  await submit({ preventDefault() {} });
+  assert.equal(patchFinished, true);
+  assert.equal(form.dataset.version, "2");
+  assert.equal(directoryCell.textContent, "C:/new");
+  releaseRefresh(response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/old", purpose: "Old purpose", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 1 },
+  ] }));
+  await settle();
+  assert.equal(directoryCell.textContent, "C:/new", "a pre-save response cannot roll back the committed display values");
+  assert.equal(purposeCell.textContent, "New purpose");
+  assert.equal(form.dataset.version, "2", "the saved compare version advances independently of the editor draft version");
+  ui.newest.click();
+  await settle(); await settle();
+  assert.equal(directoryCell.textContent, "C:/new", "a later response with an older saved version is also ignored");
+  assert.equal(form.dataset.version, "2");
+  ui.sources[0]?.close();
+});
+
+
+test("out-of-order state refresh responses apply only the newest requested snapshot", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const pending: Array<(value: ReturnType<typeof response>) => void> = [];
+  const ui = boot(async (url) => {
+    if (new URL(url, "http://local.test").pathname === "/api/console-state") return new Promise((resolve) => { pending.push(resolve); });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": sessionRows });
+  await settle();
+  ui.newest.click();
+  await settle();
+  assert.equal(pending.length, 2);
+  const latest = { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:02:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/latest", purpose: "Latest", created_at: "2026-10-02T00:00:00Z", state: "active", active: true, version: 3 },
+  ] };
+  pending[1]!(response(200, latest));
+  await settle();
+  pending[0]!(response(200, { ...latest, activeSessions: 0, sessions: [{ ...latest.sessions[0]!, working_directory: "C:/older", purpose: "Older", state: "closed", active: false, version: 2 }] }));
+  await settle();
+  assert.equal(sessionRows.children[0]?.children[6]?.textContent, "C:/latest");
+  assert.equal(sessionRows.children[0]?.children[4]?.textContent, "Latest");
+  assert.equal(sessionRows.children[0]?.children[3]?.textContent, "有効", "an older response cannot roll back session lifecycle");
+  ui.sources[0]?.close();
+});
+
+
+test("version conflicts load the latest values and require an explicit re-edit choice", async () => {
+  const directory = { value: "C:/draft" }; const purpose = { value: "Draft purpose" };
+  const output = { textContent: "" }; const summary = { textContent: "" }; const conflict = { hidden: true };
+  const keepDraft = { clickHandler: undefined as (() => void) | undefined, addEventListener: (_: string, handler: () => void) => { keepDraft.clickHandler = handler; } };
+  const useLatest = { clickHandler: undefined as (() => void) | undefined, addEventListener: (_: string, handler: () => void) => { useLatest.clickHandler = handler; } };
+  const submitButton = { disabled: false };
+  const row = { querySelector: () => ({ textContent: "" }) };
+  let submit: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  let patchCalls = 0;
+  const form = {
+    dataset: { sessionEdit: "session-1", version: "1" },
+    elements: { namedItem: (name: string) => name === "csrf" ? { value: "csrf" } : name === "workingDirectory" ? directory : name === "purpose" ? purpose : null },
+    addEventListener: (_: string, handler: (event: { preventDefault(): void }) => Promise<void>) => { submit = handler; },
+    querySelector: (selector: string) => selector === "output" ? output : selector === "[data-session-conflict]" ? conflict : selector === "[data-session-conflict-summary]" ? summary : selector.includes("keep-draft") ? keepDraft : selector.includes("use-latest") ? useLatest : submitButton,
+    closest: () => row,
+  };
+  runInNewContext(userConsoleClientScript, {
+    document: { querySelectorAll: () => [form], getElementById: () => null }, encodeURIComponent,
+    fetch: async (_url: string, init?: { method?: string }) => {
+      if (init?.method === "PATCH") { patchCalls++; return response(409, { error: "version_conflict" }); }
+      return response(200, { sessions: [{ session_id: "session-1", active: true, version: 2, working_directory: "C:/latest", purpose: "Latest purpose" }] });
+    },
+  });
+  assert.ok(submit);
+  await submit({ preventDefault() {} });
+  assert.equal(patchCalls, 1, "a conflict must never trigger an automatic retry");
+  assert.equal(conflict.hidden, false);
+  assert.match(summary.textContent, /C:\/latest.*Latest purpose/);
+  assert.equal(directory.value, "C:/draft");
+  keepDraft.clickHandler?.();
+  assert.equal(form.dataset.version, "2");
+  assert.equal(directory.value, "C:/draft");
+  assert.equal(conflict.hidden, true);
+  await submit({ preventDefault() {} });
+  assert.equal(patchCalls, 2);
+  useLatest.clickHandler?.();
+  assert.equal(form.dataset.version, "2");
+  assert.equal(directory.value, "C:/latest");
+  assert.equal(purpose.value, "Latest purpose");
+});
+
+
+test("state refresh reconciles rows by session id while preserving live edit DOM, drafts, time disclosure, and focus", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const originalRow = new FakeElement("tr"); sessionRows.append(originalRow);
+  const linkCell = new FakeElement("td"); originalRow.append(linkCell);
+  const createdCell = new FakeElement("td"); originalRow.append(createdCell);
+  const createdTime = new FakeElement("details"); createdTime.dataset = { sessionId: "session-1", sessionTime: "created" }; createdTime.open = true;
+  const createdSummary = new FakeElement("summary"); createdTime.append(createdSummary); createdCell.append(createdTime);
+  const accessCell = new FakeElement("td"); originalRow.append(accessCell);
+  const accessTime = new FakeElement("details"); accessTime.dataset = { sessionId: "session-1", sessionTime: "last-access" };
+  const accessSummary = new FakeElement("summary"); accessTime.append(accessSummary); accessCell.append(accessTime);
+  originalRow.append(new FakeElement("td"));
+  const purposeCell = new FakeElement("td"); purposeCell.dataset.sessionPurpose = "true"; originalRow.append(purposeCell);
+  const idCell = new FakeElement("td"); idCell.textContent = "session-1"; originalRow.append(idCell);
+  const directoryCell = new FakeElement("td"); directoryCell.dataset.sessionDirectory = "true"; originalRow.append(directoryCell);
+  const editorCell = new FakeElement("td"); originalRow.append(editorCell);
+  const editorDisclosure = new FakeElement("details"); editorDisclosure.open = true; editorCell.append(editorDisclosure);
+  const editorSummary = new FakeElement("summary"); editorDisclosure.append(editorSummary);
+  const sessionForm = new FakeElement("form"); sessionForm.dataset = { sessionEdit: "session-1", version: "1" }; editorDisclosure.append(sessionForm);
+  const directoryInput = new FakeElement("input"); directoryInput.value = "C:/draft";
+  const purposeInput = new FakeElement("input"); purposeInput.value = "Unsaved purpose";
+  const csrfInput = new FakeElement("input"); csrfInput.value = "csrf";
+  sessionForm.append(directoryInput); sessionForm.append(purposeInput); sessionForm.append(csrfInput);
+  Object.assign(sessionForm, { elements: { namedItem: (name: string) => name === "workingDirectory" ? directoryInput : name === "purpose" ? purposeInput : name === "csrf" ? csrfInput : null } });
+
+  const stateA = { stopped: false, activeSessions: 2, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/server-value", purpose: "Server purpose", external_url: "https://example.com/", external_title: "Fetched title", external_title_source: "fetched", external_title_status: "resolved", created_at: "2026-10-02T00:00:00Z", last_used_at: "2026-10-03T00:00:00Z", state: "active", active: true, version: 2 },
+    { session_id: "session-2", working_directory: "C:/added", purpose: "Added session", external_url: null, external_title: "Title without URL", external_title_source: "manual", external_title_status: "not_requested", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, version: 1 },
+    { session_id: "session-3", working_directory: "C:/closed", purpose: "Closed session", created_at: "2026-09-30T00:00:00Z", state: "closed", active: false },
+  ] };
+  const stateB = { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:01:00Z", sessions: [
+    { session_id: "session-1", working_directory: "C:/server-value-2", purpose: "Ended session", created_at: "2026-10-02T00:00:00Z", last_used_at: "2026-10-03T00:01:00Z", state: "closed", active: false },
+    { session_id: "session-2", working_directory: "C:/added-updated", purpose: "Still active", created_at: "2026-10-01T00:00:00Z", state: "active", active: true, version: 2 },
+  ] };
+  let refresh = 0;
+  const ui = boot(async (url) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") { refresh++; return response(200, refresh <= 2 ? stateA : stateB); }
+    if (request.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    throw new Error("unexpected request " + request.href);
+  }, [], { "session-rows": sessionRows });
+  FakeElement.activeElement = purposeInput;
+  await settle();
+  assert.equal(refresh, 1);
+  assert.equal(sessionRows.children.length, 3, "new and closed sessions are reconciled into the all-sessions table");
+  const updatedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
+  assert.ok(updatedRow);
+  assert.equal(updatedRow.children[4]?.textContent, "Server purpose");
+  assert.equal(updatedRow.children[6]?.textContent, "C:/server-value");
+  assert.equal(updatedRow.children[7]?.children[0]?.textContent, "Fetched title", "the owner session link uses fetched title as text");
+  assert.equal(updatedRow.children[7]?.children[0]?.rel, "noopener noreferrer");
+  assert.equal(updatedRow.children[7]?.children[0]?.referrerPolicy, "no-referrer");
+  assert.equal(updatedRow.children[7]?.children[1]?.textContent, "自動取得");
+  assert.equal(updatedRow.children[7]?.className, "session-external-link-cell", "auto-refreshed rows retain the narrow-screen wrapping class");
+  assert.equal(sessionRows.children[1]?.children[7]?.children[0]?.className, "session-external-title");
+  assert.equal(sessionRows.children[1]?.children[7]?.children[0]?.textContent, "Title without URL");
+  assert.equal(updatedRow.querySelector("form[data-session-edit]"), sessionForm, "the same editor form is moved into the reconciled row");
+  assert.equal(directoryInput.value, "C:/draft");
+  assert.equal(purposeInput.value, "Unsaved purpose");
+  assert.equal(sessionForm.dataset.version, "1", "a refresh does not silently advance the draft's compare version");
+  assert.equal(FakeElement.activeElement, purposeInput);
+  assert.equal(purposeInput.focusOptions?.preventScroll, true);
+  assert.equal(updatedRow.children[1]?.children[0]?.open, true);
+  assert.equal(sessionRows.children[1]?.children[8]?.innerHTML.includes('data-session-edit="session-2"'), true, "new active sessions receive an editor");
+  const closedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-3")!;
+  assert.equal(closedRow.querySelector("form[data-session-edit]"), null, "closed sessions never retain an editor");
+
+  FakeElement.activeElement = editorSummary;
+  ui.newest.click();
+  await settle(); await settle();
+  assert.equal(refresh, 2);
+  assert.equal(sessionRows.children.length, 3, "the intermediate refresh retains the active editor row");
+  const editorFocusRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
+  const restoredEditorSummary = editorFocusRow.children[8]?.querySelector("summary");
+  assert.equal(FakeElement.activeElement, restoredEditorSummary, "the editor summary keeps keyboard focus after its row is replaced");
+  assert.equal(restoredEditorSummary?.focusOptions?.preventScroll, true);
+
+  const currentCreatedSummary = editorFocusRow.children[1]?.children[0]?.children[0];
+  assert.equal(currentCreatedSummary?.tagName, "summary");
+  FakeElement.activeElement = currentCreatedSummary ?? null;
+  ui.newest.click();
+  await settle(); await settle();
+  assert.equal(refresh, 3);
+  const endedRow = sessionRows.children.find((row) => row.children[5]?.textContent === "session-1")!;
+  assert.equal(endedRow.children[3]?.textContent, "終了");
+  assert.equal(endedRow.querySelector("form[data-session-edit]"), null, "an editor is removed when its session ends");
+  assert.equal(sessionRows.children.some((row) => row.children[5]?.textContent === "session-3"), false, "sessions omitted from current state are removed");
+  assert.equal(FakeElement.activeElement?.tagName, "summary");
+  assert.equal(FakeElement.activeElement?.focusOptions?.preventScroll, true);
+  assert.equal(sessionRows.children.length, 2);
+  ui.sources[0]?.close();
 });
