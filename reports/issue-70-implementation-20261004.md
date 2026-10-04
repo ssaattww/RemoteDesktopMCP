@@ -41,16 +41,19 @@
 - R70-N13 Medium: `audit_warning`と`applied`を表示し、適用済み更新を再送しない。
 - R70-N14 Medium: fixtureはlisten後に実際のLoopbackポートから `baseUrl` originを設定。通常ブラウザのOriginでログインできることをcreateApp起動の統合試験で確認。
 - R70-N15 Medium: Todo版を後退させる競合解決を拒否。遅れて届いた古い409は新snapshotを上書きせず、row/addの競合状態も現在版を維持。遅延409 JSONとversion 3 GETの交差試験を追加。
+- R70-N16 Medium（同内容のR70-F02と同一修正）: 追加成功時と409後のsnapshotから作る動的行について、状態ラベルに`.todo-status`と`span`を付け、状態selectと操作群をSSRと同じ`.todo-controls`構造に揃える。追加・手動更新の各経路にassertionを追加。
+- R70-N17 Medium: 削除済みdraftの明示的な「新しい項目として編集」と置換確定でのみ、折りたたみ追加欄を開いてtextareaをresizeしてからfocus。通常更新と「追加欄を保つ」選択は閉状態を維持する回帰を追加。
 
 同じPRに追加された独立final-review指摘とユーザーUI依頼:
 
 - R70-F01 Medium: 本文変更でactive textareaの値が変わったとき、行順が同じでも選択範囲・方向を復元し、focus/scrollも保持。既存N09の行移動追跡は変更せず存続。
+- R70-F02 Medium: R70-N16と同内容。動的行の状態欄がSSR/CSS契約と異なる点を追加・409再描画の両方で検証。
 - UI依頼: 強制切替を状態右横、状態・select・更新・削除を単一行に配置。コントロールはmin-width/min-height 44px、ボタン文字を本文と同じ継承サイズにする。Todo追加欄は初期折りたたみのネイティブdetails/summaryで、通常refresh中はopen状態と入力draftを保つ。
 - 画像 `IMG_6246.jpg` / `IMG_6247.jpg` を確認し、モバイル操作列と強制切替の参照として利用。#71へのコード変更なし。
 
 実装後の最終検証:
 
-- `npm test`: exit 0、252 tests / 241 pass / 11 skip / 0 fail。
+- 最新head検証: `npm test` は exit 0、254 tests / 243 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint`（TypeScript ESLint、Markdown lint 144 files / 0 issues、日本語design whitelist）、`git diff --check` はすべて exit 0。
 - `npm run check`: exit 0。
 - `npm run build`: exit 0。
 - `npm run lint`: exit 0。TypeScript ESLint、Markdown lint（144 files / 0 issues）、設計文書の日本語whitelist検査を含む。
@@ -80,6 +83,6 @@
 
 - 検証能力: `local_execution_available`
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
-- Push: 修正ブランチの最新HEADを通常push済み。PR #72はDraft維持。
-- CI: code HEAD `b8f6290304f18c088172af2d0cc99c9456a74ef7` の exact-head run `37208015351` は全10 job成功。F01と追加UIを含む最新HEADのpush後にexact-head CIを再確認する。
+- Push: N16/N17修正前のブランチHEADは通常push済み。PR #72はDraft維持。N16/N17修正を含む新HEADは通常push後に記録する。
+- CI: code HEAD `b8f6290304f18c088172af2d0cc99c9456a74ef7` の exact-head run `37208015351` は全10 job成功。N16/N17修正を含むHEADのpush後にexact-head CIを再確認する。
 - 独立final review / merge: 未実施。

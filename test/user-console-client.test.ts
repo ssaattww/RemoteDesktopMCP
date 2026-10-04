@@ -370,6 +370,13 @@ test("adding and deleting a Todo use versioned JSON updates and reconcile the vi
   assert.equal(requests[0]?.body.changes[0]?.op, "add");
   const added = fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").find((row) => row.dataset.todoId === "todo-2");
   assert.ok(added);
+  const addedControls = added.children.find((child) => child.className === "todo-controls");
+  assert.equal(addedControls?.children[0]?.className, "todo-status");
+  assert.equal(addedControls?.children[0]?.children[0]?.tagName, "span");
+  assert.equal(addedControls?.children[0]?.children[0]?.textContent, "状態");
+  assert.equal(addedControls?.children[0]?.children[1]?.dataset.todoStatus, "true");
+  assert.equal(addedControls?.children[1]?.className, "todo-actions");
+  assert.equal(addedControls?.children[1]?.children.map((button) => button.dataset.todoOp).join(","), "save,delete");
   added.querySelector<FakeElement>('[data-todo-op="delete"]')?.click();
   await settle();
   assert.equal(requests[1]?.body.expected_version, 2);
@@ -498,6 +505,13 @@ test("a dynamically rendered row has its own latest-value conflict controls", as
   }, [], { "session-todo": fixture.panel }, "todo-session");
   fixture.save.click(); await settle();
   const newRow = fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").find((row) => row.dataset.todoId === "todo-2"); assert.ok(newRow);
+  const refreshedControls = newRow.children.find((child) => child.className === "todo-controls");
+  assert.equal(refreshedControls?.children[0]?.className, "todo-status");
+  assert.equal(refreshedControls?.children[0]?.children[0]?.tagName, "span");
+  assert.equal(refreshedControls?.children[0]?.children[0]?.textContent, "状態");
+  assert.equal(refreshedControls?.children[0]?.children[1]?.dataset.todoStatus, "true");
+  assert.equal(refreshedControls?.children[1]?.className, "todo-actions");
+  assert.equal(refreshedControls?.children[1]?.children.map((button) => button.dataset.todoOp).join(","), "save,delete");
   assert.equal(newRow.querySelector<FakeElement>("[data-todo-text]")?.rows, 2);
   assert.notEqual(newRow.querySelector<FakeElement>("[data-todo-text]")?.style.height, "");
   assert.equal(newRow.querySelector<FakeElement>("[data-todo-conflict]")?.hidden, true);
@@ -744,6 +758,51 @@ test("a deleted draft stays disabled after a concurrent save settles and preserv
   fixture.keepAddDraft.click();
   assert.equal(fixture.addText.value, "keep this add draft");
   assert.equal(fixture.readdConfirm.hidden, true, "keep choice is dispatched by the button");
+  assert.equal(fixture.addDetails.open, false, "ordinary refresh and keeping the existing add draft do not open the disclosure");
+});
+
+test("explicitly readding a deleted draft opens the add disclosure, resizes, and focuses the field", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "unsaved row";
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [], total: 0, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  ui.newest.click(); await settle(); await settle(); await settle();
+  assert.equal(fixture.addDetails.open, false, "a normal refresh leaves the collapsed disclosure closed");
+  fixture.readdDeleted.click();
+  assert.equal(fixture.addText.value, "unsaved row");
+  assert.equal(fixture.addDetails.open, true);
+  assert.equal(fixture.addText.style.height, "80px");
+  assert.equal(FakeElement.activeElement, fixture.addText);
+  assert.equal(fixture.row.parentElement, null);
+  void ui;
+});
+
+test("confirming replacement of an add draft opens and focuses the add disclosure", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "deleted draft"; fixture.addText.value = "existing add draft";
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [], total: 0, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  ui.newest.click(); await settle(); await settle(); await settle();
+  fixture.readdDeleted.click();
+  assert.equal(fixture.readdConfirm.hidden, false);
+  assert.equal(fixture.addDetails.open, false, "the collision prompt alone does not open the disclosure");
+  fixture.replaceAddDraft.click();
+  assert.equal(fixture.addDetails.open, true);
+  assert.equal(fixture.addText.value, "deleted draft");
+  assert.equal(fixture.addText.style.height, "80px");
+  assert.equal(FakeElement.activeElement, fixture.addText);
+  assert.equal(fixture.row.parentElement, null);
+  void ui;
 });
 
 test("a delayed stale row 409 cannot replace or resolve a newer snapshot", async () => {

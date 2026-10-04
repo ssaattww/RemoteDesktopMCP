@@ -409,9 +409,9 @@ function clientBootstrap(): void {
       const addField = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); const source = textField(row); const confirmBox = row.querySelector<HTMLElement>("[data-todo-readd-confirm]");
       if (!addField || !source) return;
       if (addField.value && addField.value !== source.value) { if (confirmBox) confirmBox.hidden = false; return; }
-      addField.value = source.value; addState.generation += 1; addField.focus(); removeTodoRow(row);
+      addField.value = source.value; addState.generation += 1; const addDetails = todoPanel?.querySelector<HTMLDetailsElement>("[data-todo-add-details]"); if (addDetails) addDetails.open = true; resizeTodoText(addField); addField.focus(); removeTodoRow(row);
     });
-    row.querySelector<HTMLButtonElement>('[data-todo-op="replace-add-draft"]')?.addEventListener("click", () => { const addField = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); const source = textField(row); if (!addField || !source) return; addField.value = source.value; addState.generation += 1; const box = row.querySelector<HTMLElement>("[data-todo-readd-confirm]"); if (box) box.hidden = true; addField.focus(); removeTodoRow(row); });
+    row.querySelector<HTMLButtonElement>('[data-todo-op="replace-add-draft"]')?.addEventListener("click", () => { const addField = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); const source = textField(row); if (!addField || !source) return; addField.value = source.value; addState.generation += 1; const box = row.querySelector<HTMLElement>("[data-todo-readd-confirm]"); if (box) box.hidden = true; const addDetails = todoPanel?.querySelector<HTMLDetailsElement>("[data-todo-add-details]"); if (addDetails) addDetails.open = true; resizeTodoText(addField); addField.focus(); removeTodoRow(row); });
     row.querySelector<HTMLButtonElement>('[data-todo-op="keep-add-draft"]')?.addEventListener("click", () => { const box = row.querySelector<HTMLElement>("[data-todo-readd-confirm]"); if (box) box.hidden = true; });
   };
   const submitTodo = async (row: HTMLElement | null, operation: "add" | "edit" | "delete") => {
@@ -457,8 +457,8 @@ function clientBootstrap(): void {
     const row = document.createElement("li"); row.dataset.todoId = item.id; row.dataset.baseText = item.text; row.dataset.baseStatus = item.status; row.dataset.baseVersion = String(todoVersion);
     const textLabel = document.createElement("label"); textLabel.className = "todo-text-label"; const title = document.createElement("span"); title.textContent = "作業項目";
     const text = document.createElement("textarea") as HTMLTextAreaElement; text.dataset.todoText = "true"; text.rows = 2; text.maxLength = 1000; text.setAttribute("aria-label", "作業項目"); text.value = item.text; textLabel.append(title, text);
-    const statusLabel = document.createElement("label"); statusLabel.textContent = "状態"; const select = document.createElement("select") as HTMLSelectElement; select.dataset.todoStatus = "true"; select.setAttribute("aria-label", "状態");
-    for (const [value, label] of [["not_started", "未着手"], ["in_progress", "進行中"], ["completed", "完了"]]) { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); } select.value = item.status; statusLabel.append(select);
+    const statusLabel = document.createElement("label"); statusLabel.className = "todo-status"; const statusTitle = document.createElement("span"); statusTitle.textContent = "状態"; const select = document.createElement("select") as HTMLSelectElement; select.dataset.todoStatus = "true"; select.setAttribute("aria-label", "状態");
+    for (const [value, label] of [["not_started", "未着手"], ["in_progress", "進行中"], ["completed", "完了"]]) { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); } select.value = item.status; statusLabel.append(statusTitle, select);
     const controls = document.createElement("div"); controls.className = "todo-controls";
     const actions = document.createElement("div"); actions.className = "todo-actions";
     const button = (op: string, label: string) => { const element = document.createElement("button") as HTMLButtonElement; element.type = "button"; element.dataset.todoOp = op; element.textContent = label; return element; };

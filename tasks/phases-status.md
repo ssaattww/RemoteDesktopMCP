@@ -12,8 +12,8 @@
 | P6 | Issue #56 共有作業一覧と更新期限制御 | T11 | セッション単位・初期有効・有効化後5分猶予の設計、TDD、通常レビュー、mainとPR #60統合後の回帰・レビューを完了 | Issue #56 Todo remains in main through PR #54 squash merge `8d9c77a`; keep T11 as a distinct tracked workstream unless its closure is separately confirmed. |
 | R24 | Issue #24 Windows CI実行時間の改善（独立workstream） | R24-01〜R24-08 | 必須テスト意味・網羅性・Windows検証を維持してCI時間を評価し、main統合候補の通常reviewとexact-head CIを完了。3分達成まではIssueを閉じない | R24-01〜06は8分割を採用済みだが3分未達。R24-08のPR #69はmain `8d9c77a` 対象のdraft。親最終レビューのKERO-R24-08-001/002を修正し、同一通常reviewerの限定確認はpass。実装candidate `a9b928c` は全体ローカル検証pass（226件中215 pass/11 skip/0 fail、check/build/lint/diff-check成功）とexact-head run `37197042561` 全job成功。PR #69へpush済みで、親の累積最終review/merge判断待ち。PR #62は比較・統合対象外 |
 
-| P7 | Issue #70 Todoモバイル配置・詳細同期 | T12 | 親承認済み設計をTDDで実装し、回帰、実UI、通常レビューを完了。Draft PR #72は親最終判断まで未merge | 通常レビュー初回はR70-N01〜N13でfailし、全13指摘を固定ID/重要度のまま修正。元HEADの選択回帰は12 fail/1 pass、現HEADの重点回帰18 pass、全体検証を再実施。PR #72の追従通常レビューは同一reviewer待ち。`scripts/issue70-ui-fixture.ts` はcreateApp経由の実HTTP/SSRを確認済み。Chromiumのviewport描画は未完了。親が通常レビュー再確認と正規ブラウザ画面確認を引き取る。PR #69とは独立 |
+| P7 | Issue #70 Todoモバイル配置・詳細同期 | T12 | 親承認済み設計をTDDで実装し、回帰、実UI、通常レビューを完了。Draft PR #72は親最終判断まで未merge | 通常レビュー初回はR70-N01〜N13でfailし、全指摘を固定ID/重要度のまま修正。再確認で追加されたR70-N16/N17（R70-F02と重複する動的行構造、削除draft再追加時の折りたたみ欄表示）も修正・回帰確認。元HEAD選択回帰、F01、UI契約、通常レビュー各修正の履歴はレポート参照。PR #72の追従通常レビューは同一reviewer待ち。`scripts/issue70-ui-fixture.ts` はcreateApp経由の実HTTP/SSRを確認済み。Chromiumのviewport描画は未完了。親が通常レビュー再確認と正規ブラウザ画面確認を引き取る。PR #69とは独立 |
 
-現在の位置: Issue #24のR24-08はPR #69のexact-head CI成功後、親最終レビュー/merge判断待ち。独立作業のT12はR70-N01〜N13の修正とローカル検証を完了し、同一通常reviewerの再確認待ち。実createApp fixtureのHTTP/SSRは確認したが、携帯幅の正規ブラウザ実画面確認は親へ依頼する。PR #69の成果は再実装せず、T12固有差分のみ作成した。
+現在の位置: Issue #24のR24-08はPR #69のexact-head CI成功後、親最終レビュー/merge判断待ち。独立作業のT12はR70-N01〜N17およびR70-F01/F02（N16と重複）の修正とローカル検証を完了後、同一通常reviewerの再確認待ち。実createApp fixtureのHTTP/SSRは確認したが、携帯幅の正規ブラウザ実画面確認は親へ依頼する。PR #69の成果は再実装せず、T12固有差分のみ作成した。
 最小動作版の独立判定と提出証拠は `reports/2026-09-25-independent-review.md` と PR #1 を参照する。
 公開用の通常指摘は `reports/2026-09-25-remote-normal-review.md` で追跡し、ChatGPT の実操作と公開用の独立レビューは未完了。複数PCの F02 は後続であり、単一 PC 接続の完了条件には含めない。
