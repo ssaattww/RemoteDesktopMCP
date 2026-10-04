@@ -286,6 +286,9 @@ export function dispatchPlan(plan, expected, shardId, currentFingerprint) {
     return fail("shared_plan_invalid");
   }
 
+  if (!Number.isInteger(shardId) || shardId < 1 || shardId > plan.shardCount) return fail("shard_id_invalid");
+  diagnostic.files = [...plan.assignments[shardId - 1].files];
+
   if (plan.mode === "optimized") {
     diagnostic.environmentCheck = { status: "failure", result: "optimized environment has not been validated" };
     if (!SHA256.test(currentFingerprint ?? "")) return fail("optimized_environment_unavailable");
@@ -299,8 +302,6 @@ export function dispatchPlan(plan, expected, shardId, currentFingerprint) {
     diagnostic.environmentCheck = { status: "not_applicable", result: "baseline assignment does not depend on manifest environment" };
   }
 
-  if (!Number.isInteger(shardId) || shardId < 1 || shardId > plan.shardCount) return fail("shard_id_invalid");
-  diagnostic.files = [...plan.assignments[shardId - 1].files];
   return { ok: true, files: diagnostic.files, diagnostic };
 }
 

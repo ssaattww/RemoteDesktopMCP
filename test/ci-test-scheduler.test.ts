@@ -161,6 +161,12 @@ test("optimized dispatch checks each shard environment while baseline dispatch m
   const oneShardEnvironmentFingerprint = "c".repeat(64);
   const secondShard = dispatchPlan(optimized, expected, 2, oneShardEnvironmentFingerprint);
   assert.equal(secondShard.ok, false, "a single shard with an environment mismatch must fail before tests");
+  assert.deepEqual(secondShard.files, [], "a mismatched shard must not execute tests");
+  assert.deepEqual(secondShard.diagnostic.files, optimized.assignments[1].files, "diagnostics must retain the validated assignment on environment failure");
+  const unavailableShard = dispatchPlan(optimized, expected, 2, undefined);
+  assert.equal(unavailableShard.ok, false);
+  assert.deepEqual(unavailableShard.files, []);
+  assert.deepEqual(unavailableShard.diagnostic.files, optimized.assignments[1].files, "diagnostics must retain the validated assignment when environment capture fails");
   assert.equal(secondShard.diagnostic.overallValidation.status, "success", "the shared plan itself remains valid");
   assert.equal(secondShard.diagnostic.environmentCheck.status, "failure");
   assert.equal(secondShard.diagnostic.safeFailureReason, "optimized_environment_mismatch");
