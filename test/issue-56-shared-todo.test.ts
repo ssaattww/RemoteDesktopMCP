@@ -796,7 +796,13 @@ test("session detail renders the Todo panel before session metadata", async () =
     assert.equal(response.status, 200);
     assert.ok(html.includes('id="session-todo"'));
     assert.ok(html.indexOf('id="session-todo"') < html.indexOf("セッションの内容"));
-    assert.ok(html.includes('<textarea data-todo-text="true" maxlength="1000"'));
+    assert.ok(html.includes('<textarea rows="2" data-todo-text="true" maxlength="1000"'));
+    assert.ok(html.includes('class="todo-text-label"'));
+    assert.ok(html.includes('class="todo-controls"'));
+    assert.ok(html.includes('data-todo-latest-text'));
+    assert.ok(html.includes('data-todo-updated'));
+    assert.ok(html.includes('#session-todo select{box-sizing:border-box;width:100%;min-height:44px}'));
+    assert.ok(html.includes('max-height:12.5em'));
     assert.ok(html.includes('data-todo-op="save"'));
     assert.ok(html.includes('data-todo-op="delete"'));
     assert.doesNotMatch(html, /<input[^>]+name="text"[^>]+aria-label="作業項目"/);

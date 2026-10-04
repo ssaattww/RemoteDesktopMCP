@@ -167,135 +167,289 @@ function clientBootstrap(): void {
   const sessionId = root.dataset.sessionId ?? "";
   const sessionCsrf = root.dataset.csrf ?? "";
   const todoPanel = document.getElementById("session-todo") as HTMLElement | null;
+  type TodoItem = { id: string; text: string; status: string; order?: number };
+  type TodoSnapshot = { session_id?: string; version: number; items: TodoItem[]; total?: number; completed?: number; last_updated_at?: string | null; enforcement_enabled?: boolean; audit_warning?: boolean; applied?: boolean; conflict?: boolean };
+  type TodoRowState = { baseVersion: number; baseText: string; baseStatus: string; textGeneration: number; savedTextGeneration: number; statusGeneration: number; savedStatusGeneration: number; conflict?: TodoSnapshot; deletedDraft: boolean };
+  type TodoAddState = { generation: number; savedGeneration: number; baseVersion: number; conflict?: TodoSnapshot; conflictGeneration?: number };
   let todoVersion = Number(todoPanel?.dataset.version ?? 0);
   let todoFetchGeneration = 0;
   let todoRefreshPending = false;
   let todoRefreshRunning = false;
   let todoMutationRunning = false;
+  let todoUnavailable = false;
   let todoFetchController: AbortController | undefined;
-  let latestTodoConflict: { version: number; items: Array<{ id: string; text: string; status: string }>; total?: number; completed?: number } | undefined;
+  const rowStates = new WeakMap<HTMLElement, TodoRowState>();
+  const boundRows = new WeakSet<HTMLElement>();
+  const addState: TodoAddState = { generation: 0, savedGeneration: 0, baseVersion: todoVersion };
   const todoRows = (): HTMLElement[] => todoPanel ? Array.from(todoPanel.querySelectorAll<HTMLElement>("li[data-todo-id]")) : [];
-  const paintTodoSnapshot = (snapshot: { version: number; items: Array<{ id: string; text: string; status: string }>; total?: number; completed?: number }, forceIds = new Set<string>()) => {
-    if (!todoPanel || !Number.isSafeInteger(snapshot.version) || snapshot.version < todoVersion) return;
-    const edits = new Map(todoRows().map((row) => [row.dataset.todoId ?? "", { text: row.querySelector<HTMLTextAreaElement>("[data-todo-text]")?.value ?? "", status: row.querySelector<HTMLSelectElement>("[data-todo-status]")?.value ?? "", baseText: row.dataset.baseText ?? "", baseStatus: row.dataset.baseStatus ?? "" }]));
-    todoVersion = snapshot.version;
-    todoPanel.dataset.version = String(todoVersion);
-    for (const item of snapshot.items) {
-      let row = todoRows().find((candidate) => candidate.dataset.todoId === item.id);
-      if (!row) { row = makeTodoRow(item); todoPanel.querySelector<HTMLElement>("[data-todo-items]")?.append(row); }
-      const prior = edits.get(item.id);
-      const text = row.querySelector<HTMLTextAreaElement>("[data-todo-text]");
-      const state = row.querySelector<HTMLSelectElement>("[data-todo-status]");
-      row.dataset.baseText = item.text; row.dataset.baseStatus = item.status;
-      if (text && (forceIds.has(item.id) || !prior || text.value === prior.baseText)) text.value = item.text;
-      if (state && (forceIds.has(item.id) || !prior || state.value === prior.baseStatus)) state.value = item.status;
+  const statusLabel = (value: string) => value === "completed" ? "完了" : value === "in_progress" ? "進行中" : "未着手";
+  const stateFor = (row: HTMLElement): TodoRowState => {
+    const existing = rowStates.get(row); if (existing) return existing;
+    const value = { baseVersion: Number(row.dataset.baseVersion ?? todoVersion), baseText: row.dataset.baseText ?? "", baseStatus: row.dataset.baseStatus ?? "not_started", textGeneration: 0, savedTextGeneration: 0, statusGeneration: 0, savedStatusGeneration: 0, deletedDraft: row.dataset.deletedDraft === "true" };
+    rowStates.set(row, value); return value;
+  };
+  const textField = (row: HTMLElement) => row.querySelector<HTMLTextAreaElement>("[data-todo-text]");
+  const statusField = (row: HTMLElement) => row.querySelector<HTMLSelectElement>("[data-todo-status]");
+  const isTextDirty = (row: HTMLElement, state = stateFor(row)) => { const field = textField(row); return Boolean(field && (state.textGeneration !== state.savedTextGeneration || field.value !== state.baseText)); };
+  const isStatusDirty = (row: HTMLElement, state = stateFor(row)) => { const field = statusField(row); return Boolean(field && (state.statusGeneration !== state.savedStatusGeneration || field.value !== state.baseStatus)); };
+  const allTodoButtons = () => todoPanel ? Array.from(todoPanel.querySelectorAll<HTMLButtonElement>("button[data-todo-op]")) : [];
+  const refreshTodoControls = () => {
+    if (!todoPanel) return;
+    const unavailable = todoUnavailable || authenticationEnded;
+    for (const field of Array.from(todoPanel.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("textarea,select"))) field.disabled = unavailable || pageLeft;
+    for (const button of allTodoButtons()) {
+      const op = button.dataset.todoOp ?? "";
+      const row = button.closest<HTMLElement>("li[data-todo-id]");
+      const state = row ? stateFor(row) : undefined;
+      const conflicted = Boolean(state?.conflict);
+      const blockedRow = Boolean(state?.deletedDraft || row?.dataset.readonly === "true");
+      const addConflicted = Boolean(addState.conflict);
+      const resolution = op === "use-latest" || op === "keep-draft";
+      const deletedChoice = op === "discard-deleted" || op === "readd-deleted";
+      const blocked = unavailable || pageLeft || todoMutationRunning || (op === "add" && addConflicted) || (row && !resolution && !deletedChoice && (conflicted || blockedRow)) || (resolution && !conflicted) || (deletedChoice && !state?.deletedDraft);
+      button.disabled = Boolean(blocked);
     }
-    for (const row of todoRows()) if (!snapshot.items.some((item) => item.id === row.dataset.todoId)) {
-      const text = row.querySelector<HTMLTextAreaElement>("[data-todo-text]"); const state = row.querySelector<HTMLSelectElement>("[data-todo-status]");
-      if ((text && text.value !== row.dataset.baseText) || (state && state.value !== row.dataset.baseStatus)) markDeletedDraft(row);
-      else row.remove();
-    }
-    const summary = todoPanel.querySelector<HTMLElement>("[data-todo-summary]");
+  };
+  const resizeTodoText = (field: HTMLTextAreaElement) => {
+    field.style.height = "auto";
+    const lineHeight = Number.parseFloat(field.style.lineHeight || "20") || 20;
+    const cap = lineHeight * 8 + 20;
+    const minHeight = lineHeight * 2 + 20;
+    field.style.height = Math.max(minHeight, Math.min(Number(field.scrollHeight) || minHeight, cap)) + "px";
+  };
+  const updateRowBase = (row: HTMLElement, state: TodoRowState, item: TodoItem, version: number, takeText: boolean, takeStatus: boolean) => {
+    state.baseText = item.text; state.baseStatus = item.status; state.baseVersion = version;
+    row.dataset.baseText = item.text; row.dataset.baseStatus = item.status; row.dataset.baseVersion = String(version);
+    if (takeText) { const field = textField(row); if (field) { field.value = item.text; resizeTodoText(field); } state.savedTextGeneration = state.textGeneration; }
+    if (takeStatus) { const field = statusField(row); if (field) field.value = item.status; state.savedStatusGeneration = state.statusGeneration; }
+  };
+  const syncTodoMetadata = (snapshot: TodoSnapshot) => {
+    if (!todoPanel) return;
+    const summary = todoPanel.querySelector<HTMLElement>("[data-todo-summary-count]");
     if (summary && snapshot.total !== undefined && snapshot.completed !== undefined) summary.textContent = `進捗: ${snapshot.completed} / ${snapshot.total}`;
+    const updated = todoPanel.querySelector<HTMLElement>("[data-todo-updated]");
+    if (updated) updated.textContent = snapshot.last_updated_at ? timeText(snapshot.last_updated_at) : "未更新";
+    if (typeof snapshot.enforcement_enabled === "boolean") {
+      const state = todoPanel.querySelector<HTMLElement>("[data-todo-enforcement-state]"); if (state) state.textContent = snapshot.enforcement_enabled ? "有効" : "無効";
+      const button = todoPanel.querySelector<HTMLButtonElement>("[data-todo-enforcement]"); if (button) { button.value = String(!snapshot.enforcement_enabled); button.textContent = snapshot.enforcement_enabled ? "強制を無効にする" : "強制を有効にする"; }
+    }
+  };
+  const showRowConflict = (row: HTMLElement, snapshot: TodoSnapshot) => {
+    const state = stateFor(row); state.conflict = snapshot;
+    const box = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (box) box.hidden = false;
+    const latest = snapshot.items.find((item) => item.id === row.dataset.todoId);
+    const latestText = row.querySelector<HTMLElement>("[data-todo-latest-text]"); if (latestText) latestText.textContent = latest?.text ?? "この項目は共有一覧から削除されています。";
+    const latestStatus = row.querySelector<HTMLElement>("[data-todo-latest-status]"); if (latestStatus) latestStatus.textContent = latest ? `状態: ${statusLabel(latest.status)}` : "";
+  };
+  const focusAfterRowRemoval = (row: HTMLElement, previousOrder: HTMLElement[]) => {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active || !row.contains(active)) return;
+    const index = previousOrder.indexOf(row);
+    const destination = previousOrder.slice(index + 1).find((item) => Boolean(item.parentElement)) ?? previousOrder.slice(0, index).reverse().find((item) => Boolean(item.parentElement));
+    const target = destination?.querySelector<HTMLElement>("[data-todo-text]") ?? todoPanel?.querySelector<HTMLElement>("h2");
+    const scrollY = window.scrollY;
+    if (target) target.focus({ preventScroll: true });
+    window.scrollTo(window.scrollX, scrollY);
+    const status = todoPanel?.querySelector<HTMLElement>("[data-todo-status-message]"); if (status) status.textContent = "削除された項目から次の利用可能な項目へ移動しました。";
+  };
+  const removeTodoRow = (row: HTMLElement, priorRows = todoRows()) => { focusAfterRowRemoval(row, priorRows); row.remove(); };
+  const markDeletedDraft = (row: HTMLElement) => {
+    const state = stateFor(row); if (state.deletedDraft) return;
+    state.deletedDraft = true; row.dataset.deletedDraft = "true";
+    const save = row.querySelector<HTMLButtonElement>('[data-todo-op="save"]'); const remove = row.querySelector<HTMLButtonElement>('[data-todo-op="delete"]');
+    if (save) save.disabled = true; if (remove) remove.disabled = true;
+    const notice = row.querySelector<HTMLElement>("[data-todo-deleted-notice]"); if (notice) { notice.hidden = false; notice.textContent = "サーバー側で削除済みです。入力を捨てるか、新しい項目として追加できます。"; }
+    const choices = row.querySelector<HTMLElement>("[data-todo-deleted-actions]"); if (choices) choices.hidden = false;
+    refreshTodoControls();
+  };
+  const applyTodoSnapshot = (snapshot: TodoSnapshot, mutation?: { row?: HTMLElement; operation: "add" | "edit" | "delete"; textGeneration: number; statusGeneration: number; addGeneration: number }) => {
+    if (!todoPanel || !Number.isSafeInteger(snapshot.version) || snapshot.version < todoVersion || (snapshot.session_id && snapshot.session_id !== sessionId)) return;
+    const list = todoPanel.querySelector<HTMLElement>("[data-todo-items]");
+    const oldRows = todoRows();
+    const oldOrder = [...oldRows];
+    const itemIds = new Set(snapshot.items.map((item) => item.id));
+    for (const item of snapshot.items) {
+      let row = oldRows.find((candidate) => candidate.dataset.todoId === item.id);
+      if (!row) { row = makeTodoRow(item); bindTodoRow(row); }
+      const state = stateFor(row);
+      if (mutation?.row === row && mutation.operation === "edit") {
+        const unchangedText = state.textGeneration === mutation.textGeneration;
+        const unchangedStatus = state.statusGeneration === mutation.statusGeneration;
+        updateRowBase(row, state, item, snapshot.version, unchangedText, unchangedStatus);
+        state.conflict = undefined;
+        const box = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (box) box.hidden = true;
+      } else {
+        const dirty = isTextDirty(row, state) || isStatusDirty(row, state);
+        if (dirty && snapshot.version > state.baseVersion) showRowConflict(row, snapshot);
+        else if (!dirty) { updateRowBase(row, state, item, snapshot.version, true, true); state.conflict = undefined; const box = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (box) box.hidden = true; }
+      }
+      if (list) list.append(row);
+    }
+    for (const row of oldRows) {
+      if (itemIds.has(row.dataset.todoId ?? "")) continue;
+      const state = stateFor(row);
+      const isSubmittedDelete = mutation?.row === row && mutation.operation === "delete";
+      const editedAfterSubmit = isSubmittedDelete && (state.textGeneration !== mutation.textGeneration || state.statusGeneration !== mutation.statusGeneration);
+      if (isSubmittedDelete && !editedAfterSubmit) removeTodoRow(row, oldOrder);
+      else if (isTextDirty(row, state) || isStatusDirty(row, state) || editedAfterSubmit) markDeletedDraft(row);
+      else removeTodoRow(row, oldOrder);
+    }
+    if (list) for (const row of todoRows()) if (stateFor(row).deletedDraft) list.append(row);
+    todoVersion = snapshot.version; todoPanel.dataset.version = String(todoVersion);
+    for (const stateRow of todoRows()) if (!stateFor(stateRow).deletedDraft && !stateFor(stateRow).conflict) stateFor(stateRow).baseVersion = snapshot.version;
+    syncTodoMetadata(snapshot);
+    const addText = todoPanel.querySelector<HTMLTextAreaElement>("[data-todo-add-text]");
+    if (addText) {
+      const addDirty = addState.generation !== addState.savedGeneration || Boolean(addText.value);
+      if (addDirty && snapshot.version > addState.baseVersion) {
+        addState.conflict = snapshot; addState.conflictGeneration = addState.generation;
+        const box = todoPanel.querySelector<HTMLElement>("[data-todo-add-conflict]"); if (box) box.hidden = false;
+        const latest = todoPanel.querySelector<HTMLElement>("[data-todo-add-latest]"); if (latest) latest.textContent = `最新の共有版は ${snapshot.version}、項目数 ${snapshot.total ?? snapshot.items.length} 件です。`;
+      } else if (!addDirty) addState.baseVersion = snapshot.version;
+    }
+    if (mutation?.operation === "add" && addText && addState.generation === mutation.addGeneration) { addText.value = ""; addState.generation += 1; addState.savedGeneration = addState.generation; }
+    if (mutation?.operation === "add") { addState.baseVersion = snapshot.version; addState.conflict = undefined; const box = todoPanel.querySelector<HTMLElement>("[data-todo-add-conflict]"); if (box) box.hidden = true; }
+    refreshTodoControls();
+  };
+  const showSessionUnavailable = () => {
+    if (!todoPanel) return;
+    todoUnavailable = true; todoRefreshPending = false; todoFetchGeneration += 1; todoFetchController?.abort();
+    const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = "このセッションでは作業一覧を利用できません。表示中の内容は保持されています。";
+    refreshTodoControls();
   };
   const refreshTodo = () => {
-    if (!todoPanel || !sessionId || authenticationEnded || pageLeft) return;
+    if (!todoPanel || !sessionId || authenticationEnded || pageLeft || todoUnavailable) return;
     todoRefreshPending = true;
     if (todoRefreshRunning) return;
     todoRefreshRunning = true;
     const fetchGeneration = ++todoFetchGeneration;
     void (async () => {
-      while (todoRefreshPending && !authenticationEnded && !pageLeft) {
+      while (todoRefreshPending && !authenticationEnded && !pageLeft && !todoUnavailable) {
         todoRefreshPending = false;
         const controller = new AbortController(); todoFetchController = controller;
+        const screenGeneration = pageGeneration;
         try {
           const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/todo`, { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
-          if (fetchGeneration !== todoFetchGeneration || pageLeft || authenticationEnded) return;
+          if (fetchGeneration !== todoFetchGeneration || screenGeneration !== pageGeneration || pageLeft || authenticationEnded) return;
           if (isAuthenticationFailure(response)) return;
-          if (response.status === 404) { todoRefreshPending = false; todoRefreshRunning = false; const message = todoPanel.querySelector<HTMLElement>("[data-todo-status]"); if (message) message.textContent = "このセッションの作業一覧を利用できません。画面を再読み込みしてください。"; return; }
+          if (response.status === 404) { showSessionUnavailable(); todoRefreshRunning = false; return; }
           if (!response.ok) throw new Error("Todo refresh failed");
-          const snapshot = await response.json() as { version: number; items: Array<{ id: string; text: string; status: string }>; total?: number; completed?: number };
-          if (fetchGeneration !== todoFetchGeneration || pageLeft || authenticationEnded) return;
-          paintTodoSnapshot(snapshot);
+          const snapshot = await response.json() as TodoSnapshot;
+          if (fetchGeneration !== todoFetchGeneration || screenGeneration !== pageGeneration || pageLeft || authenticationEnded) return;
+          applyTodoSnapshot(snapshot);
         } catch {
-          if (!controller.signal.aborted && !authenticationEnded && !pageLeft && fetchGeneration === todoFetchGeneration) {
-            const message = todoPanel.querySelector<HTMLElement>("[data-todo-status]");
-            if (message) message.textContent = "最新の作業一覧を取得できませんでした。表示中の内容は保持しています。";
+          if (!controller.signal.aborted && fetchGeneration === todoFetchGeneration && screenGeneration === pageGeneration && !authenticationEnded && !pageLeft) {
+            const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = "最新の作業一覧を取得できませんでした。表示中の内容は保持しています。";
           }
         }
       }
       todoRefreshRunning = false;
     })();
   };
+  const resolveRowConflict = (row: HTMLElement, keepDraft: boolean) => {
+    const state = stateFor(row); const snapshot = state.conflict; if (!snapshot) return;
+    const latest = snapshot.items.find((item) => item.id === row.dataset.todoId);
+    if (!latest) { state.conflict = undefined; markDeletedDraft(row); }
+    else {
+      const localTextDirty = isTextDirty(row, state); const localStatusDirty = isStatusDirty(row, state);
+      updateRowBase(row, state, latest, snapshot.version, !keepDraft || !localTextDirty, !keepDraft || !localStatusDirty);
+      state.conflict = undefined; const box = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (box) box.hidden = true;
+    }
+    todoVersion = snapshot.version; if (todoPanel) todoPanel.dataset.version = String(todoVersion);
+    syncTodoMetadata(snapshot); refreshTodoControls();
+    const message = todoPanel?.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = keepDraft ? "入力を残しました。内容を確認して更新してください。" : "最新の内容を取り込みました。";
+  };
+  const resolveAddConflict = (keepDraft: boolean) => {
+    const snapshot = addState.conflict; if (!snapshot) return;
+    const field = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]");
+    if (!keepDraft && field && addState.generation === addState.conflictGeneration) { field.value = ""; addState.generation += 1; addState.savedGeneration = addState.generation; }
+    addState.baseVersion = snapshot.version; addState.conflict = undefined; addState.conflictGeneration = undefined;
+    todoVersion = snapshot.version; if (todoPanel) todoPanel.dataset.version = String(todoVersion);
+    applyTodoSnapshot(snapshot); const box = todoPanel?.querySelector<HTMLElement>("[data-todo-add-conflict]"); if (box) box.hidden = true;
+    const message = todoPanel?.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = keepDraft ? "追加入力を残しました。確認後、追加操作を押してください。" : "共有内容を確認しました。追加操作は再送していません。";
+  };
+  const bindTodoRow = (row: HTMLElement) => {
+    if (boundRows.has(row)) return; boundRows.add(row);
+    const text = textField(row); if (text) { stateFor(row); resizeTodoText(text); text.addEventListener("input", () => { const state = stateFor(row); state.textGeneration += 1; resizeTodoText(text); refreshTodoControls(); }); }
+    const stateField = statusField(row); if (stateField) { stateFor(row); stateField.addEventListener("change", () => { const state = stateFor(row); state.statusGeneration += 1; refreshTodoControls(); }); }
+    row.querySelector<HTMLButtonElement>('[data-todo-op="save"]')?.addEventListener("click", () => { void submitTodo(row, "edit"); });
+    row.querySelector<HTMLButtonElement>('[data-todo-op="delete"]')?.addEventListener("click", () => { void submitTodo(row, "delete"); });
+    row.querySelector<HTMLButtonElement>('[data-todo-op="use-latest"]')?.addEventListener("click", () => resolveRowConflict(row, false));
+    row.querySelector<HTMLButtonElement>('[data-todo-op="keep-draft"]')?.addEventListener("click", () => resolveRowConflict(row, true));
+    row.querySelector<HTMLButtonElement>('[data-todo-op="discard-deleted"]')?.addEventListener("click", () => removeTodoRow(row));
+    row.querySelector<HTMLButtonElement>('[data-todo-op="readd-deleted"]')?.addEventListener("click", () => {
+      const addField = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); const source = textField(row); const confirmBox = row.querySelector<HTMLElement>("[data-todo-readd-confirm]");
+      if (!addField || !source) return;
+      if (addField.value && addField.value !== source.value) { if (confirmBox) confirmBox.hidden = false; return; }
+      addField.value = source.value; addState.generation += 1; addField.focus(); removeTodoRow(row);
+    });
+    row.querySelector<HTMLButtonElement>('[data-todo-op="replace-add-draft"]')?.addEventListener("click", () => { const addField = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); const source = textField(row); if (!addField || !source) return; addField.value = source.value; addState.generation += 1; const box = row.querySelector<HTMLElement>("[data-todo-readd-confirm]"); if (box) box.hidden = true; addField.focus(); removeTodoRow(row); });
+    row.querySelector<HTMLButtonElement>('[data-todo-op="keep-add-draft"]')?.addEventListener("click", () => { const box = row.querySelector<HTMLElement>("[data-todo-readd-confirm]"); if (box) box.hidden = true; });
+  };
   const submitTodo = async (row: HTMLElement | null, operation: "add" | "edit" | "delete") => {
-    if (!todoPanel || todoMutationRunning || authenticationEnded || pageLeft) return;
-    const text = row?.querySelector<HTMLTextAreaElement>("[data-todo-text]");
-    const state = row?.querySelector<HTMLSelectElement>("[data-todo-status]");
+    if (!todoPanel || todoMutationRunning || authenticationEnded || pageLeft || todoUnavailable) return;
+    const rowState = row ? stateFor(row) : undefined;
+    if (rowState?.conflict || rowState?.deletedDraft || addState.conflict) return;
+    const text = row ? textField(row) : null; const state = row ? statusField(row) : null;
     const addText = todoPanel.querySelector<HTMLTextAreaElement>("[data-todo-add-text]");
-    const versionAtSubmit = todoVersion;
-    const textAtSubmit = text?.value ?? addText?.value ?? "";
-    const statusAtSubmit = state?.value ?? "not_started";
-    const mutationScreenGeneration = pageGeneration;
+    const textAtSubmit = text?.value ?? addText?.value ?? ""; const statusAtSubmit = state?.value ?? "not_started";
+    const context = { row: row ?? undefined, operation, textGeneration: rowState?.textGeneration ?? 0, statusGeneration: rowState?.statusGeneration ?? 0, addGeneration: addState.generation } as const;
+    const textRevision = rowState?.textGeneration ?? addState.generation;
+    const versionAtSubmit = todoVersion; const screenGeneration = pageGeneration;
     const changes = operation === "add" ? [{ op: "add", text: textAtSubmit }] : operation === "delete" ? [{ op: "delete", id: row?.dataset.todoId }] : [{ op: "edit", id: row?.dataset.todoId, text: textAtSubmit }, { op: "status", id: row?.dataset.todoId, status: statusAtSubmit }];
-    todoMutationRunning = true;
-    todoPanel.querySelectorAll<HTMLButtonElement>("button[data-todo-op]").forEach((button) => { button.disabled = true; });
-    const message = todoPanel.querySelector<HTMLElement>("[data-todo-status]");
+    todoMutationRunning = true; refreshTodoControls();
+    const isCurrent = () => !pageLeft && !authenticationEnded && !todoUnavailable && screenGeneration === pageGeneration;
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/todo`, { method: "PUT", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "x-csrf-token": todoPanel.dataset.csrf ?? sessionCsrf }, body: JSON.stringify({ expected_version: versionAtSubmit, changes }) });
-      if (pageLeft || authenticationEnded || mutationScreenGeneration !== pageGeneration) return;
+      if (!isCurrent()) return;
       if (isAuthenticationFailure(response)) return;
-      const snapshot = await response.json() as { version: number; items: Array<{ id: string; text: string; status: string }>; total?: number; completed?: number; conflict?: boolean };
+      if (response.status === 404) { showSessionUnavailable(); return; }
+      const snapshot = await response.json() as TodoSnapshot;
+      if (!isCurrent()) return;
       if (response.status === 409) {
-        latestTodoConflict = snapshot;
-        if (row) { const conflict = row.querySelector<HTMLElement>("[data-todo-conflict]"); const latest = row.querySelector<HTMLElement>("[data-todo-latest]"); if (conflict) conflict.hidden = false; if (latest) latest.textContent = "共有一覧が更新されています。最新を確認してから入力を適用してください。"; }
-        if (!row) paintTodoSnapshot(snapshot);
-        if (message) message.textContent = "競合しました。入力は保持されています。";
+        if (operation === "add") { addState.conflict = snapshot; addState.conflictGeneration = textRevision; }
+        applyTodoSnapshot(snapshot);
+        if (row) showRowConflict(row, snapshot);
+        const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = "競合しました。入力を保持しています。内容を選択してから再操作してください。";
       } else if (!response.ok) throw new Error("Todo update failed");
       else {
-        paintTodoSnapshot(snapshot);
-        if (operation === "add" && addText?.value === textAtSubmit) addText.value = "";
-        if (message) message.textContent = "作業一覧を更新しました。";
+        applyTodoSnapshot(snapshot, context);
+        const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]");
+        if (message) message.textContent = snapshot.audit_warning && snapshot.applied ? "更新は適用済みです。監査記録に警告があります。内容を確認してください。" : "作業一覧を更新しました。";
       }
-    } catch { if (message) message.textContent = "更新できませんでした。入力を保持しています。"; }
-    finally { todoMutationRunning = false; if (!authenticationEnded && !pageLeft) todoPanel.querySelectorAll<HTMLButtonElement>("button[data-todo-op]").forEach((button) => { button.disabled = false; }); }
+    } catch {
+      if (isCurrent()) { const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = "更新結果を確認できませんでした。表示中の入力を保持しています。"; }
+    } finally {
+      if (screenGeneration === pageGeneration && !pageLeft && !authenticationEnded) { todoMutationRunning = false; refreshTodoControls(); }
+    }
   };
-  const makeTodoRow = (item: { id: string; text: string; status: string }) => {
-    const row = document.createElement("li"); row.dataset.todoId = item.id; row.dataset.baseText = item.text; row.dataset.baseStatus = item.status;
-    const textLabel = document.createElement("label"); textLabel.textContent = "作業項目";
-    const text = document.createElement("textarea") as HTMLTextAreaElement; text.dataset.todoText = "true"; text.maxLength = 1000; text.setAttribute("aria-label", "作業項目"); text.value = item.text; textLabel.append(text);
-    const statusLabel = document.createElement("label"); statusLabel.textContent = "状態";
-    const select = document.createElement("select") as HTMLSelectElement; select.dataset.todoStatus = "true"; select.setAttribute("aria-label", "状態");
-    for (const [value, label] of [["not_started", "未着手"], ["in_progress", "進行中"], ["completed", "完了"]]) { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); }
-    select.value = item.status;
+  const makeTodoRow = (item: TodoItem) => {
+    const row = document.createElement("li"); row.dataset.todoId = item.id; row.dataset.baseText = item.text; row.dataset.baseStatus = item.status; row.dataset.baseVersion = String(todoVersion);
+    const textLabel = document.createElement("label"); textLabel.className = "todo-text-label"; const title = document.createElement("span"); title.textContent = "作業項目";
+    const text = document.createElement("textarea") as HTMLTextAreaElement; text.dataset.todoText = "true"; text.rows = 2; text.maxLength = 1000; text.setAttribute("aria-label", "作業項目"); text.value = item.text; textLabel.append(title, text);
+    const statusLabel = document.createElement("label"); statusLabel.textContent = "状態"; const select = document.createElement("select") as HTMLSelectElement; select.dataset.todoStatus = "true"; select.setAttribute("aria-label", "状態");
+    for (const [value, label] of [["not_started", "未着手"], ["in_progress", "進行中"], ["completed", "完了"]]) { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); } select.value = item.status; statusLabel.append(select);
+    const controls = document.createElement("div"); controls.className = "todo-controls";
     const actions = document.createElement("div"); actions.className = "todo-actions";
-    const save = document.createElement("button") as HTMLButtonElement; save.type = "button"; save.dataset.todoOp = "save"; save.textContent = "更新"; save.addEventListener("click", () => { void submitTodo(row, "edit"); });
-    const remove = document.createElement("button") as HTMLButtonElement; remove.type = "button"; remove.dataset.todoOp = "delete"; remove.textContent = "削除"; remove.addEventListener("click", () => { void submitTodo(row, "delete"); });
+    const button = (op: string, label: string) => { const element = document.createElement("button") as HTMLButtonElement; element.type = "button"; element.dataset.todoOp = op; element.textContent = label; return element; };
+    actions.append(button("save", "更新"), button("delete", "削除")); controls.append(statusLabel, actions);
     const conflict = document.createElement("div"); conflict.dataset.todoConflict = "true"; conflict.hidden = true;
-    const latest = document.createElement("p"); latest.dataset.todoLatest = "true"; conflict.append(latest);
-    actions.append(save, remove); const controls = document.createElement("div"); controls.className = "todo-controls"; controls.append(statusLabel, actions); row.append(textLabel, controls, conflict); return row;
-  };
-  const markDeletedDraft = (row: HTMLElement) => {
-    if (row.dataset.deletedDraft === "true") return;
-    row.dataset.deletedDraft = "true";
-    const save = row.querySelector<HTMLButtonElement>('[data-todo-op="save"]'); const remove = row.querySelector<HTMLButtonElement>('[data-todo-op="delete"]');
-    if (save) save.disabled = true; if (remove) remove.disabled = true;
-    const notice = document.createElement("p"); notice.textContent = "サーバー側で削除済みです。入力を捨てるか、新しい項目として追加できます。";
-    const discard = document.createElement("button") as HTMLButtonElement; discard.type = "button"; discard.textContent = "入力を捨てる"; discard.dataset.todoOp = "discard-deleted";
-    discard.addEventListener("click", () => row.remove());
-    const readd = document.createElement("button") as HTMLButtonElement; readd.type = "button"; readd.textContent = "新しい項目として編集"; readd.dataset.todoOp = "readd-deleted";
-    readd.addEventListener("click", () => { const addText = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); const text = row.querySelector<HTMLTextAreaElement>("[data-todo-text]"); if (addText && text) { addText.value = text.value; addText.focus(); } row.remove(); });
-    const actionContainer = row.querySelector<HTMLElement>(".todo-actions"); actionContainer?.append(notice, discard, readd);
+    const conflictTitle = document.createElement("p"); conflictTitle.textContent = "最新の共有内容"; const latestText = document.createElement("p"); latestText.dataset.todoLatestText = "true"; const latestStatus = document.createElement("p"); latestStatus.dataset.todoLatestStatus = "true";
+    conflict.append(conflictTitle, latestText, latestStatus, button("use-latest", "最新を使う"), button("keep-draft", "入力を残して再編集"));
+    const deletedNotice = document.createElement("div"); deletedNotice.dataset.todoDeletedNotice = "true"; deletedNotice.hidden = true;
+    const readdConfirm = document.createElement("div"); readdConfirm.dataset.todoReaddConfirm = "true"; readdConfirm.hidden = true;
+    const confirmText = document.createElement("p"); confirmText.textContent = "追加欄の入力を置き換えますか？"; readdConfirm.append(confirmText, button("replace-add-draft", "追加欄を置き換える"), button("keep-add-draft", "追加欄を保つ"));
+    const deletedActions = document.createElement("div"); deletedActions.dataset.todoDeletedActions = "true"; deletedActions.hidden = true; deletedActions.append(button("discard-deleted", "入力を捨てる"), button("readd-deleted", "新しい項目として編集"));
+    row.append(textLabel, controls, conflict, deletedNotice, deletedActions, readdConfirm);
+    rowStates.set(row, { baseVersion: todoVersion, baseText: item.text, baseStatus: item.status, textGeneration: 0, savedTextGeneration: 0, statusGeneration: 0, savedStatusGeneration: 0, deletedDraft: false });
+    return row;
   };
   if (todoPanel) {
-    for (const row of todoRows()) {
-      row.querySelector<HTMLButtonElement>('[data-todo-op="save"]')?.addEventListener("click", () => { void submitTodo(row, "edit"); });
-      row.querySelector<HTMLButtonElement>('[data-todo-op="delete"]')?.addEventListener("click", () => { void submitTodo(row, "delete"); });
-    }
+    for (const row of todoRows()) bindTodoRow(row);
+    const addField = todoPanel.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); if (addField) { resizeTodoText(addField); addField.addEventListener("input", () => { addState.generation += 1; resizeTodoText(addField); refreshTodoControls(); }); }
     todoPanel.querySelector<HTMLButtonElement>('[data-todo-op="add"]')?.addEventListener("click", () => { void submitTodo(null, "add"); });
-    for (const row of todoRows()) {
-      row.querySelector<HTMLButtonElement>('[data-todo-op="use-latest"]')?.addEventListener("click", () => { if (latestTodoConflict) paintTodoSnapshot(latestTodoConflict, new Set([row.dataset.todoId ?? ""])); const conflict = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (conflict) conflict.hidden = true; latestTodoConflict = undefined; });
-      row.querySelector<HTMLButtonElement>('[data-todo-op="keep-draft"]')?.addEventListener("click", () => { if (latestTodoConflict) paintTodoSnapshot(latestTodoConflict); const conflict = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (conflict) conflict.hidden = true; latestTodoConflict = undefined; const message = todoPanel.querySelector<HTMLElement>("[data-todo-status]"); if (message) message.textContent = "入力を残しました。内容を確認して再度更新してください。"; });
-    }
+    todoPanel.querySelector<HTMLButtonElement>('[data-todo-op="use-latest-add"]')?.addEventListener("click", () => resolveAddConflict(false));
+    todoPanel.querySelector<HTMLButtonElement>('[data-todo-op="keep-draft-add"]')?.addEventListener("click", () => resolveAddConflict(true));
   }
   const operationRows = document.getElementById("operation-rows") as HTMLTableSectionElement | null;
   const processDetails = document.getElementById("process-details");
@@ -375,6 +529,7 @@ function clientBootstrap(): void {
     if (newButton) newButton.disabled = true;
     if (olderButton) olderButton.disabled = true;
     if (status) status.textContent = "認証またはアクセス権を確認してください。再読み込み後に再認証できます。";
+    refreshTodoControls();
   }
   const isAuthenticationFailure = (response: Response) => {
     if (response.status !== 401 && response.status !== 403) return false;
@@ -740,7 +895,7 @@ function clientBootstrap(): void {
         if (cursor) params.set("after", cursor);
         const result = await fetchPage(params);
         if (!readsAllowed() || operationGeneration !== storeGeneration || screenGeneration !== pageGeneration) return;
-        if (result.response.status === 409) { await resync(); return; }
+        if (result.response.status === 409) { if (await resync()) refreshTodo(); return; }
         if (!result.response.ok || !result.page) throw new Error("logs request failed");
         const page = result.page;
         if (!Array.isArray(page.items)) throw new Error("invalid logs response");
@@ -843,14 +998,14 @@ function clientBootstrap(): void {
       } else scheduleAutomatic();
     }
   }
-  async function resync() {
-    if (!readsAllowed()) return;
+  async function resync(): Promise<boolean> {
+    if (!readsAllowed()) return false;
     const screenGeneration = pageGeneration;
     updateLogState("resync-required");
     const params = new URLSearchParams({ limit: String(pageLimit) });
     try {
       const result = await fetchPage(params);
-      if (!readsAllowed() || screenGeneration !== pageGeneration) return;
+      if (!readsAllowed() || screenGeneration !== pageGeneration) return false;
       if (!result.response.ok || !result.page) throw new Error("resync failed");
       commitItems(chronological(result.page.items), "replace");
       appliedCursor = result.page.newestCursor;
@@ -864,10 +1019,12 @@ function clientBootstrap(): void {
       restartEvents();
       void refreshState();
       updateLogState("current");
+      return true;
     } catch {
-      if (authenticationEnded) return;
+      if (authenticationEnded) return false;
       updateLogState("pending");
       void refreshState();
+      return false;
     }
   }
   const chronological = (pageItems: LogItem[]) => [...pageItems].reverse();
@@ -1265,6 +1422,8 @@ function clientBootstrap(): void {
     todoRefreshPending = false;
     todoRefreshRunning = false;
     todoFetchController?.abort();
+    todoMutationRunning = false;
+    refreshTodoControls();
     deferredConsoleState = undefined;
     pageGeneration += 1;
     cancelAutomatic();
@@ -1277,6 +1436,8 @@ function clientBootstrap(): void {
   window.addEventListener("pageshow", (raw: Event) => {
     if (!(raw as PageTransitionEvent).persisted || authenticationEnded) return;
     pageLeft = false;
+    todoMutationRunning = false;
+    refreshTodoControls();
     pageGeneration += 1;
     pageHidden = document.hidden;
     generation += 1;
