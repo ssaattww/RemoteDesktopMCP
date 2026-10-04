@@ -37,7 +37,7 @@ merge候補treeに対し、依存はlockfileどおりに導入した。初回 `n
 - `git diff --cached --check`: 成功。
 - Windows固有試験とcurrent-head GitHub CI: 未確認。main統合後のexact-head CIで確認する。
 
-これらのコマンドはmerge commit `53982dc` のtreeで実行した。レポート追加後のexact candidate HEADに対して最終full local gateを再実行する。
+これらのコマンドはレポートを含むexact candidate HEAD `75d51a6febea2f6942fdda5061f9c84f266c7efc` で実行した。`npm test` は187件、176 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint` と `git diff HEAD --check` も同じHEADで成功した。
 
 ## PR / CI / review状態
 
