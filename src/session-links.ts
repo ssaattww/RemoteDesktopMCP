@@ -208,9 +208,8 @@ class Semaphore {
   }
 }
 
-const defaultTransport: SessionLinkTransport = {
-  resolve: async (hostname) => (await lookup(hostname, { all: true, verbatim: true })).map((entry) => entry.address),
-  request: (url, address, headers, signal) => new Promise((resolve, reject) => {
+export function requestPinnedSessionLink(url: URL, address: string, headers: Record<string, string>, signal: AbortSignal): Promise<{ status: number; location?: string; contentType?: string; contentLength?: string; body: Uint8Array }> {
+  return new Promise((resolve, reject) => {
     const family = isIP(address);
     const requester = url.protocol === "https:" ? httpsRequest : httpRequest;
     const request = requester(url, {
@@ -218,7 +217,10 @@ const defaultTransport: SessionLinkTransport = {
       headers,
       agent: false,
       signal,
-      lookup: (_hostname, _options, callback) => callback(null, address, family),
+      lookup: (_hostname, options, callback) => {
+        if (options.all) callback(null, [{ address, family }]);
+        else callback(null, address, family);
+      },
       ...(url.protocol === "https:" && !isIP(url.hostname.replace(/^\[|\]$/gu, "")) ? { servername: url.hostname } : {}),
       maxHeaderSize: 16 * 1024,
     }, (response) => {
@@ -243,7 +245,12 @@ const defaultTransport: SessionLinkTransport = {
     });
     request.once("error", reject);
     request.end();
-  }),
+  });
+}
+
+const defaultTransport: SessionLinkTransport = {
+  resolve: async (hostname) => (await lookup(hostname, { all: true, verbatim: true })).map((entry) => entry.address),
+  request: requestPinnedSessionLink,
 };
 
 const fetchSlots = new Semaphore(FETCH_LIMIT);
