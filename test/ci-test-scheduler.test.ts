@@ -64,18 +64,18 @@ test("baseline round robin and optimized LPT are deterministic", () => {
   assert.deepEqual(buildAssignments([files[0]], 5, "baseline", {})[4].files, []);
 });
 
-test("Windows scheduler workflow plans and dispatches exactly five listed shards", async () => {
+test("Windows scheduler workflow plans and dispatches exactly eight listed shards", async () => {
   const workflow = parseYaml(await readFile(path.join(process.cwd(), ".github/workflows/lint.yml"), "utf8"));
   const prepare = workflow.jobs["windows-scheduler"].steps.find((step: { name?: string }) => step.name === "Prepare assignment");
   assert.ok(prepare, "Windows scheduler Prepare assignment step exists");
-  assert.match(prepare.run, /scripts\/ci-test-scheduler\.mjs plan .*--shard-count 5/);
+  assert.match(prepare.run, /scripts\/ci-test-scheduler\.mjs plan .*--shard-count 8/);
 
   const windows = workflow.jobs.windows;
-  assert.deepEqual(windows.strategy.matrix.shard, [1, 2, 3, 4, 5]);
-  assert.match(windows.name, /Windows shard \$\{\{ matrix\.shard \}\}\/5/);
+  assert.deepEqual(windows.strategy.matrix.shard, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.match(windows.name, /Windows shard \$\{\{ matrix\.shard \}\}\/8/);
   const dispatch = windows.steps.find((step: { run?: string }) => step.run?.includes("ci-test-scheduler.mjs dispatch"));
   assert.ok(dispatch, "Windows shard dispatch step exists");
-  assert.match(dispatch.run, /--shard-count 5/);
+  assert.match(dispatch.run, /--shard-count 8/);
 });
 
 test("fingerprints sort inventory paths and bind raw file bytes plus every environment identity value", () => {
