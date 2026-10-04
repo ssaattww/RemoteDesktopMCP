@@ -47,6 +47,242 @@ async function replaceConfigWithRetry(source: string, destination: string): Prom
   throw last;
 }
 
+test("service close drains an in-flight process watcher before returning", async () => {
+  let markReadEntered!: () => void;
+  let releaseRead!: () => void;
+  const readEntered = new Promise<void>((resolve) => { markReadEntered = resolve; });
+  const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+  const adapter: ProcessAdapter = {
+    start: async () => "Process started with PID 9090",
+    read: async () => { markReadEntered(); await readGate; return "Reading 0 new lines (total: 0 lines, 0 remaining)"; },
+    terminate: async () => "Successfully initiated termination of session",
+    sessions: async () => "PID: 9090",
+  };
+  const { f, service, api } = await processService(adapter);
+  let watchers: Map<string, NodeJS.Timeout> | undefined;
+  let processLock: { run: <T>(work: () => Promise<T>) => Promise<T> } | undefined;
+  let desktopCommanderClose: (() => Promise<void>) | undefined;
+  let closing: Promise<void> | undefined;
+  try {
+    watchers = (service as unknown as { processWatchers: Map<string, NodeJS.Timeout> }).processWatchers;
+    processLock = (service as unknown as { processLock: { run: <T>(work: () => Promise<T>) => Promise<T> } }).processLock;
+    const dc = (service as unknown as { dc: { close: () => Promise<void> } }).dc;
+    desktopCommanderClose = dc.close.bind(dc);
+    dc.close = async () => undefined;
+    const session = await openSession(api);
+    const started = await api.call("process_start", { session_id: session, command: "close-drain", timeout_ms: 100 });
+    const processId = started.process_id as string;
+    const watcher = watchers.get(processId) as unknown as { _onTimeout?: () => void } | undefined;
+    assert.equal(typeof watcher?._onTimeout, "function", "a live process has a scheduled watcher callback");
+    watcher!._onTimeout!();
+    await readEntered;
+
+    let closeFinished = false;
+    closing = service.close().then(() => { closeFinished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(closeFinished, false, "close must wait for the watcher read already in progress");
+    releaseRead();
+    await closing;
+    assert.equal(closeFinished, true);
+    assert.equal(watchers.size, 0, "close must clear the process watcher");
+  } finally {
+    releaseRead();
+    try {
+      await Promise.allSettled([...(closing ? [closing] : [])]);
+    } finally {
+      if (processLock) await processLock.run(async () => undefined).catch(() => undefined);
+      (service as unknown as { dc: { close: () => Promise<void> } }).dc.close = desktopCommanderClose ?? (async () => undefined);
+      try {
+        await api.close().catch(() => undefined);
+      } finally {
+        try { await service.close().catch(() => undefined); }
+        finally {
+          try { await desktopCommanderClose?.(); }
+          finally { await f.cleanup(); }
+        }
+      }
+    }
+  }
+});
+
+test("service close prevents an in-flight process start from registering a watcher afterward", async () => {
+  let markStartEntered!: () => void;
+  let releaseStart!: () => void;
+  const startEntered = new Promise<void>((resolve) => { markStartEntered = resolve; });
+  const startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+  const adapter: ProcessAdapter = {
+    start: async () => { markStartEntered(); await startGate; return "Process started with PID 9191"; },
+    read: async () => "Reading 0 new lines (total: 0 lines)",
+    terminate: async () => "Successfully initiated termination of session",
+    sessions: async () => "PID: 9191",
+  };
+  const { f, service, api } = await processService(adapter);
+  let watchers: Map<string, NodeJS.Timeout> | undefined;
+  let processLock: { run: <T>(work: () => Promise<T>) => Promise<T> } | undefined;
+  let desktopCommanderClose: (() => Promise<void>) | undefined;
+  let starting: Promise<unknown> | undefined;
+  let closing: Promise<void> | undefined;
+  try {
+    watchers = (service as unknown as { processWatchers: Map<string, NodeJS.Timeout> }).processWatchers;
+    processLock = (service as unknown as { processLock: { run: <T>(work: () => Promise<T>) => Promise<T> } }).processLock;
+    const dc = (service as unknown as { dc: { close: () => Promise<void> } }).dc;
+    desktopCommanderClose = dc.close.bind(dc);
+    dc.close = async () => undefined;
+    const session = await openSession(api);
+    starting = api.call("process_start", { session_id: session, command: "start-during-close", timeout_ms: 100 });
+    await startEntered;
+    closing = service.close();
+    releaseStart();
+    const started = await starting as { process_id: string };
+    assert.ok(started.process_id);
+    await closing;
+    assert.equal(watchers.size, 0, "a start finishing after close begins must not install a new watcher");
+    await service.close();
+    assert.equal(watchers.size, 0, "repeated close remains idempotent");
+  } finally {
+    releaseStart();
+    try {
+      await Promise.allSettled([...(starting ? [starting] : []), ...(closing ? [closing] : [])]);
+    } finally {
+      if (processLock) await processLock.run(async () => undefined).catch(() => undefined);
+      (service as unknown as { dc: { close: () => Promise<void> } }).dc.close = desktopCommanderClose ?? (async () => undefined);
+      try {
+        await api.close().catch(() => undefined);
+      } finally {
+        try { await service.close().catch(() => undefined); }
+        finally {
+          try { await desktopCommanderClose?.(); }
+          finally { await f.cleanup(); }
+        }
+      }
+    }
+  }
+});
+
+test("service close drains a failed watcher and still cleans transfers and closes Desktop Commander", async () => {
+  let markObservationAuditEntered!: () => void;
+  let releaseObservationAudit!: () => void;
+  const observationAuditEntered = new Promise<void>((resolve) => { markObservationAuditEntered = resolve; });
+  const observationAuditGate = new Promise<void>((resolve) => { releaseObservationAudit = resolve; });
+  const adapterFailure = new Error("process adapter read failed");
+  const auditFailure = new Error("process observation audit failed");
+  const adapter: ProcessAdapter = {
+    start: async () => "Process started with PID 9393",
+    read: async () => { throw adapterFailure; },
+    terminate: async () => "Successfully initiated termination of session",
+    sessions: async () => "PID: 9393",
+  };
+  const { f, service, api } = await processService(adapter);
+  let desktopCommanderClose: (() => Promise<void>) | undefined;
+  let originalAudit: ((event: string, fields: Record<string, unknown>) => Promise<void>) | undefined;
+  let originalCleanup: ((item: unknown) => Promise<void>) | undefined;
+  let processLock: { run: <T>(work: () => Promise<T>) => Promise<T> } | undefined;
+  let closing: Promise<void> | undefined;
+  let transferCleanupCalled = false;
+  let desktopCommanderCloseCalls = 0;
+  try {
+    processLock = (service as unknown as { processLock: { run: <T>(work: () => Promise<T>) => Promise<T> } }).processLock;
+    const dc = (service as unknown as { dc: { close: () => Promise<void> } }).dc;
+    desktopCommanderClose = dc.close.bind(dc);
+    dc.close = async () => { desktopCommanderCloseCalls += 1; await desktopCommanderClose!(); };
+    const internals = service as unknown as {
+      audit: (event: string, fields: Record<string, unknown>) => Promise<void>;
+      cleanup: (item: unknown) => Promise<void>;
+      transfers: Map<string, unknown>;
+      processWatchers: Map<string, NodeJS.Timeout>;
+    };
+    originalAudit = internals.audit.bind(service);
+    internals.audit = async (event, fields) => {
+      if (event === "process.observe_failed") {
+        markObservationAuditEntered();
+        await observationAuditGate;
+        throw auditFailure;
+      }
+      return originalAudit!(event, fields);
+    };
+    originalCleanup = internals.cleanup.bind(service);
+    internals.cleanup = async () => { transferCleanupCalled = true; };
+    internals.transfers.set("fixture-transfer-cleanup", { state: "active" });
+    const session = await openSession(api);
+    const started = await api.call("process_start", { session_id: session, command: "failed-observer", timeout_ms: 100 });
+    const watcher = internals.processWatchers.get(started.process_id as string) as unknown as { _onTimeout?: () => void } | undefined;
+    assert.equal(typeof watcher?._onTimeout, "function");
+    watcher!._onTimeout!();
+    await observationAuditEntered;
+
+    closing = service.close();
+    releaseObservationAudit();
+    await assert.rejects(closing, (error: unknown) => error === auditFailure, "close must surface the observer's audit failure");
+    assert.equal(transferCleanupCalled, true, "transfer cleanup continues after the watcher run fails");
+    assert.equal(desktopCommanderCloseCalls, 1, "Desktop Commander closes after the watcher run fails");
+  } finally {
+    releaseObservationAudit();
+    try { await Promise.allSettled([...(closing ? [closing] : [])]); }
+    finally {
+      if (processLock) await processLock.run(async () => undefined).catch(() => undefined);
+      const internals = service as unknown as {
+        audit: (event: string, fields: Record<string, unknown>) => Promise<void>;
+        cleanup: (item: unknown) => Promise<void>;
+        dc: { close: () => Promise<void> };
+      };
+      if (originalAudit) internals.audit = originalAudit;
+      if (originalCleanup) internals.cleanup = originalCleanup;
+      if (desktopCommanderClose) internals.dc.close = desktopCommanderClose;
+      try { await api.close().catch(() => undefined); }
+      finally {
+        try { await service.close().catch(() => undefined); }
+        finally {
+          try { await desktopCommanderClose?.(); }
+          finally { await f.cleanup(); }
+        }
+      }
+    }
+  }
+});
+
+test("service close caches reentrant calls and closes Desktop Commander after transfer cleanup fails", async () => {
+  const adapter: ProcessAdapter = {
+    start: async () => "Process started with PID 9292\nProcess completed with exit code 0",
+    read: async () => "Reading 0 new lines (total: 0 lines)",
+    terminate: async () => "Successfully initiated termination of session",
+    sessions: async () => "",
+  };
+  const { f, service, api } = await processService(adapter);
+  let desktopCommanderClose: (() => Promise<void>) | undefined;
+  let originalCleanup: ((item: unknown) => Promise<void>) | undefined;
+  let reentrantClose: Promise<void> | undefined;
+  let desktopCommanderCloseCalls = 0;
+  const cleanupFailure = new Error("fixture transfer cleanup failure");
+  try {
+    const dc = (service as unknown as { dc: { close: () => Promise<void> } }).dc;
+    desktopCommanderClose = dc.close.bind(dc);
+    dc.close = async () => { desktopCommanderCloseCalls += 1; await desktopCommanderClose!(); };
+    const internals = service as unknown as {
+      cleanup: (item: unknown) => Promise<void>;
+      transfers: Map<string, unknown>;
+    };
+    originalCleanup = internals.cleanup.bind(service);
+    internals.cleanup = async () => {
+      reentrantClose = service.close();
+      throw cleanupFailure;
+    };
+    internals.transfers.set("fixture-cleanup-failure", { state: "active" });
+
+    const closing = service.close();
+    assert.strictEqual(service.close(), closing, "concurrent close calls share one completion promise");
+    await assert.rejects(closing, (error: unknown) => error === cleanupFailure, "close must preserve transfer cleanup failure");
+    assert.strictEqual(reentrantClose, closing, "a close call made during cleanup reuses the in-flight close promise");
+    assert.equal(desktopCommanderCloseCalls, 1, "Desktop Commander still closes after transfer cleanup fails");
+  } finally {
+    if (originalCleanup) (service as unknown as { cleanup: (item: unknown) => Promise<void> }).cleanup = originalCleanup;
+    if (desktopCommanderClose) (service as unknown as { dc: { close: () => Promise<void> } }).dc.close = desktopCommanderClose;
+    await api.close().catch(() => undefined);
+    await service.close().catch(() => undefined);
+    await desktopCommanderClose?.();
+    await f.cleanup();
+  }
+});
+
 test("RDMCP-MVP-IFR-002: live config history prunes past 64 versions without losing known protection", async () => {
   const f = await fixture(); let api = await mcp(f.service); let restarted: RemoteDesktopService | undefined;
   try {
