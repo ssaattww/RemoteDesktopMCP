@@ -83,6 +83,6 @@
 
 - 検証能力: `local_execution_available`
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
-- Push: N16/N17修正前のブランチHEADは通常push済み。PR #72はDraft維持。N16/N17修正を含む新HEADは通常push後に記録する。
-- CI: code HEAD `b8f6290304f18c088172af2d0cc99c9456a74ef7` の exact-head run `37208015351` は全10 job成功。N16/N17修正を含むHEADのpush後にexact-head CIを再確認する。
+- Push: N16/N17修正を含むcode commit `cc198421f40c8b35e080739ce32cb1e3e2d129ec` を通常push済み。PR #72はDraft維持。
+- CI: exact-head run `37242547410` は `cc198421f40c8b35e080739ce32cb1e3e2d129ec` に対し全10 job成功（Prepare、Ubuntu、Windows 8 shards）。
 - 独立final review / merge: 未実施。
