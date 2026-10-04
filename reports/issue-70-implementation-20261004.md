@@ -21,7 +21,7 @@
 
 初期実装前の回帰試験は4件中3件が期待どおり失敗し、既存APIの改行契約1件は実装前から成功した。失敗は旧HTML入力欄、詳細更新後の作業一覧取得漏れ、JSON保存操作未配線を示した。
 
-親通常レビューは実装HEAD `1cf1985048ea8006add665948cd1425045ad971a` に対してfailし、R70-N01 (High)〜R70-N13 (Medium)を提示した。修正用回帰を加えてこのHEADを基準にした一時worktreeで選択13件を実行し、**12件fail / 1件pass** を確認した。passした遅延GET破棄以外は、SSR共通構造、競合別状態、世代保護、404終端、監査警告などが実装前に失敗した。修正後、R70-N03/N06/N09/N14/N15を狙った回帰6件は **6件fail / 0件pass** となり、追加fixture試験はOrigin不一致403、クライアント試験は追加競合による誤ブロック、secondary choice disabled、focus消失、古い409 snapshotの適用を検出した。修正後の同じ6件はすべてpass。重点Todo回帰は元の18件に追加6件を加えて24件を確認した。
+親通常レビューは実装HEAD `1cf1985048ea8006add665948cd1425045ad971a` に対してfailし、R70-N01 (High)〜R70-N13 (Medium)を提示した。修正用回帰を加えてこのHEADを基準にした一時worktreeで選択13件を実行し、**12件fail / 1件pass** を確認した。passした遅延GET破棄以外は、SSR共通構造、競合別状態、世代保護、404終端、監査警告などが実装前に失敗した。修正後、R70-N03/N06/N09/N14/N15を狙った回帰6件は **6件fail / 0件pass** となり、追加fixture試験はOrigin不一致403、クライアント試験は追加競合による誤ブロック、secondary choice disabled、focus消失、古い409 snapshotの適用を検出した。修正後の同じ6件はすべてpass。さらに再確認で指摘された `[A,B,C]→[C,B,A]` の中央B移動で、同じindexでもfocus喪失する回帰を単独で再Red（旧処理1 fail / 0 pass）し、実際にfocusされた行をreorder中追跡する修正後は1 pass。重点Todo回帰は元の18件に追加6件を加えて24件を確認した。
 
 レビュー指摘の対応:
 
@@ -33,7 +33,7 @@
 - R70-N06 High: 追加欄に別の下書きがある場合、削除済み内容の移動に明示的な置換/保持選択を表示し、二次確認ボタンも削除済み行の確認操作として有効化。FakeElement.clickも実DOM同様にdisabled操作を発火しない。
 - R70-N07 Medium: GET/PUTの全await後・副作用前に画面世代と認証/離脱状態を再確認。BFCache復帰時にbusyと操作可否を再計算。
 - R70-N08 Medium: snapshot順で行を同期し、同じ版の件数/更新時刻/強制状態も反映。
-- R70-N09 Medium: snapshotで行を毎回再appendせず、必要な順序変更だけ行う。移動したfocus行のフォーカス、textarea選択範囲/方向、画面scroll位置を保存・復元。focused rowの削除時は次→前→見出しへpreventScrollで移動し、読み上げ状態を通知。
+- R70-N09 Medium: snapshotで行を毎回再appendせず、必要な順序変更だけ行う。reorder中に実際にinsertBeforeされたfocus行を追跡するため、最終indexが不変でもfocus、textarea選択範囲/方向、画面scroll位置を復元。focused rowの削除時は次→前→見出しへpreventScrollで移動し、読み上げ状態を通知。
 - R70-N10 Medium: 初期/動的/追加欄を2行textarea・8行相当上限の自動伸長に統一し、selectも44px以上に設定。
 - R70-N11 Medium: ログ409後にresyncが成功した経路でもTodo GETを一度実行。
 - R70-N12 Medium: Todo 404はsession unavailableとして入力を保ち、以降の読書/更新を止める。認証終了状態とは分離。
@@ -74,5 +74,5 @@
 - 検証能力: `local_execution_available`
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
 - Push: 修正ブランチの最新HEADを通常push済み。PR #72はDraft維持。
-- CI: code HEAD `0859747c51f52626956c7f0df6af128cdf99a34c` の exact-head run `37206981513` はUbuntu lint/check/build/test、Windows準備job、8/8 Windows shardがすべて成功。レポート追記後の最新HEADでもCIを再確認する。
+- CI: code HEAD `0859747c51f52626956c7f0df6af128cdf99a34c` の exact-head run `37206981513` はUbuntu lint/check/build/test、Windows準備job、8/8 Windows shardがすべて成功。N09残部を含む最終pushでは新しいexact-head runを確認する。
 - 独立final review / merge: 未実施。

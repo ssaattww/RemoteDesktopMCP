@@ -56,8 +56,8 @@ class FakeElement {
   addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
   click(name = "click") { if (this.disabled) return; this.listeners.get(name)?.({ target: this }); }
   replaceChildren(...children: FakeElement[]) { this.onReplaceChildren?.(this.children); for (const child of this.children) child.parentElement = null; this.children = []; for (const child of children) this.append(child); }
-  append(...children: FakeElement[]) { for (const child of children) { if (child.parentElement && child.parentElement.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); this.children.push(child); child.parentElement = this; } }
-  insertBefore(child: FakeElement, reference: FakeElement | null) { if (child === reference) return child; if (child.parentElement && child.parentElement.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); const index = reference ? this.children.indexOf(reference) : -1; if (index < 0) this.children.push(child); else this.children.splice(index, 0, child); child.parentElement = this; return child; }
+  append(...children: FakeElement[]) { for (const child of children) { if (child.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); this.children.push(child); child.parentElement = this; } }
+  insertBefore(child: FakeElement, reference: FakeElement | null) { if (child === reference) return child; if (child.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); const index = reference ? this.children.indexOf(reference) : -1; if (index < 0) this.children.push(child); else this.children.splice(index, 0, child); child.parentElement = this; return child; }
   setSelectionRange(start: number, end: number, direction: "forward" | "backward" | "none" = "none") { this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction; }
   remove(child?: FakeElement) { if (!child) { this.parentElement?.remove(this); return; } this.children = this.children.filter((candidate) => candidate !== child); child.parentElement = null; }
   get parent() { return this.parentElement; }
@@ -584,21 +584,24 @@ test("Todo snapshot reordering preserves focused textarea selection on a moved r
   const fixture = todoFixture();
   const second = new FakeElement("li"); second.dataset = { todoId: "todo-2", baseText: "second", baseStatus: "not_started", baseVersion: "1" };
   const secondText = new FakeElement("textarea"); secondText.value = "second"; secondText.dataset.todoText = "true"; second.queries.set("[data-todo-text]", secondText); second.append(secondText); fixture.list.append(second);
-  fixture.textarea.setSelectionRange(3, 8, "backward");
+  const third = new FakeElement("li"); third.dataset = { todoId: "todo-3", baseText: "third", baseStatus: "not_started", baseVersion: "1" };
+  const thirdText = new FakeElement("textarea"); thirdText.value = "third"; thirdText.dataset.todoText = "true"; third.queries.set("[data-todo-text]", thirdText); third.append(thirdText); fixture.list.append(third);
+  secondText.setSelectionRange(2, 5, "backward");
   const ui = boot(async (url) => {
     const parsed = new URL(url, "http://local.test");
     if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
     if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
-    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-2", text: "second", status: "not_started", order: 0 }, { id: "todo-1", text: "server text", status: "not_started", order: 1 }], total: 2, completed: 0 });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-3", text: "third", status: "not_started", order: 0 }, { id: "todo-2", text: "second", status: "not_started", order: 1 }, { id: "todo-1", text: "server text", status: "not_started", order: 2 }], total: 3, completed: 0 });
     throw new Error("unexpected request " + parsed.href);
   }, [], { "session-todo": fixture.panel }, "todo-session");
-  fixture.textarea.focus();
+  secondText.focus();
   ui.newest.click(); await settle(); await settle();
-  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-2", "todo-1"]);
-  assert.equal(FakeElement.activeElement, fixture.textarea, "reordering may not strand keyboard focus");
-  assert.equal(fixture.textarea.selectionStart, 3);
-  assert.equal(fixture.textarea.selectionEnd, 8);
-  assert.equal(fixture.textarea.selectionDirection, "backward");
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-3", "todo-2", "todo-1"]);
+  assert.equal(FakeElement.activeElement, secondText, "a middle row may be moved during reorder even when its final index is unchanged");
+  assert.equal(secondText.selectionStart, 2);
+  assert.equal(secondText.selectionEnd, 5);
+  assert.equal(secondText.selectionDirection, "backward");
+  assert.equal(secondText.focusOptions?.preventScroll, true);
   void ui;
 });
 

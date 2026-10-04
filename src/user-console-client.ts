@@ -306,11 +306,11 @@ function clientBootstrap(): void {
     const desiredRows = [...orderedRows, ...deletedRows];
     const currentRows = todoRows();
     const needsReorder = desiredRows.some((row, index) => currentRows[index] !== row);
-    const movedFocusedRow = Boolean(focusedRow && oldOrder.indexOf(focusedRow) !== desiredRows.indexOf(focusedRow));
+    let movedFocusedRow = false;
     if (list && needsReorder) {
       for (let index = 0; index < desiredRows.length; index += 1) {
         const row = desiredRows[index]!; const current = todoRows();
-        if (current[index] !== row) list.insertBefore(row, current[index] ?? null);
+        if (current[index] !== row) { if (row === focusedRow) movedFocusedRow = true; list.insertBefore(row, current[index] ?? null); }
       }
       if (focusedRow && movedFocusedRow && desiredRows.includes(focusedRow) && activeElement) {
         if (document.activeElement !== activeElement) activeElement.focus({ preventScroll: true });
