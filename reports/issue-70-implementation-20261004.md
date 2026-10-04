@@ -63,7 +63,6 @@
 - `test/issue-56-shared-todo.test.ts`
 - `test/user-console-client.test.ts`
 - `scripts/issue70-ui-fixture.ts`
-- `doc/design/shared-todo-and-stale-update-gate.md`
 - `tasks/tasks-status.md`
 - `tasks/phases-status.md`
 - `reports/issue-70-implementation-20261004.md`
@@ -72,6 +71,6 @@
 
 - 検証能力: `local_execution_available`
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
-- Push: 通常push予定。PR #72はDraft維持。
-- CI: 修正候補のpush後、exact-head checksを読み取り確認する。確認前は未確認扱い。
+- Push: `dd44061881766f250e5720a4ceb332f5b8f35b74` を通常push済み。PR #72はDraft維持。
+- CI: 修正HEADへのpush後に exact-head checks を確認する。
 - 独立final review / merge: 未実施。
