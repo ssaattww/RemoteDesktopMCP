@@ -71,6 +71,6 @@
 
 - 検証能力: `local_execution_available`
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
-- Push: `dd44061881766f250e5720a4ceb332f5b8f35b74` を通常push済み。PR #72はDraft維持。
-- CI: 修正HEADへのpush後に exact-head checks を確認する。
+- Push: `ef198a66d54eecaa5647504b535a772ddd3fd1e9` を通常push済み。PR #72はDraft維持。
+- CI: exact-head checks を確認したが、GitHubは当該branchにchecksを報告していない。
 - 独立final review / merge: 未実施。
