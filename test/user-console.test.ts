@@ -714,6 +714,58 @@ test("Issue 48: a fetched title survives rollback of an unrelated audit failure"
   }
 });
 
+test("Issue 48: metadata audit rollback cannot restore session links after emergency stop", async () => {
+  const f = await fixture();
+  const owner = await mcp(f.service);
+  const auditService = f.service as unknown as { audit: (event: string, fields: Record<string, unknown>) => Promise<void> };
+  const originalAudit = auditService.audit.bind(f.service);
+  let holdMetadataAudit = false;
+  let releaseMetadataAudit!: () => void;
+  let markMetadataAuditStarted!: () => void;
+  const metadataAuditGate = new Promise<void>((resolve) => { releaseMetadataAudit = resolve; });
+  const metadataAuditStarted = new Promise<void>((resolve) => { markMetadataAuditStarted = resolve; });
+  auditService.audit = async (event, fields) => {
+    if (holdMetadataAudit && event === "session.metadata.updated" && fields.version === 3) {
+      holdMetadataAudit = false;
+      markMetadataAuditStarted();
+      await metadataAuditGate;
+      throw new Error("injected metadata audit failure");
+    }
+    await originalAudit(event, fields);
+  };
+  try {
+    const opened = await owner.call("session_open", { working_directory: f.root, purpose: "Stop wins over rollback" });
+    const sessionId = String(opened.session_id);
+    const session = f.service.sessions.get(sessionId); assert.ok(session);
+    const initial = await f.service.updateSessionMetadata("owner@example.test", sessionId, { expectedVersion: 1, externalUrl: "https://example.com/old", externalTitle: "Old title" });
+    assert.equal(initial.ok, true);
+    assert.equal(session.externalUrl, "https://example.com/old");
+
+    holdMetadataAudit = true;
+    const update = f.service.updateSessionMetadata("owner@example.test", sessionId, { expectedVersion: 2, externalUrl: "https://example.com/new", externalTitle: "New title" });
+    await metadataAuditStarted;
+    assert.equal(session.externalUrl, "https://example.com/new", "the pending update is committed before its audit finishes");
+
+    await f.service.stopUserExecution("owner@example.test");
+    assert.equal(session.state, "closed");
+    assert.equal(session.externalUrl, undefined, "emergency stop clears the link before the audit failure is released");
+    assert.equal(session.externalTitle, undefined);
+
+    releaseMetadataAudit();
+    assert.deepEqual(await update, { ok: false, status: 503, error: "update_unavailable" });
+    assert.equal(session.state, "closed");
+    assert.equal(session.externalUrl, undefined, "rollback must not restore pre-stop URL data");
+    assert.equal(session.externalTitle, undefined, "rollback must not restore pre-stop title data");
+    assert.equal(session.externalTitleSource, undefined);
+    assert.equal(session.externalTitleStatus, "not_requested");
+  } finally {
+    releaseMetadataAudit();
+    auditService.audit = originalAudit;
+    await owner.close();
+    await f.cleanup();
+  }
+});
+
 test("Issue 48: emergency stop is accepted while a session working directory is being validated", async () => {
   const f = await fixture();
   const owner = await mcp(f.service);

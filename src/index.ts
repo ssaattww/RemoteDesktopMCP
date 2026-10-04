@@ -471,7 +471,8 @@ export class RemoteDesktopService {
         await this.audit("session.metadata.updated", { user, sessionId: committed.target.id, previousVersion: committed.previous.version, version: committed.target.version, changedFields: committed.changedFields });
       } catch {
         await this.executionStateLock.run(async () => {
-          if (this.sessions.get(sessionId) !== committed.target || committed.target.version !== committed.previous.version + 1) return;
+          // A terminal lifecycle transition (close, expiry, or emergency stop) owns the final state and must not be undone by this rollback.
+          if (this.sessions.get(sessionId) !== committed.target || !available(committed.target) || committed.target.version !== committed.previous.version + 1) return;
           committed.target.workingDirectory = committed.previous.workingDirectory;
           committed.target.purpose = committed.previous.purpose;
           if (committed.target.linkRevision !== committed.previous.linkRevision) Object.assign(committed.target, { externalUrl: committed.previous.externalUrl, externalTitle: committed.previous.externalTitle, externalTitleSource: committed.previous.externalTitleSource, externalTitleStatus: committed.previous.externalTitleStatus, linkRevision: committed.previous.linkRevision });
