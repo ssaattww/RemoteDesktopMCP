@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "ee14c152e7733f0eaa0762fbffde2adefe78019a",
+  "workflowRunId": 37176081921,
+  "runAttempt": 2,
+  "shardCount": 5,
+  "generatedAt": "2026-10-04T04:07:29Z",
+  "fingerprint": "ae6cb758ca3586c66d470c2583121b456b83b63827315472a7d62cb9e674b002",
+  "mode": "optimized",
+  "manifestStatus": "applied",
+  "assignments": [
+    {
+      "shardId": 1,
+      "files": [
+        "test/config-correlation-regression.test.ts",
+        "test/desktop-commander-ownership.test.ts",
+        "test/operation-audit-details.test.ts",
+        "test/session-filesystem-lifecycle.test.ts",
+        "test/session-time.test.ts"
+      ],
+      "estimatedDurationMs": 260660.96439999985
+    },
+    {
+      "shardId": 2,
+      "files": [
+        "test/config-transfer-integrity.test.ts",
+        "test/http-oauth-regression.test.ts",
+        "test/independent-process-ownership.test.ts",
+        "test/private-storage.test.ts"
+      ],
+      "estimatedDurationMs": 272750.1778
+    },
+    {
+      "shardId": 3,
+      "files": [
+        "test/ci-test-scheduler.test.ts",
+        "test/fixture-runtime.test.ts",
+        "test/independent-config-history.test.ts",
+        "test/public-auth.test.ts",
+        "test/tool-root-contracts.test.ts",
+        "test/user-console-client.test.ts",
+        "test/windows-job.test.ts"
+      ],
+      "estimatedDurationMs": 260409.70830000046
+    },
+    {
+      "shardId": 4,
+      "files": [
+        "test/admin.test.ts",
+        "test/emergency-stop-windows.test.ts",
+        "test/mvp.test.ts",
+        "test/user-console.test.ts"
+      ],
+      "estimatedDurationMs": 266094.23430000024
+    },
+    {
+      "shardId": 5,
+      "files": [
+        "test/emergency-stop-backend.test.ts",
+        "test/emergency-stop.test.ts",
+        "test/independent-transfer-lifecycle.test.ts",
+        "test/search-process-lifecycle.test.ts"
+      ],
+      "estimatedDurationMs": 263932.83470000024
+    }
+  ],
+  "planDigest": "e810e413f5aa7bec7d5af23477f963e50f55ce82eff12c77f22139c6504e8113"
+}
