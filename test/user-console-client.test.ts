@@ -150,7 +150,7 @@ function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType
   const createRange = () => { let startNode: FakeElement | null = null; let startOffset = 0; let endNode: FakeElement | null = null; let endOffset = 0; const compare = (left: FakeElement | null, leftOffset: number, right: FakeElement | null, rightOffset: number) => { if (!left || !right) return 0; const leftRow = left.closest<FakeElement>("tr[data-session-id]"); const rightRow = right.closest<FakeElement>("tr[data-session-id]"); const rowOrder = (leftRow?.dataset.sessionId ?? "").localeCompare(rightRow?.dataset.sessionId ?? ""); if (rowOrder) return rowOrder; const leftCell = left.closest<FakeElement>("td"); const rightCell = right.closest<FakeElement>("td"); const cellOrder = (leftRow?.cells.indexOf(leftCell!) ?? 0) - (rightRow?.cells.indexOf(rightCell!) ?? 0); return cellOrder || leftOffset - rightOffset; }; const range = { selectNodeContents: () => undefined, setEnd: (node: FakeElement, at: number) => { endNode = node; endOffset = at; }, setStart: (node: FakeElement, at: number) => { startNode = node; startOffset = at; }, collapse: () => { endNode = startNode; endOffset = startOffset; }, compareBoundaryPoints: (_how: number, other: typeof range) => compare(startNode, startOffset, other.startContainer, other.startOffset), get startContainer() { return startNode; }, get startOffset() { return startOffset; }, get endContainer() { return endNode; }, get endOffset() { return endOffset; }, toString: () => "x".repeat(endOffset) }; return range as unknown as Range; };
   const documentStub = { hidden: options.hidden ?? false, get activeElement() { return FakeElement.activeElement; }, getElementById: (id: string) => elements.get(id) ?? null, createElement: (tagName: string) => new FakeElement(tagName), createRange, createTreeWalker, addEventListener: (name: string, listener: (event?: unknown) => void) => documentListeners.set(name, listener), documentElement: { scrollHeight: 1200 } };
   const ClockDate = class extends Date { constructor(value?: string | number) { super(value ?? clock.now); } static now() { return clock.now; } };
-  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  runInNewContext(userConsoleClientScript, { document: documentStub, window: windowStub, fetch: fetchImpl, EventSource: FakeEventSource, URLSearchParams, URL, encodeURIComponent, Element: FakeElement, Date: ClockDate, AbortController, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
   const emptyTimers = new Map<number, { callback: () => void; delay: number }>();
   const emptyTimeouts = new Map<number, { due: number; callback: () => void }>();
   return { root, status, newest, older, windowStub, documentStub, documentListeners, windowListeners, intervals: clock.intervals, timeouts: clock.timers, tickIntervals: () => { for (const timer of [...clock.intervals.values()]) timer.callback(); }, tickInterval: (delay: number) => { for (const timer of [...clock.intervals.values()]) if (timer.delay === delay) timer.callback(); }, advanceTime: async (milliseconds: number) => clock.advance(milliseconds), setNow: (value: number) => { clock.now = value; }, get scrollCalls() { return scrollCalls; }, scrollTargets, sources: FakeEventSource.instances };
@@ -373,6 +373,104 @@ test("session timestamp disclosure, relative value, open state, and focus surviv
   assert.equal(newSummary?.children[0]?.textContent, "1分前", "relative time updates in place without another state request");
   assert.equal(stateCalls, 2);
 });
+
+test("session-link-updated refreshes owner state without fetching log pages and renders title text safely", async () => {
+  const sessionRows = new FakeElement();
+  const calls: string[] = [];
+  const toggle = new FakeElement("input"); toggle.checked = true;
+  const ui = boot(async (url) => {
+    calls.push(url);
+    if (url.startsWith("/api/console-state")) return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-09-28T00:00:00Z",
+      sessions: [{ session_id: "active-link", created_at: "2026-09-27T00:00:00Z", state: "active", active: true, external_url: "https://example.com/?private=1", external_title: "<Work & item>" }],
+      running: [],
+    });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": sessionRows, "auto-refresh": toggle });
+  await settle();
+  const initialCalls = calls.length;
+  ui.sources[0]!.dispatch("session-link-updated", JSON.stringify({ session_id: "active-link", link_revision: 0 }));
+  await settle();
+  assert.ok(calls.length > initialCalls);
+  assert.equal(calls.some((url) => url.startsWith("/api/logs")), false);
+  const row = sessionRows.children[0]!;
+  const anchor = row.children[7]?.children[0] as unknown as { href: string; textContent: string; target: string; rel: string; referrerPolicy: string };
+  assert.equal(anchor.href, "https://example.com/?private=1");
+  assert.equal(anchor.textContent, "<Work & item>");
+  assert.equal(anchor.target, "_blank");
+  assert.equal(anchor.rel, "noopener noreferrer");
+  assert.equal(anchor.referrerPolicy, "no-referrer");
+});
+
+test("session-link-updated does not bypass the paused auto-refresh setting", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const toggle = new FakeElement("input"); toggle.checked = false;
+  const calls: string[] = [];
+  const ui = boot(async (url) => {
+    calls.push(url);
+    return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z",
+      sessions: [{ session_id: "paused-link", created_at: "2026-10-03T00:00:00Z", state: "active", active: true, external_url: "https://example.com/old", external_title: "Old title" }],
+      running: [],
+    });
+  }, [], { "session-rows": sessionRows, "auto-refresh": toggle });
+  await settle();
+  const initialStateCalls = calls.filter((url) => url.startsWith("/api/console-state")).length;
+  ui.sources[0]!.dispatch("session-link-updated", JSON.stringify({ session_id: "paused-link", link_revision: 1 }));
+  await settle();
+  assert.equal(calls.filter((url) => url.startsWith("/api/console-state")).length, initialStateCalls);
+  assert.equal(calls.some((url) => url.startsWith("/api/logs")), false);
+  assert.equal(sessionRows.children[0]?.children[7]?.children[0]?.textContent, "Old title");
+});
+
+test("session-link-updated while paused is applied once after auto-refresh resumes", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const toggle = new FakeElement("input"); toggle.checked = false;
+  const calls: string[] = [];
+  let stateVersion = 0;
+  const ui = boot(async (url) => {
+    calls.push(url);
+    if (url.startsWith("/api/console-state")) return response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z",
+      sessions: [{ session_id: "paused-link", created_at: "2026-10-03T00:00:00Z", state: "active", active: true, external_url: "https://example.com/old", external_title: stateVersion ? "Updated title" : "Old title" }],
+      running: [],
+    });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+  }, [], { "session-rows": sessionRows, "auto-refresh": toggle });
+  await settle();
+  const initialStateCalls = calls.filter((url) => url.startsWith("/api/console-state")).length;
+
+  stateVersion = 1;
+  ui.sources[0]!.dispatch("session-link-updated", JSON.stringify({ session_id: "paused-link", link_revision: 2 }));
+  await settle();
+  assert.equal(calls.filter((url) => url.startsWith("/api/console-state")).length, initialStateCalls, "paused updates do not fetch state");
+  assert.equal(sessionRows.children[0]?.children[7]?.children[0]?.textContent, "Old title");
+
+  toggle.checked = true;
+  toggle.click("change");
+  await settle(); await settle();
+  assert.equal(calls.filter((url) => url.startsWith("/api/console-state")).length, initialStateCalls + 1, "resume applies one pending state refresh");
+  assert.equal(calls.some((url) => url.startsWith("/api/logs")), false, "link updates do not fetch log pages");
+  assert.equal(sessionRows.children[0]?.children[7]?.children[0]?.textContent, "Updated title");
+});
+
+test("state refresh renders a title without a URL as inert text", async () => {
+  const sessionRows = new FakeElement("tbody");
+  const ui = boot(async (url) => new URL(url, "http://local.test").pathname === "/api/console-state"
+    ? response(200, {
+      stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-03T00:00:00Z",
+      sessions: [{ session_id: "title-only-session", created_at: "2026-10-03T00:00:00Z", state: "active", active: true, external_title: "<Manual title>" }],
+      running: [],
+    })
+    : response(404, {}), [], { "session-rows": sessionRows });
+  await settle();
+  const title = sessionRows.children[0]?.children[7]?.children[0];
+  assert.equal(title?.tagName, "span");
+  assert.equal(title?.textContent, "<Manual title>");
+  assert.equal(title?.href, "");
+  assert.equal(ui.sources.length, 1);
+});
+
 
 test("state refresh updates only session and running rows with the selected filter", async () => {
   const sessionRows = new FakeElement();

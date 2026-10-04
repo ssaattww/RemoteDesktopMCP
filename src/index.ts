@@ -18,12 +18,13 @@ import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, e
 
 import { mountAdmin } from "./admin.js";
 import { mountUserConsole } from "./user-console.js";
+import { applySessionLinkFetchResult, captureSessionLinkFetchLease, createSessionLink, fetchSessionLinkTitle, type SessionLinkOwnerState, type SessionLinkTransport } from "./session-links.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
 type OAuthClient = { client_id: string; client_name: string; redirect_uris: string[] };
 type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string; expires: number; scope: "mcp" };
-type Session = { id: string; user: string; workingDirectory: string; purpose: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
+type Session = { workingDirectory: string; purpose: string; created: number; touched: number } & SessionLinkOwnerState;
 // Node's default Stats numbers lose NTFS file-id precision above 2^53.  Keep
 // identity values as decimal strings derived from bigint stats so unrelated
 // files cannot collide with a protected config pin or an owned upload.
@@ -53,7 +54,7 @@ const MAX_AUDIT_EVENTS = 20_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; sessionLinkTransport?: SessionLinkTransport };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -221,6 +222,7 @@ export class RemoteDesktopService {
   private auditGeneration = makeId();
   private readonly auditEntries: AuditLogEntry[] = [];
   private readonly auditListeners = new Set<(event: Record<string, unknown> & { event: string; at: string }) => void>();
+  private readonly sessionLinkListeners = new Set<(user: string, sessionId: string, linkRevision: number) => void>();
   private readonly auditConnectionClosers = new Set<() => void>();
   private readonly auditProcessOwners = new Map<string, { user: string; sessionId?: string }>();
   private readonly auditLock = new Mutex();
@@ -230,6 +232,12 @@ export class RemoteDesktopService {
   private executionStateUnavailable = false;
   readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
+  private clearSessionLink(session: Session): void {
+    session.externalUrl = undefined;
+    session.externalTitle = undefined;
+    session.externalTitleSource = undefined;
+    session.externalTitleStatus = "not_requested";
+  }
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
   async initialize(): Promise<void> {
     await ensureSafeDataDirectory(this.cfg.dataDir);
@@ -255,7 +263,7 @@ export class RemoteDesktopService {
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
     this.expiryTimer.unref();
   }
-  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); for (const close of this.auditConnectionClosers) close(); this.auditConnectionClosers.clear(); this.auditListeners.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
+  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); for (const close of this.auditConnectionClosers) close(); this.auditConnectionClosers.clear(); this.auditListeners.clear(); this.sessionLinkListeners.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
   async audit(event: string, fields: Record<string, unknown>): Promise<void> { await this.auditLock.run(async () => { await this.refreshAuditIndexLocked(); const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); await this.refreshAuditIndexLocked(); } const entry = { at: new Date().toISOString(), event, ...fields }; const line = `${JSON.stringify(entry)}\n`; await appendFile(file, line); this.rememberAuditEntry(entry); const stats = await lstat(file, { bigint: true }); const identity = this.identityFromStats(stats); const expectedBytes = this.auditFileBytes + BigInt(Buffer.byteLength(line)); if (this.auditFileIdentity && this.auditFileIdentity.dev === identity.dev && this.auditFileIdentity.ino === identity.ino && stats.size === expectedBytes) this.auditFileBytes = stats.size;
     else await this.loadAuditIndex(true);
   }); }
@@ -347,6 +355,20 @@ export class RemoteDesktopService {
     const session = this.sessions.get(sessionId);
     return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
   }
+  private startSessionLinkTitleFetch(session: Session): void {
+    const lease = captureSessionLinkFetchLease(session);
+    if (!lease) return;
+    void fetchSessionLinkTitle(lease.url, { transport: this.cfg.sessionLinkTransport }).then(
+      (title) => {
+        const current = this.sessions.get(lease.id);
+        if (current && this.userOwnsActiveSession(lease.user, lease.id) && applySessionLinkFetchResult(current, lease, title)) this.notifySessionLinkUpdated(lease.user, lease.id, lease.revision);
+      },
+      () => {
+        const current = this.sessions.get(lease.id);
+        if (current && this.userOwnsActiveSession(lease.user, lease.id) && applySessionLinkFetchResult(current, lease)) this.notifySessionLinkUpdated(lease.user, lease.id, lease.revision);
+      },
+    );
+  }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
     if (this.userOwnsActiveSession(user, sessionId)) return true;
     if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
@@ -355,6 +377,8 @@ export class RemoteDesktopService {
   }
   auditEntriesForConsole(): Array<Record<string, unknown> & { event: string; at: string }> { return this.auditEntries.map((entry) => entry.event); }
   subscribeAudit(listener: (event: Record<string, unknown> & { event: string; at: string }) => void): () => void { this.auditListeners.add(listener); return () => this.auditListeners.delete(listener); }
+  subscribeSessionLink(listener: (user: string, sessionId: string, linkRevision: number) => void): () => void { this.sessionLinkListeners.add(listener); return () => this.sessionLinkListeners.delete(listener); }
+  private notifySessionLinkUpdated(user: string, sessionId: string, linkRevision: number): void { for (const listener of this.sessionLinkListeners) { try { listener(user, sessionId, linkRevision); } catch { /* Notification delivery must not fail session creation or title retrieval. */ } } }
   subscribeAuditConnection(close: () => void): () => void { this.auditConnectionClosers.add(close); return () => this.auditConnectionClosers.delete(close); }
   sign(body: object): string { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
   validRedirect(uri: string): boolean { try { return this.cfg.allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; } }
@@ -533,9 +557,17 @@ export class RemoteDesktopService {
   private async sweepExpiredLocked(now = Date.now()): Promise<void> {
     for (const session of this.sessions.values()) {
       if (session.state === "active" && session.expires <= now) {
-        await this.audit("session.expired", { user: session.user, sessionId: session.id });
         session.state = "expired";
-        for (const transfer of this.transfers.values()) if (transfer.sessionId === session.id && transfer.state === "active") await this.fail(transfer, "session_expired");
+        this.clearSessionLink(session);
+        let auditFailed = false;
+        let auditFailure: unknown;
+        try { await this.audit("session.expired", { user: session.user, sessionId: session.id }); }
+        catch (error) { auditFailed = true; auditFailure = error; }
+        for (const transfer of this.transfers.values()) if (transfer.sessionId === session.id && transfer.state === "active") {
+          try { await this.fail(transfer, "session_expired"); }
+          catch (error) { if (!auditFailed) { auditFailed = true; auditFailure = error; } }
+        }
+        if (auditFailed) throw auditFailure;
       }
     }
     for (const transfer of this.transfers.values()) if (transfer.state === "active" && now - transfer.touched > TRANSFER_TTL) await this.fail(transfer, "expired");
@@ -1120,9 +1152,40 @@ export class RemoteDesktopService {
       return originalRegisterTool(name, { ...config, description: `${config.description ?? ""} A non-empty comment explaining what this call is intended to accomplish is required and is recorded with the operation.`, inputSchema: { ...config.inputSchema, comment: z.string().trim().min(1).max(500).describe("Briefly explain what this call is intended to accomplish.") }, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
     };
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
-    server.registerTool("session_open", { description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Set the required absolute working_directory and brief purpose. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Opening is rejected while the caller's Emergency Stop is active.", inputSchema: { working_directory: z.string().trim().min(1).max(4096), purpose: z.string().trim().min(1).max(200) } }, this.tool(user, async ({ working_directory, purpose }) => { await this.sweepExpired(); this.requireCurrentOperation(); let workingDirectory: string; try { if (!path.isAbsolute(working_directory)) throw new Error(); workingDirectory = await realpath(working_directory); if (!(await lstat(workingDirectory)).isDirectory()) throw new Error(); } catch { throw new Error("Working directory must be an existing absolute directory."); } this.requireCurrentOperation(); const now = Date.now(); const session: Session = { id: makeId(), user, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active" }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, workingDirectory, purpose: session.purpose, stopGeneration: this.userExecutionState(user).stopGeneration }); return { session_id: session.id, connection_id: session.id, working_directory: session.workingDirectory, purpose: session.purpose, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state }; }));
-    server.registerTool("session_list", { description: "List the caller's active sessions with their working directory and purpose.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
-    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
+    server.registerTool("session_open", {
+      description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Set the required absolute working_directory and brief purpose. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Optionally provide a public HTTP(S) url and display title. When title is blank or omitted and the URL is eligible, the server sends an unauthenticated public request to retrieve the page title; it sends no cookies or local credentials. Private or login-required pages are not supported, so enter a title for those links. Do not put secrets in a URL. Retrieval is bounded and failure does not prevent opening the session; a provided title prevents retrieval. Opening is rejected while the caller's Emergency Stop is active.",
+      inputSchema: {
+        working_directory: z.string().trim().min(1).max(4096),
+        purpose: z.string().trim().min(1).max(200),
+        url: z.string().optional().describe("Optional public HTTP(S) page URL; must not contain credentials or secrets."),
+        title: z.string().optional().describe("Optional display title. A supplied title is shown as text and skips server retrieval."),
+      },
+    }, this.tool(user, async ({ working_directory, purpose, url, title }) => {
+      await this.sweepExpired(); this.requireCurrentOperation();
+      let workingDirectory: string;
+      try {
+        if (!path.isAbsolute(working_directory)) throw new Error();
+        workingDirectory = await realpath(working_directory);
+        if (!(await lstat(workingDirectory)).isDirectory()) throw new Error();
+      } catch { throw new Error("Working directory must be an existing absolute directory."); }
+      const externalLink = createSessionLink({ url, title });
+      this.requireCurrentOperation();
+      const now = Date.now();
+      const session: Session = { id: makeId(), user, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active", ...externalLink };
+      this.sessions.set(session.id, session);
+      await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, workingDirectory, purpose: session.purpose, stopGeneration: this.userExecutionState(user).stopGeneration });
+      this.startSessionLinkTitleFetch(session);
+      return {
+        session_id: session.id, connection_id: session.id, working_directory: session.workingDirectory, purpose: session.purpose,
+        idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state,
+        ...(session.externalUrl ? { external_url: session.externalUrl } : {}),
+        ...(session.externalTitle ? { external_title: session.externalTitle } : {}),
+        ...(session.externalTitleSource ? { external_title_source: session.externalTitleSource } : {}),
+        external_title_status: session.externalTitleStatus, link_revision: session.linkRevision,
+      };
+    }));
+    server.registerTool("session_list", { description: "List the caller's active sessions with their working directory, purpose, and optional external link display metadata.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state, ...(entry.externalUrl || entry.externalTitle ? { ...(entry.externalUrl ? { external_url: entry.externalUrl } : {}), ...(entry.externalTitle ? { external_title: entry.externalTitle } : {}), external_title_source: entry.externalTitleSource, external_title_status: entry.externalTitleStatus, link_revision: entry.linkRevision } : {}) })) }; }));
+    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.clearSessionLink(session); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
     server.registerTool("node_list", { description: "List the one supported local node and its configured file roots. Requires an active session_id belonging to the authenticated caller. roots contains each root_id and its canonical absolute_path; root_ids is retained for compatibility. File and transfer relative_path values are relative to the returned root, while process_start uses the session working_directory. node_id selects the local node for file and process operations.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, root_ids: this.cfg.roots.map((root) => root.id), roots: this.cfg.roots.map((root) => ({ root_id: root.id, absolute_path: root.path })), path_base: "root", connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
     server.registerTool("file_search", { description: "Search file names through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches names only and does not search file contents. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
     server.registerTool("content_search", { description: "Search file contents through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches contents and does not search file names. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "content"); await this.audit("file.content_search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));

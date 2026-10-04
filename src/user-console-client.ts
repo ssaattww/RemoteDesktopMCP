@@ -39,7 +39,7 @@ function clientBootstrap(): void {
   type LogState = "current" | "pending" | "refreshing" | "resync-required";
   type ConsoleState = {
     stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
-    sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
+    sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean; external_url?: string; external_title?: string }>;
     running?: Array<{ operation_id: string; connection_id: string; label: string; status: string; purpose?: string; command?: string }>;
   };
   const sessionId = root.dataset.sessionId ?? "";
@@ -770,7 +770,7 @@ function clientBootstrap(): void {
         const restoredSummaries = new Map<string, HTMLElement>();
         sessionRows.replaceChildren();
         if (!visibleSessions.length) {
-          const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 7;
+          const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 8;
           cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
         } else for (const session of visibleSessions) {
           const row = sessionRows.insertRow();
@@ -789,6 +789,18 @@ function clientBootstrap(): void {
           addCell(row, session.purpose ?? "—");
           addCell(row, session.session_id);
           addCell(row, session.working_directory ?? "—");
+          const externalCell = row.insertCell(); externalCell.className = "session-external-link-cell";
+          if (externalCell.style) { externalCell.style.textAlign = "right"; externalCell.style.fontSize = ".9em"; externalCell.style.color = "#777"; }
+          if (session.external_url) {
+            try {
+              const destination = new URL(session.external_url);
+              if (["http:", "https:"].includes(destination.protocol) && !destination.username && !destination.password) {
+                const external = document.createElement("a"); external.className = "session-external-link"; external.href = destination.href; external.target = "_blank"; external.rel = "noopener noreferrer"; external.referrerPolicy = "no-referrer"; external.textContent = session.external_title ?? session.external_url; externalCell.append(external);
+              }
+            } catch { /* Malformed API data cannot create a navigation link. */ }
+          } else if (session.external_title) {
+            const title = document.createElement("span"); title.className = "session-external-title"; title.textContent = session.external_title; externalCell.append(title);
+          }
         }
         if (focusedSessionId) {
           const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === focusedSessionId);
@@ -921,6 +933,11 @@ function clientBootstrap(): void {
       else if (logState !== "refreshing") { updateLogState("current"); showPending(); }
     });
     source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); if (listPage) { resyncPending = true; autoPending = true; if (autoEnabled()) scheduleAutomatic(); else updateLogState("resync-required"); } else void resync(); });
+    source.addEventListener("session-link-updated", () => {
+      if (generation !== currentGeneration) return;
+      if (autoEnabled()) void refreshState();
+      else statePending = true;
+    });
     source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; stopAuthentication(); });
     source.addEventListener("heartbeat", () => { if (generation === currentGeneration && source.readyState === EventSource.OPEN) { connectionState = "connected"; setStatus(); } });
   }
