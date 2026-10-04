@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-04T07:08:44.862Z",
+  "sourceCommit": "fe422e4b6105f5bd55a67f7352cdbd207d3c43b5",
+  "fingerprint": "fb3cfd123cbc57402e720eec0df9ed3b878803a789636bce77098f5ba3943957",
+  "environment": {
+    "runnerLabel": "windows-latest",
+    "runnerOS": "Windows",
+    "process.platform": "win32",
+    "process.arch": "x64",
+    "os.release": "10.0.26100",
+    "nodeVersion": "v22.23.3",
+    "npmVersion": "10.9.9",
+    "packageLockSha256": "f153a51e7f8b4592fcea9b9c6ecfaa4fd3fc9912bcf7d410a54c7fb39829067d"
+  },
+  "files": [
+    {
+      "path": "test/admin.test.ts",
+      "medianDurationMs": 73237.34799999977
+    },
+    {
+      "path": "test/ci-test-scheduler.test.ts",
+      "medianDurationMs": 593.813000000082
+    },
+    {
+      "path": "test/config-correlation-regression.test.ts",
+      "medianDurationMs": 27025.213899999857
+    },
+    {
+      "path": "test/config-transfer-integrity.test.ts",
+      "medianDurationMs": 122744.1561
+    },
+    {
+      "path": "test/desktop-commander-ownership.test.ts",
+      "medianDurationMs": 678.1935000000522
+    },
+    {
+      "path": "test/emergency-stop-backend.test.ts",
+      "medianDurationMs": 13654.457700000028
+    },
+    {
+      "path": "test/emergency-stop-windows.test.ts",
+      "medianDurationMs": 28677.462800000096
+    },
+    {
+      "path": "test/emergency-stop.test.ts",
+      "medianDurationMs": 79225.61969999998
+    },
+    {
+      "path": "test/fixture-runtime.test.ts",
+      "medianDurationMs": 1653.440700000152
+    },
+    {
+      "path": "test/http-oauth-regression.test.ts",
+      "medianDurationMs": 24545.96439999994
+    },
+    {
+      "path": "test/independent-config-history.test.ts",
+      "medianDurationMs": 50139.62350000022
+    },
+    {
+      "path": "test/independent-process-ownership.test.ts",
+      "medianDurationMs": 65591.15259999968
+    },
+    {
+      "path": "test/independent-transfer-lifecycle.test.ts",
+      "medianDurationMs": 80954.83920000028
+    },
+    {
+      "path": "test/mvp.test.ts",
+      "medianDurationMs": 32531.813399999868
+    },
+    {
+      "path": "test/operation-audit-details.test.ts",
+      "medianDurationMs": 139435.4728000001
+    },
+    {
+      "path": "test/private-storage.test.ts",
+      "medianDurationMs": 26958.508900000248
+    },
+    {
+      "path": "test/public-auth.test.ts",
+      "medianDurationMs": 103933.53649999993
+    },
+    {
+      "path": "test/search-process-lifecycle.test.ts",
+      "medianDurationMs": 60833.5046000001
+    },
+    {
+      "path": "test/session-filesystem-lifecycle.test.ts",
+      "medianDurationMs": 59725.043599999975
+    },
+    {
+      "path": "test/session-time.test.ts",
+      "medianDurationMs": 290.5150999999605
+    },
+    {
+      "path": "test/tool-root-contracts.test.ts",
+      "medianDurationMs": 71795.36300000001
+    },
+    {
+      "path": "test/user-console-client.test.ts",
+      "medianDurationMs": 832.3445000001229
+    },
+    {
+      "path": "test/user-console.test.ts",
+      "medianDurationMs": 103821.5793999997
+    },
+    {
+      "path": "test/windows-job.test.ts",
+      "medianDurationMs": 3746.841299999971
+    }
+  ]
+}
