@@ -301,3 +301,33 @@ entries:
     description: 対象リポジトリのホスト名と管理場所。
   - term: lint
     description: 静的な規約や構文の検査を表す一般的な開発用語。
+  - term: Todo
+    description: 作業項目や作業一覧を表す一般的な開発用語。
+  - term: SSRF
+    description: Server-Side Request Forgery の略称で、外部URL取得の安全性を扱う一般的なセキュリティ用語。
+  - term: wrapper
+    description: 既存処理を包んで共通処理や入出力変換を追加する構成を表す一般的な開発用語。
+  - term: snake_case
+    description: 単語を下線で区切る識別子命名形式を表す一般的な開発用語。
+  - term: schema
+    description: 入力やデータ構造の定義を表す一般的な開発用語。
+  - term: handler
+    description: 要求やイベントを受けて処理する入口を表す一般的な開発用語。
+  - term: rollback
+    description: 変更失敗時に直前の状態へ戻す処理を表す一般的な開発用語。
+  - term: CI
+    description: Continuous Integration の略称で、変更ごとの自動検証を表す一般的な開発用語。
+  - term: shard
+    description: テストや処理を分割して並行実行する単位を表す一般的な開発用語。
+  - term: workflow
+    description: 継続的検証などの一連の自動処理定義を表す一般的な開発用語。
+  - term: PR
+    description: Pull Request の略称で、変更提案を表す一般的な開発用語。
+  - term: HEAD
+    description: Gitで現在のコミット位置を表す一般的な開発用語。
+  - term: PATCH
+    description: HTTPで部分更新を表す標準メソッド名。
+  - term: リンク
+    description: 別の場所や外部URLへの参照を表す一般的な技術用語。
+  - term: コミット
+    description: Gitで変更履歴を確定する操作を表す一般的な開発用語。
