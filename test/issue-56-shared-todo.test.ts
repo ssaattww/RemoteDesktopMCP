@@ -786,11 +786,34 @@ test("clock rollback and unavailable monotonic time fail closed and record the a
 test("session detail renders the Todo panel before session metadata", async () => {
   const h = await consoleHarness();
   try {
-    const response = await fetch(`${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`, { headers: { cookie: h.cookie } });
+    const detailUrl = `${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`;
+    const first = await fetch(detailUrl, { headers: { cookie: h.cookie } });
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await first.text())?.[1]; assert.ok(csrf);
+    const update = await fetch(`${h.baseUrl}/api/sessions/${encodeURIComponent(h.sessionId)}/todo`, { method: "PUT", headers: { cookie: h.cookie, origin: "http://127.0.0.1", "x-csrf-token": csrf, "content-type": "application/json" }, body: JSON.stringify({ expected_version: 0, changes: [{ op: "add", text: "複数行\n作業" }] }) });
+    assert.equal(update.status, 200);
+    const response = await fetch(detailUrl, { headers: { cookie: h.cookie } });
     const html = await response.text();
     assert.equal(response.status, 200);
     assert.ok(html.includes('id="session-todo"'));
     assert.ok(html.indexOf('id="session-todo"') < html.indexOf("セッションの内容"));
+    assert.ok(html.includes('<textarea data-todo-text="true" maxlength="1000"'));
+    assert.ok(html.includes('data-todo-op="save"'));
+    assert.ok(html.includes('data-todo-op="delete"'));
+    assert.doesNotMatch(html, /<input[^>]+name="text"[^>]+aria-label="作業項目"/);
+  } finally { await h.close(); }
+});
+
+test("the Todo JSON update contract preserves multiline text", async () => {
+  const h = await consoleHarness();
+  try {
+    const endpoint = `${h.baseUrl}/api/sessions/${encodeURIComponent(h.sessionId)}/todo`;
+    const detail = await fetch(`${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`, { headers: { cookie: h.cookie } });
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; assert.ok(csrf);
+    const text = "first line\nsecond line";
+    const updated = await fetch(endpoint, { method: "PUT", headers: { cookie: h.cookie, origin: "http://127.0.0.1", "x-csrf-token": csrf, "content-type": "application/json" }, body: JSON.stringify({ expected_version: 0, changes: [{ op: "add", text }] }) });
+    assert.equal(updated.status, 200);
+    const snapshot = await updated.json() as { items: Array<{ text: string }> };
+    assert.equal(snapshot.items[0]?.text, text);
   } finally { await h.close(); }
 });
 
