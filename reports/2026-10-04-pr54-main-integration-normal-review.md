@@ -6,7 +6,7 @@
 - タスク種別: 通常コードレビューと同一レビュアーによる指摘修正確認
 - 初回reviewed HEAD: `23faa6203bf5ee945612d38a97054c9156ee82a4`
 - base: `origin/main` `4cd9f8d42af0e606fab23ba3961d8343259568e2`
-- final implementation candidate: 初回HEADに `src/session-links.ts` / `test/session-links.test.ts` の修正と本報告・追跡更新を加えたローカル候補。commit SHAは報告作成時点でcommit pending。
+- final implementation candidate: `66c38230aafa4bfab197d0c51d73807b6b32c2b6`。このHEADは初回HEADに `src/session-links.ts` / `test/session-links.test.ts` の修正と本報告・追跡更新を含む。
 
 ## sub-agentを使う理由
 
@@ -63,6 +63,11 @@
 - 初回通常レビュー verdict: `fail`（PR54-NR-008 / P2 1件）。他のレビューcriterionはchecked_no_finding。ただし exact-HEAD CI は初回candidateでheld。
 - 同じレビュアーによるfinding-limited修正確認 verdict: `pass`。finding action verified。修正範囲外の全候補について新規全体レビューを行ったとは扱わない。
 - 現候補は全体回帰・ローカルcheck/build/lint合格。正確な新HEADのCIはまだ未実施。
+
+## End-of-Issue skill gap / feedback
+
+- Skill-gap decision: no new Skill or in-scope Skill update is needed; the invalid numeric reference issue was a bounded product-contract gap covered by existing design and review workflows.
+- Feedback decision: no reusable process point to add; the one-off local dependency symlink was removed before publication. No Skill repository files or external feedback ledger were changed.
 
 ## リスク
 
