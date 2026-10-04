@@ -53,3 +53,22 @@ Artifact内にはmanifest 1件とJSON記録72件がある。対象24 test files�
 Artifactから候補manifestを`.github/test-duration-manifest.json`へ登録した。schema、24件の正確なpath coverage、正のmedian値を確認し、schedulerの`selectManifest`へmanifestと同一のenvironment/fingerprint、生成時刻後のworkflow時刻を渡した結果は`mode=optimized`、`manifestStatus=applied`、24 durationsだった。これは関数契約の検証であり、Linux上の現在checkoutはWindows runner環境と異なるため、実際のWindows fingerprint一致の証明とは区別する。
 
 登録後のローカル全gate、manifest commit、Windows上での`applied`確認およびその最終HEADのrequired CI 3回はこれから行う。測定artifact自体は全件成功だが、Issue #24はこれだけでは完了しない。性能比較ではPR #63の最大Windows Test中央値272秒と、PR #66の測定前CI最大Windows Test中央値256秒を記述的に比較できる。16秒差は単発の構成比較に過ぎず、測定manifestの最適化効果とは認定しない。PR #66測定後の5 shard CI結果を別に評価する。3分達成は必須CIの各回全体が180秒以下の場合に限る。
+
+## 登録後のrequired CI（同一HEAD 3回）
+
+- manifest登録commit / PR head: `5e162448c02addf515b289b0d2130ef5dc52c135`
+- required workflow run: `37175240494`。attempt 1/2/3はすべて同一headで、Windows assignment artifactも各attemptに生成され、3回とも`mode=optimized` / `manifestStatus=applied` / 同じfingerprintだった。UbuntuとWindows shard 1〜5を含む全jobが各attemptでsuccess。
+- workflow所要秒: 278 / 262 / 264。中央値264秒、最大278秒。
+- Windows Test stepのshard別秒:
+
+| Attempt | shard 1 | shard 2 | shard 3 | shard 4 | shard 5 | 最大 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 184 | 185 | 144 | 167 | 108 | 185 |
+| 2 | 137 | 129 | 145 | 154 | 106 | 154 |
+| 3 | 174 | 131 | 141 | 112 | 181 | 181 |
+
+3回の最大Windows Test中央値は181秒、最大185秒。PR #63の3-shard最大Windows Test中央値272秒との観測差は91秒（約33.5%）。PR #66のmanifest前CI 3回の最大Windows Test中央値256秒との観測差は75秒。どちらも小標本のrun比較であり、PR #63のCIと候補CIのマシン・同時負荷などを統制していないため因果効果とは認定しない。
+
+全workflowは各回180秒を超過し、中央値264秒。したがって3分達成は未達。Windows最大stepの観測中央値はPR #63基準から80秒以上減ったが、全workflow目標は別途未達。R24-05の設計上の測定・manifest適用・required CI 3回は完了、Issue #24全体は未完了。PR #66はdraft/open/unmergedで、独立最終レビューは開始していない。
+
+登録後ローカルgate（Linux checkout）も成功: `npm test` 135件（124 pass / 11 skip / 0 fail）、`npm run check`、`npm run build`、`npm run lint`、Markdown lint（94 files / 0 issues）、design whitelist lint、`git diff --check`。Windows固有挙動の根拠にはGitHub Windows CIのみを用いる。
