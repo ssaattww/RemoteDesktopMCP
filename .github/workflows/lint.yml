@@ -183,9 +183,11 @@ jobs:
       - name: Prepare diagnostics
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
+          & node scripts/ci-test-scheduler.mjs init-diagnostic --root . --output ci-artifacts/shard-diagnostic.json --shard-id '${{ matrix.shard }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Path ci-artifacts -Force | Out-Null
           'check=not_run', 'build=not_run', 'test=not_run' | Set-Content ci-artifacts/test-results.txt
 
       - name: Download shared assignment
@@ -234,7 +236,7 @@ jobs:
         run: |
           $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $dispatchJson = & node scripts/ci-test-scheduler.mjs dispatch --root . --plan ci-artifacts/test-scheduler.json --shard-id '${{ matrix.shard }}' --shard-count 8
+          $dispatchJson = & node scripts/ci-test-scheduler.mjs dispatch --root . --plan ci-artifacts/test-scheduler.json --shard-id '${{ matrix.shard }}' --shard-count 8 --diagnostic-output ci-artifacts/shard-diagnostic.json
           $status = $LASTEXITCODE
           if ($status -ne 0) {
             "test_exit_code=$status" | Add-Content ci-artifacts/test-results.txt

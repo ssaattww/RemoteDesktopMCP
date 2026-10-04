@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, realpath, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -161,8 +161,8 @@ export function selectManifest(manifest, context) {
   const generated = Date.parse(manifest.generatedAt);
   if (generated > created) throw new Error("Manifest generatedAt is in the future relative to the workflow created_at.");
   if (created - generated > 30 * 24 * 60 * 60 * 1000) return { mode: "baseline", manifestStatus: "stale", durations: {} };
-  const environmentMatches = JSON.stringify(normalizeEnvironment(manifest.environment)) === JSON.stringify(normalizeEnvironment(context.environment));
-  if (!environmentMatches || manifest.fingerprint !== context.fingerprint) return { mode: "baseline", manifestStatus: "fingerprint-mismatch", durations: {} };
+  if (!SHA256.test(context.fingerprint ?? "")) throw new Error("Manifest content fingerprint is invalid.");
+  if (manifest.fingerprint !== context.fingerprint) return { mode: "baseline", manifestStatus: "fingerprint-mismatch", durations: {} };
   if (manifest.files.length !== files.length || manifest.files.some((entry, index) => entry.path !== files[index])) throw new Error("Manifest file coverage does not exactly match the tracked test universe.");
   return { mode: "optimized", manifestStatus: "applied", durations: Object.fromEntries(manifest.files.map(({ path: file, medianDurationMs }) => [file, medianDurationMs])) };
 }
@@ -260,6 +260,48 @@ export function validateWorkflowIdentity(identity, expected) {
 export function validateRuntimeFingerprint(plan, currentFingerprint) {
   if (plan.mode === "optimized" && currentFingerprint !== plan.fingerprint) throw new Error("Measured environment or fingerprint differs from the shared scheduler plan.");
   return true;
+}
+
+function createDispatchDiagnostic(plan, shardId) {
+  return {
+    schemaVersion: 1,
+    planDigest: SHA256.test(plan?.planDigest ?? "") ? plan.planDigest : null,
+    mode: ["baseline", "optimized"].includes(plan?.mode) ? plan.mode : null,
+    shardId: Number.isSafeInteger(shardId) ? shardId : null,
+    files: [],
+    overallValidation: { status: "not_run", result: "shared plan validation has not run" },
+    environmentCheck: { status: "not_applicable", result: "environment check has not run" },
+    safeFailureReason: null,
+  };
+}
+
+export function dispatchPlan(plan, expected, shardId, currentFingerprint) {
+  const diagnostic = createDispatchDiagnostic(plan, shardId);
+  const fail = (safeFailureReason) => ({ ok: false, files: [], diagnostic: { ...diagnostic, safeFailureReason } });
+  try {
+    validatePlan(plan, expected);
+    diagnostic.overallValidation = { status: "success", result: "schema, run identity, digest, and exact file coverage passed" };
+  } catch {
+    diagnostic.overallValidation = { status: "failure", result: "shared plan validation failed" };
+    return fail("shared_plan_invalid");
+  }
+
+  if (plan.mode === "optimized") {
+    diagnostic.environmentCheck = { status: "failure", result: "optimized environment has not been validated" };
+    if (!SHA256.test(currentFingerprint ?? "")) return fail("optimized_environment_unavailable");
+    try {
+      validateRuntimeFingerprint(plan, currentFingerprint);
+      diagnostic.environmentCheck = { status: "success", result: "shard environment and tracked content match the manifest fingerprint" };
+    } catch {
+      return fail("optimized_environment_mismatch");
+    }
+  } else {
+    diagnostic.environmentCheck = { status: "not_applicable", result: "baseline assignment does not depend on manifest environment" };
+  }
+
+  if (!Number.isInteger(shardId) || shardId < 1 || shardId > plan.shardCount) return fail("shard_id_invalid");
+  diagnostic.files = [...plan.assignments[shardId - 1].files];
+  return { ok: true, files: diagnostic.files, diagnostic };
 }
 
 export async function getTrackedTestFiles(root) {
@@ -363,6 +405,33 @@ async function readWorkflowIdentity(root, file) {
   });
 }
 
+async function writeDispatchDiagnostic(root, output, diagnostic, { exclusive = false } = {}) {
+  if (typeof output !== "string" || !output || path.isAbsolute(output)) throw new Error("--diagnostic-output must be a repository-relative file path.");
+  const target = path.resolve(root, output);
+  const relative = path.relative(root, target);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("--diagnostic-output must remain inside the repository root.");
+  const parent = path.dirname(target);
+  let current = root;
+  for (const segment of path.relative(root, parent).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    const parentInfo = await lstat(current);
+    if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) throw new Error("Diagnostic output directory must contain only regular directories.");
+  }
+  try {
+    const existing = await lstat(target);
+    if (existing.isSymbolicLink() || !existing.isFile()) throw new Error("Diagnostic output must be a regular file.");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const content = `${JSON.stringify(diagnostic, null, 2)}\n`;
+  if (exclusive) {
+    const handle = await open(target, "wx");
+    try { await handle.writeFile(content); } finally { await handle.close(); }
+  } else {
+    await writeFile(target, content);
+  }
+}
+
 export function parseArgs(args) {
   const result = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -377,6 +446,16 @@ async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
   const root = path.resolve(args.root ?? process.cwd());
+  if (command === "init-diagnostic") {
+    const shardId = Number(args.shardId);
+    if (!args.output || !Number.isSafeInteger(shardId) || shardId < 1) throw new Error("Diagnostic output and a positive shard id are required.");
+    const diagnostic = createDispatchDiagnostic(null, shardId);
+    diagnostic.overallValidation = { status: "not_run", result: "scheduler dispatch has not completed" };
+    diagnostic.environmentCheck = { status: "not_applicable", result: "scheduler dispatch has not completed" };
+    diagnostic.safeFailureReason = "scheduler_dispatch_not_completed";
+    await writeDispatchDiagnostic(root, args.output, diagnostic, { exclusive: true });
+    return;
+  }
   if (command === "metadata") {
     if (!args.output) throw new Error("--output is required for workflow metadata.");
     const identity = await getRunMetadata();
@@ -388,29 +467,50 @@ async function main() {
     if (!output) throw new Error("--output is required for plan generation.");
     const identity = await readWorkflowIdentity(root, args.metadata ?? "ci-artifacts/workflow-metadata.json");
     const files = await getTrackedTestFiles(root);
-    const environment = await captureEnvironment(root);
-    const fingerprint = await computeFingerprint(root, environment);
     const manifest = await loadManifest(root);
-    const selected = selectManifest(manifest, { files, fingerprint, environment, createdAt: identity.createdAt });
+    if (manifest !== null) validateManifestShape(manifest);
+    const fingerprintEnvironment = manifest?.environment ?? await captureEnvironment(root);
+    const fingerprint = await computeFingerprint(root, fingerprintEnvironment);
+    const selected = selectManifest(manifest, { files, fingerprint, createdAt: identity.createdAt });
     const plan = buildPlan({ ...identity, workflowRunId: identity.runId, shardCount: Number(args.shardCount ?? 3), generatedAt: identity.createdAt,
       fingerprint, manifestStatus: selected.manifestStatus, mode: selected.mode, files, durations: selected.durations });
     await writeFile(path.resolve(root, output), `${JSON.stringify(plan, null, 2)}\n`, { flag: "wx" });
     return;
   }
   if (command === "dispatch") {
-    const input = await readFile(path.resolve(root, args.plan), "utf8");
-    const plan = JSON.parse(input);
-    const files = await getTrackedTestFiles(root);
-    const expected = { sourceCommit: process.env.GITHUB_SHA, workflowRunId: Number(process.env.GITHUB_RUN_ID),
-      runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), shardCount: Number(args.shardCount ?? 3), files };
-    validatePlan(plan, expected);
-    if (plan.mode === "optimized") {
-      const environment = await captureEnvironment(root);
-      validateRuntimeFingerprint(plan, await computeFingerprint(root, environment));
-    }
+    if (!args.diagnosticOutput) throw new Error("--diagnostic-output is required for shard dispatch.");
     const shardId = Number(args.shardId);
-    if (!Number.isInteger(shardId) || shardId < 1 || shardId > plan.shardCount) throw new Error("Requested shard id is invalid.");
-    process.stdout.write(`${JSON.stringify({ files: plan.assignments[shardId - 1].files })}\n`);
+    let plan = null;
+    let dispatch = null;
+    let diagnostic = createDispatchDiagnostic(null, shardId);
+    try {
+      const input = await readFile(path.resolve(root, args.plan), "utf8");
+      plan = JSON.parse(input);
+      diagnostic = createDispatchDiagnostic(plan, shardId);
+      const files = await getTrackedTestFiles(root);
+      const expected = { sourceCommit: process.env.GITHUB_SHA, workflowRunId: Number(process.env.GITHUB_RUN_ID),
+        runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), shardCount: Number(args.shardCount ?? 3), files };
+      let currentFingerprint;
+      if (plan?.mode === "optimized") {
+        try {
+          const environment = await captureEnvironment(root);
+          currentFingerprint = await computeFingerprint(root, environment);
+        } catch {
+          currentFingerprint = undefined;
+        }
+      }
+      dispatch = dispatchPlan(plan, expected, shardId, currentFingerprint);
+      diagnostic = dispatch.diagnostic;
+    } catch {
+      diagnostic.overallValidation = { status: "failure", result: "shared plan could not be read or parsed" };
+      diagnostic.safeFailureReason = "shared_plan_unreadable";
+    }
+    await writeDispatchDiagnostic(root, args.diagnosticOutput, diagnostic);
+    if (!dispatch?.ok) {
+      const safeReason = diagnostic.safeFailureReason ?? "shared_plan_unreadable";
+      throw new Error(safeReason);
+    }
+    process.stdout.write(`${JSON.stringify({ files: dispatch.files, diagnostic })}\n`);
     return;
   }
   throw new Error("Command must be plan or dispatch.");

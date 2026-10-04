@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile, symlink } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import {
   buildAssignments,
   buildPlan,
   fingerprintInputs,
+  dispatchPlan,
   normalizeTestPath,
   selectManifest,
   validateRuntimeFingerprint,
@@ -76,6 +77,14 @@ test("Windows scheduler workflow plans and dispatches exactly eight listed shard
   const dispatch = windows.steps.find((step: { run?: string }) => step.run?.includes("ci-test-scheduler.mjs dispatch"));
   assert.ok(dispatch, "Windows shard dispatch step exists");
   assert.match(dispatch.run, /--shard-count 8/);
+  assert.match(dispatch.run, /--diagnostic-output ci-artifacts\/shard-diagnostic\.json/);
+  const prepareDiagnostics = windows.steps.find((step: { name?: string }) => step.name === "Prepare diagnostics");
+  assert.ok(prepareDiagnostics, "per-shard diagnostic state is initialized before later steps");
+  assert.match(prepareDiagnostics.run, /init-diagnostic/);
+  assert.doesNotMatch(prepareDiagnostics.run, /Set-Content\s+ci-artifacts\/shard-diagnostic\.json/);
+  const diagnostics = windows.steps.find((step: { name?: string }) => step.name === "Upload diagnostics");
+  assert.ok(diagnostics, "per-shard diagnostics are uploaded");
+  assert.equal(diagnostics.if, "always()", "per-shard diagnostics are retained after dispatch or test failure");
 });
 
 test("fingerprints sort inventory paths and bind raw file bytes plus every environment identity value", () => {
@@ -113,14 +122,155 @@ test("test paths are normalized and reject traversal, foreign roots, and symlink
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("manifest content is checked against its recorded environment, independently of the prepare runner", () => {
+  const inventory = files.map((file) => ({ path: file, content: Buffer.from(`contents:${file}`) }));
+  const manifestFingerprint = fingerprintInputs(inventory, environment);
+  const prepareRunnerEnvironment = { ...environment, "os.release": "prepare-runner-only" };
+  const context = { files, fingerprint: manifestFingerprint, environment: prepareRunnerEnvironment, createdAt: "2026-10-02T12:00:00Z" };
+  const selected = selectManifest(manifest({ fingerprint: manifestFingerprint }), context);
+  assert.equal(selected.mode, "optimized", "prepare runner environment does not override the manifest's recorded environment");
+  assert.equal(selected.manifestStatus, "applied");
+
+  const changedInventory = inventory.map((entry, index) => index === 0 ? { ...entry, content: Buffer.from("changed") } : entry);
+  const changedFingerprint = fingerprintInputs(changedInventory, environment);
+  assert.equal(selectManifest(manifest({ fingerprint: changedFingerprint }), { ...context, fingerprint: changedFingerprint }).mode, "optimized",
+    "manifest self-consistency uses matching content in the environment recorded by the manifest");
+  assert.equal(selectManifest(manifest({ fingerprint: manifestFingerprint }), { ...context, fingerprint: changedFingerprint }).manifestStatus, "fingerprint-mismatch",
+    "changed tracked content falls back to baseline even when the prepare runner differs");
+});
+
 test("missing, expired, and fingerprint-mismatched manifests safely choose baseline", () => {
   const context = { files, fingerprint: "b".repeat(64), environment, createdAt: "2026-10-02T12:00:00Z" };
   assert.equal(selectManifest(null, context).manifestStatus, "missing");
   assert.equal(selectManifest(manifest({ generatedAt: "2026-08-31T11:59:59Z" }), context).manifestStatus, "stale");
   assert.equal(selectManifest(manifest({ fingerprint: "c".repeat(64) }), context).manifestStatus, "fingerprint-mismatch");
-  assert.equal(selectManifest(manifest({ environment: { ...environment, "os.release": "changed" } }), context).manifestStatus, "fingerprint-mismatch");
   assert.equal(selectManifest(manifest(), context).mode, "optimized");
   assert.equal(selectManifest(manifest({ generatedAt: "2026-09-02T12:00:00Z" }), context).mode, "optimized", "exactly 30 days remains applicable");
+});
+
+test("optimized dispatch checks each shard environment while baseline dispatch marks it not applicable", () => {
+  const sourceCommit = "1".repeat(40);
+  const expected = { sourceCommit, workflowRunId: 7, runAttempt: 1, shardCount: 2, files };
+  const fingerprint = "b".repeat(64);
+  const optimized = buildPlan({ ...expected, generatedAt: "2026-10-02T12:00:00Z", fingerprint, manifestStatus: "applied", mode: "optimized",
+    files, durations: Object.fromEntries(files.map((file) => [file, 10])) });
+  const firstShard = dispatchPlan(optimized, expected, 1, fingerprint);
+  assert.equal(firstShard.ok, true);
+  assert.equal(firstShard.diagnostic.environmentCheck.status, "success");
+
+  const oneShardEnvironmentFingerprint = "c".repeat(64);
+  const secondShard = dispatchPlan(optimized, expected, 2, oneShardEnvironmentFingerprint);
+  assert.equal(secondShard.ok, false, "a single shard with an environment mismatch must fail before tests");
+  assert.equal(secondShard.diagnostic.overallValidation.status, "success", "the shared plan itself remains valid");
+  assert.equal(secondShard.diagnostic.environmentCheck.status, "failure");
+  assert.equal(secondShard.diagnostic.safeFailureReason, "optimized_environment_mismatch");
+
+  const baseline = buildPlan({ ...expected, generatedAt: "2026-10-02T12:00:00Z", fingerprint, manifestStatus: "missing", mode: "baseline", files, durations: {} });
+  const baselineShard = dispatchPlan(baseline, expected, 2, "unused");
+  assert.equal(baselineShard.ok, true);
+  assert.equal(baselineShard.diagnostic.environmentCheck.status, "not_applicable");
+  assert.equal(baselineShard.diagnostic.planDigest, baseline.planDigest);
+  assert.equal(baselineShard.diagnostic.mode, "baseline");
+  assert.deepEqual(baselineShard.diagnostic.files, baseline.assignments[1].files);
+
+  const invalidPlan = { ...optimized, planDigest: "d".repeat(64) };
+  const failedPlan = dispatchPlan(invalidPlan, expected, 1, fingerprint);
+  assert.equal(failedPlan.ok, false);
+  assert.equal(failedPlan.diagnostic.overallValidation.status, "failure");
+  assert.equal(failedPlan.diagnostic.environmentCheck.status, "not_applicable", "environment checks do not run for an invalid shared plan");
+  assert.equal(failedPlan.diagnostic.safeFailureReason, "shared_plan_invalid");
+  assert.ok(Object.hasOwn(failedPlan.diagnostic, "planDigest"));
+  assert.ok(Object.hasOwn(failedPlan.diagnostic, "mode"));
+  assert.ok(Object.hasOwn(failedPlan.diagnostic, "shardId"));
+  assert.ok(Object.hasOwn(failedPlan.diagnostic, "files"));
+});
+
+test("dispatch persists structured success and failure diagnostics for artifact upload", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ci-scheduler-dispatch-diagnostics-"));
+  const sourceCommit = "1".repeat(40);
+  const scheduler = fileURLToPath(new URL("../scripts/ci-test-scheduler.mjs", import.meta.url));
+  const env = { ...process.env, GITHUB_SHA: sourceCommit, GITHUB_RUN_ID: "7", GITHUB_RUN_ATTEMPT: "1" };
+  try {
+    await mkdir(path.join(root, "test"), { recursive: true });
+    await mkdir(path.join(root, "ci-artifacts"), { recursive: true });
+    await writeFile(path.join(root, "test", "sample.test.ts"), "export {};\n");
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["add", "test/sample.test.ts"], { cwd: root });
+
+    const invalidPlanPath = path.join(root, "invalid-plan.json");
+    const invalidDiagnosticPath = "ci-artifacts/failed-shard.json";
+    await writeFile(invalidPlanPath, JSON.stringify({ mode: "optimized", planDigest: "a".repeat(64) }));
+    const failed = spawnSync(process.execPath, [scheduler, "dispatch", "--root", root, "--plan", invalidPlanPath,
+      "--shard-id", "1", "--shard-count", "1", "--diagnostic-output", invalidDiagnosticPath], { encoding: "utf8", env });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /shared_plan_invalid/);
+    const failedDiagnostic = JSON.parse(await readFile(path.join(root, invalidDiagnosticPath), "utf8"));
+    assert.equal(failedDiagnostic.overallValidation.status, "failure");
+    assert.equal(failedDiagnostic.environmentCheck.status, "not_applicable");
+    assert.equal(failedDiagnostic.safeFailureReason, "shared_plan_invalid");
+
+    const escapedDiagnostic = spawnSync(process.execPath, [scheduler, "dispatch", "--root", root, "--plan", invalidPlanPath,
+      "--shard-id", "1", "--shard-count", "1", "--diagnostic-output", "../escaped-diagnostic.json"], { encoding: "utf8", env });
+    assert.equal(escapedDiagnostic.status, 1);
+    assert.match(escapedDiagnostic.stderr, /remain inside the repository root/);
+    await assert.rejects(readFile(path.join(path.dirname(root), "escaped-diagnostic.json")), { code: "ENOENT" });
+
+    const files = ["test/sample.test.ts"];
+    const baselinePlan = buildPlan({ sourceCommit, workflowRunId: 7, runAttempt: 1, shardCount: 1,
+      generatedAt: "2026-10-02T12:00:00Z", fingerprint: "b".repeat(64), mode: "baseline", manifestStatus: "missing", files, durations: {} });
+    const validPlanPath = path.join(root, "valid-plan.json");
+    const validDiagnosticPath = "ci-artifacts/successful-shard.json";
+    await writeFile(validPlanPath, JSON.stringify(baselinePlan));
+    const passed = spawnSync(process.execPath, [scheduler, "dispatch", "--root", root, "--plan", validPlanPath,
+      "--shard-id", "1", "--shard-count", "1", "--diagnostic-output", validDiagnosticPath], { encoding: "utf8", env });
+    assert.equal(passed.status, 0, passed.stderr);
+    const successDiagnostic = JSON.parse(await readFile(path.join(root, validDiagnosticPath), "utf8"));
+    assert.equal(successDiagnostic.planDigest, baselinePlan.planDigest);
+    assert.equal(successDiagnostic.mode, "baseline");
+    assert.equal(successDiagnostic.shardId, 1);
+    assert.deepEqual(successDiagnostic.files, files);
+    assert.equal(successDiagnostic.overallValidation.status, "success");
+    assert.equal(successDiagnostic.environmentCheck.status, "not_applicable");
+    assert.equal(successDiagnostic.safeFailureReason, null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("diagnostic initialization rejects symlinked files and parent directories", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ci-scheduler-diagnostic-symlink-"));
+  const scheduler = fileURLToPath(new URL("../scripts/ci-test-scheduler.mjs", import.meta.url));
+  const outside = path.join(path.dirname(root), `${path.basename(root)}-outside.json`);
+  const outsideDirectory = path.join(path.dirname(root), `${path.basename(root)}-outside-directory`);
+  const runInit = (output: string) => spawnSync(process.execPath, [scheduler, "init-diagnostic", "--root", root,
+    "--output", output, "--shard-id", "1"], { encoding: "utf8" });
+  try {
+    await mkdir(path.join(root, "ci-artifacts"), { recursive: true });
+    await writeFile(outside, "keep this file\n");
+    await symlink(outside, path.join(root, "ci-artifacts", "shard-diagnostic.json"), "file");
+    const linkedFile = runInit("ci-artifacts/shard-diagnostic.json");
+    assert.equal(linkedFile.status, 1);
+    assert.match(linkedFile.stderr, /regular file/i);
+    assert.equal(await readFile(outside, "utf8"), "keep this file\n");
+    await rm(path.join(root, "ci-artifacts", "shard-diagnostic.json"));
+
+    await mkdir(outsideDirectory, { recursive: true });
+    await symlink(outsideDirectory, path.join(root, "ci-artifacts", "linked"), process.platform === "win32" ? "junction" : "dir");
+    const linkedParent = runInit("ci-artifacts/linked/shard-diagnostic.json");
+    assert.equal(linkedParent.status, 1);
+    assert.match(linkedParent.stderr, /regular directories/i);
+    await assert.rejects(readFile(path.join(outsideDirectory, "shard-diagnostic.json")), { code: "ENOENT" });
+
+    const safe = runInit("ci-artifacts/shard-diagnostic.json");
+    assert.equal(safe.status, 0, safe.stderr);
+    const diagnostic = JSON.parse(await readFile(path.join(root, "ci-artifacts", "shard-diagnostic.json"), "utf8"));
+    assert.equal(diagnostic.shardId, 1);
+    assert.equal(diagnostic.overallValidation.status, "not_run");
+    assert.equal(diagnostic.environmentCheck.status, "not_applicable");
+    assert.equal(diagnostic.safeFailureReason, "scheduler_dispatch_not_completed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { force: true });
+    await rm(outsideDirectory, { recursive: true, force: true });
+  }
 });
 
 test("malformed or unsafe manifests hard-fail even when stale; matching manifests must cover U", () => {
