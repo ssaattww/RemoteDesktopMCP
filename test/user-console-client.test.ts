@@ -48,12 +48,17 @@ class FakeElement {
   maxLength = 0;
   rows = 0;
   scrollHeight = 80;
+  selectionStart = 0;
+  selectionEnd = 0;
+  selectionDirection: "forward" | "backward" | "none" = "none";
   innerHTML = "";
   focus(options?: { preventScroll?: boolean }) { FakeElement.activeElement = this; this.focusOptions = options; }
   addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
-  click(name = "click") { this.listeners.get(name)?.({ target: this }); }
+  click(name = "click") { if (this.disabled) return; this.listeners.get(name)?.({ target: this }); }
   replaceChildren(...children: FakeElement[]) { this.onReplaceChildren?.(this.children); for (const child of this.children) child.parentElement = null; this.children = []; for (const child of children) this.append(child); }
-  append(...children: FakeElement[]) { for (const child of children) { child.parentElement?.remove(child); this.children.push(child); child.parentElement = this; } }
+  append(...children: FakeElement[]) { for (const child of children) { if (child.parentElement && child.parentElement.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); this.children.push(child); child.parentElement = this; } }
+  insertBefore(child: FakeElement, reference: FakeElement | null) { if (child === reference) return child; if (child.parentElement && child.parentElement.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); const index = reference ? this.children.indexOf(reference) : -1; if (index < 0) this.children.push(child); else this.children.splice(index, 0, child); child.parentElement = this; return child; }
+  setSelectionRange(start: number, end: number, direction: "forward" | "backward" | "none" = "none") { this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction; }
   remove(child?: FakeElement) { if (!child) { this.parentElement?.remove(this); return; } this.children = this.children.filter((candidate) => candidate !== child); child.parentElement = null; }
   get parent() { return this.parentElement; }
   insertRow() { const row = new FakeElement("tr"); this.append(row); return row; }
@@ -527,6 +532,35 @@ test("an add conflict keeps its independent draft and requires an explicit retry
   void ui;
 });
 
+test("an add conflict blocks only add retries and does not disable other rows", async () => {
+  const fixture = todoFixture(); fixture.addText.value = "draft to add";
+  let puts = 0; const rowOperations: string[] = [];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") {
+      puts += 1;
+      const body = JSON.parse(String(init.body)) as { changes: Array<{ op: string }> };
+      if (puts > 1) rowOperations.push(body.changes[0]!.op);
+      if (puts === 1) return response(409, { version: 2, items: [{ id: "todo-1", text: "server text", status: "not_started" }], total: 1, completed: 0, conflict: true });
+      if (puts === 2) return response(200, { version: 3, items: [{ id: "todo-1", text: "edited existing row", status: "not_started" }], total: 1, completed: 0 });
+      return response(200, { version: 4, items: [], total: 0, completed: 0 });
+    }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.addText.listeners.get("input")?.({ target: fixture.addText }); fixture.addButton.click(); await settle();
+  assert.equal(fixture.addButton.disabled, true);
+  assert.equal(fixture.save.disabled, false, "row controls are independent of an add-field conflict");
+  fixture.textarea.value = "edited existing row";
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  fixture.save.click(); await settle();
+  fixture.remove.click(); await settle();
+  assert.equal(puts, 3, "non-conflicting existing row can still be saved and deleted");
+  assert.deepEqual(rowOperations, ["edit", "delete"]);
+  assert.equal(fixture.panel.dataset.version, "4");
+  void ui;
+});
+
 test("Todo snapshots reorder rows and refresh summary, timestamp, and enforcement state at the same version", async () => {
   const fixture = todoFixture();
   const updated = new FakeElement("time"); const enforcementText = new FakeElement("span"); const enforcementButton = new FakeElement("button");
@@ -544,6 +578,28 @@ test("Todo snapshots reorder rows and refresh summary, timestamp, and enforcemen
   assert.notEqual(updated.textContent, "");
   assert.equal(enforcementText.textContent, "無効");
   assert.equal(enforcementButton.value, "true");
+});
+
+test("Todo snapshot reordering preserves focused textarea selection on a moved row", async () => {
+  const fixture = todoFixture();
+  const second = new FakeElement("li"); second.dataset = { todoId: "todo-2", baseText: "second", baseStatus: "not_started", baseVersion: "1" };
+  const secondText = new FakeElement("textarea"); secondText.value = "second"; secondText.dataset.todoText = "true"; second.queries.set("[data-todo-text]", secondText); second.append(secondText); fixture.list.append(second);
+  fixture.textarea.setSelectionRange(3, 8, "backward");
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-2", text: "second", status: "not_started", order: 0 }, { id: "todo-1", text: "server text", status: "not_started", order: 1 }], total: 2, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.focus();
+  ui.newest.click(); await settle(); await settle();
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-2", "todo-1"]);
+  assert.equal(FakeElement.activeElement, fixture.textarea, "reordering may not strand keyboard focus");
+  assert.equal(fixture.textarea.selectionStart, 3);
+  assert.equal(fixture.textarea.selectionEnd, 8);
+  assert.equal(fixture.textarea.selectionDirection, "backward");
+  void ui;
 });
 
 test("a successful 409 log resync still refreshes Todo exactly once", async () => {
@@ -633,8 +689,63 @@ test("a deleted draft stays disabled after a concurrent save settles and preserv
   assert.equal(fixture.addText.value, "keep this add draft");
   assert.equal(fixture.row.parentElement !== null, true, "collision requires explicit replace-or-keep choice");
   assert.equal(fixture.readdConfirm.hidden, false);
+  assert.equal(fixture.replaceAddDraft.disabled, false, "deleted-draft replacement choice is enabled");
+  assert.equal(fixture.keepAddDraft.disabled, false, "deleted-draft preservation choice is enabled");
   fixture.keepAddDraft.click();
   assert.equal(fixture.addText.value, "keep this add draft");
+  assert.equal(fixture.readdConfirm.hidden, true, "keep choice is dispatched by the button");
+});
+
+test("a delayed stale row 409 cannot replace or resolve a newer snapshot", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "local draft";
+  let finishJson!: (value: unknown) => void;
+  const requests: Array<{ expected_version: number; changes: Array<{ text?: string }> }> = [];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") {
+      requests.push(JSON.parse(String(init.body)) as typeof requests[number]);
+      return { status: 409, ok: false, json: async () => await new Promise((resolve) => { finishJson = resolve; }) } as ReturnType<typeof response>;
+    }
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 3, items: [{ id: "todo-1", text: "newer server value", status: "completed" }], total: 1, completed: 1, last_updated_at: "t3" });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea }); fixture.save.click(); await settle();
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "3");
+  finishJson({ version: 2, items: [{ id: "todo-1", text: "old 409 value", status: "in_progress" }], total: 1, completed: 0, conflict: true }); await settle();
+  assert.equal(fixture.panel.dataset.version, "3");
+  assert.equal(fixture.latest.textContent, "newer server value");
+  fixture.keepDraft.click();
+  assert.equal(fixture.panel.dataset.version, "3", "resolving a stale conflict cannot roll back the current version");
+  assert.equal(fixture.row.dataset.baseText, "newer server value");
+  fixture.save.click(); await settle();
+  assert.equal(requests[1]?.expected_version, 3);
+  void ui;
+});
+
+test("a delayed stale add 409 cannot replace the newer full snapshot", async () => {
+  const fixture = todoFixture(); fixture.addText.value = "local add draft";
+  let finishJson!: (value: unknown) => void;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") return { status: 409, ok: false, json: async () => await new Promise((resolve) => { finishJson = resolve; }) } as ReturnType<typeof response>;
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 3, items: [{ id: "todo-1", text: "new row one", status: "not_started" }, { id: "todo-2", text: "new row two", status: "completed" }], total: 2, completed: 1 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.addText.listeners.get("input")?.({ target: fixture.addText }); fixture.addButton.click(); await settle();
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "3");
+  finishJson({ version: 2, items: [{ id: "todo-1", text: "stale row one", status: "in_progress" }], total: 1, completed: 0, conflict: true }); await settle();
+  fixture.keepDraftAdd.click();
+  assert.equal(fixture.panel.dataset.version, "3");
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-1", "todo-2"]);
+  assert.equal(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]")[0]?.dataset.baseText, "new row one");
+  assert.equal(fixture.addText.value, "local add draft");
+  void ui;
 });
 
 test("removing the focused Todo row moves focus forward without scrolling", async () => {

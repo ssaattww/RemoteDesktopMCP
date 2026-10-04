@@ -205,7 +205,7 @@ function clientBootstrap(): void {
       const blockedRow = Boolean(state?.deletedDraft || row?.dataset.readonly === "true");
       const addConflicted = Boolean(addState.conflict);
       const resolution = op === "use-latest" || op === "keep-draft";
-      const deletedChoice = op === "discard-deleted" || op === "readd-deleted";
+      const deletedChoice = op === "discard-deleted" || op === "readd-deleted" || op === "replace-add-draft" || op === "keep-add-draft";
       const blocked = unavailable || pageLeft || todoMutationRunning || (op === "add" && addConflicted) || (row && !resolution && !deletedChoice && (conflicted || blockedRow)) || (resolution && !conflicted) || (deletedChoice && !state?.deletedDraft);
       button.disabled = Boolean(blocked);
     }
@@ -235,7 +235,7 @@ function clientBootstrap(): void {
     }
   };
   const showRowConflict = (row: HTMLElement, snapshot: TodoSnapshot) => {
-    const state = stateFor(row); state.conflict = snapshot;
+    const state = stateFor(row); if (snapshot.version < todoVersion || snapshot.version < (state.conflict?.version ?? 0)) return; state.conflict = snapshot;
     const box = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (box) box.hidden = false;
     const latest = snapshot.items.find((item) => item.id === row.dataset.todoId);
     const latestText = row.querySelector<HTMLElement>("[data-todo-latest-text]"); if (latestText) latestText.textContent = latest?.text ?? "この項目は共有一覧から削除されています。";
@@ -267,7 +267,15 @@ function clientBootstrap(): void {
     const list = todoPanel.querySelector<HTMLElement>("[data-todo-items]");
     const oldRows = todoRows();
     const oldOrder = [...oldRows];
+    const activeElement = document.activeElement as HTMLElement | null;
+    const focusedRow = activeElement ? oldRows.find((row) => row.contains(activeElement)) : undefined;
+    const activeControl = activeElement as (HTMLInputElement | HTMLTextAreaElement) | null;
+    const selection = activeControl && "selectionStart" in activeControl && "selectionEnd" in activeControl
+      ? { start: activeControl.selectionStart, end: activeControl.selectionEnd, direction: activeControl.selectionDirection }
+      : undefined;
+    const scrollX = window.scrollX; const scrollY = window.scrollY;
     const itemIds = new Set(snapshot.items.map((item) => item.id));
+    const orderedRows: HTMLElement[] = [];
     for (const item of snapshot.items) {
       let row = oldRows.find((candidate) => candidate.dataset.todoId === item.id);
       if (!row) { row = makeTodoRow(item); bindTodoRow(row); }
@@ -283,7 +291,7 @@ function clientBootstrap(): void {
         if (dirty && snapshot.version > state.baseVersion) showRowConflict(row, snapshot);
         else if (!dirty) { updateRowBase(row, state, item, snapshot.version, true, true); state.conflict = undefined; const box = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (box) box.hidden = true; }
       }
-      if (list) list.append(row);
+      orderedRows.push(row);
     }
     for (const row of oldRows) {
       if (itemIds.has(row.dataset.todoId ?? "")) continue;
@@ -294,7 +302,24 @@ function clientBootstrap(): void {
       else if (isTextDirty(row, state) || isStatusDirty(row, state) || editedAfterSubmit) markDeletedDraft(row);
       else removeTodoRow(row, oldOrder);
     }
-    if (list) for (const row of todoRows()) if (stateFor(row).deletedDraft) list.append(row);
+    const deletedRows = todoRows().filter((row) => stateFor(row).deletedDraft && !itemIds.has(row.dataset.todoId ?? ""));
+    const desiredRows = [...orderedRows, ...deletedRows];
+    const currentRows = todoRows();
+    const needsReorder = desiredRows.some((row, index) => currentRows[index] !== row);
+    const movedFocusedRow = Boolean(focusedRow && oldOrder.indexOf(focusedRow) !== desiredRows.indexOf(focusedRow));
+    if (list && needsReorder) {
+      for (let index = 0; index < desiredRows.length; index += 1) {
+        const row = desiredRows[index]!; const current = todoRows();
+        if (current[index] !== row) list.insertBefore(row, current[index] ?? null);
+      }
+      if (focusedRow && movedFocusedRow && desiredRows.includes(focusedRow) && activeElement) {
+        if (document.activeElement !== activeElement) activeElement.focus({ preventScroll: true });
+        if (selection && typeof activeControl?.setSelectionRange === "function") {
+          try { activeControl.setSelectionRange(selection.start ?? 0, selection.end ?? 0, selection.direction ?? "none"); } catch { /* Some input types do not support text selection. */ }
+        }
+        window.scrollTo(scrollX, scrollY);
+      }
+    }
     todoVersion = snapshot.version; todoPanel.dataset.version = String(todoVersion);
     for (const stateRow of todoRows()) if (!stateFor(stateRow).deletedDraft && !stateFor(stateRow).conflict) stateFor(stateRow).baseVersion = snapshot.version;
     syncTodoMetadata(snapshot);
@@ -348,6 +373,7 @@ function clientBootstrap(): void {
   };
   const resolveRowConflict = (row: HTMLElement, keepDraft: boolean) => {
     const state = stateFor(row); const snapshot = state.conflict; if (!snapshot) return;
+    if (snapshot.version < todoVersion) return;
     const latest = snapshot.items.find((item) => item.id === row.dataset.todoId);
     if (!latest) { state.conflict = undefined; markDeletedDraft(row); }
     else {
@@ -355,16 +381,17 @@ function clientBootstrap(): void {
       updateRowBase(row, state, latest, snapshot.version, !keepDraft || !localTextDirty, !keepDraft || !localStatusDirty);
       state.conflict = undefined; const box = row.querySelector<HTMLElement>("[data-todo-conflict]"); if (box) box.hidden = true;
     }
-    todoVersion = snapshot.version; if (todoPanel) todoPanel.dataset.version = String(todoVersion);
+    todoVersion = Math.max(todoVersion, snapshot.version); if (todoPanel) todoPanel.dataset.version = String(todoVersion);
     syncTodoMetadata(snapshot); refreshTodoControls();
     const message = todoPanel?.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = keepDraft ? "入力を残しました。内容を確認して更新してください。" : "最新の内容を取り込みました。";
   };
   const resolveAddConflict = (keepDraft: boolean) => {
     const snapshot = addState.conflict; if (!snapshot) return;
+    if (snapshot.version < todoVersion) return;
     const field = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]");
     if (!keepDraft && field && addState.generation === addState.conflictGeneration) { field.value = ""; addState.generation += 1; addState.savedGeneration = addState.generation; }
     addState.baseVersion = snapshot.version; addState.conflict = undefined; addState.conflictGeneration = undefined;
-    todoVersion = snapshot.version; if (todoPanel) todoPanel.dataset.version = String(todoVersion);
+    todoVersion = Math.max(todoVersion, snapshot.version); if (todoPanel) todoPanel.dataset.version = String(todoVersion);
     applyTodoSnapshot(snapshot); const box = todoPanel?.querySelector<HTMLElement>("[data-todo-add-conflict]"); if (box) box.hidden = true;
     const message = todoPanel?.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = keepDraft ? "追加入力を残しました。確認後、追加操作を押してください。" : "共有内容を確認しました。追加操作は再送していません。";
   };
@@ -389,7 +416,7 @@ function clientBootstrap(): void {
   const submitTodo = async (row: HTMLElement | null, operation: "add" | "edit" | "delete") => {
     if (!todoPanel || todoMutationRunning || authenticationEnded || pageLeft || todoUnavailable) return;
     const rowState = row ? stateFor(row) : undefined;
-    if (rowState?.conflict || rowState?.deletedDraft || addState.conflict) return;
+    if (rowState?.conflict || rowState?.deletedDraft || (operation === "add" && addState.conflict)) return;
     const text = row ? textField(row) : null; const state = row ? statusField(row) : null;
     const addText = todoPanel.querySelector<HTMLTextAreaElement>("[data-todo-add-text]");
     const textAtSubmit = text?.value ?? addText?.value ?? ""; const statusAtSubmit = state?.value ?? "not_started";
@@ -407,9 +434,11 @@ function clientBootstrap(): void {
       const snapshot = await response.json() as TodoSnapshot;
       if (!isCurrent()) return;
       if (response.status === 409) {
-        if (operation === "add") { addState.conflict = snapshot; addState.conflictGeneration = textRevision; }
-        applyTodoSnapshot(snapshot);
-        if (row) showRowConflict(row, snapshot);
+        if (snapshot.version >= todoVersion) {
+          if (operation === "add" && snapshot.version >= (addState.conflict?.version ?? 0)) { addState.conflict = snapshot; addState.conflictGeneration = textRevision; }
+          applyTodoSnapshot(snapshot);
+          if (row) showRowConflict(row, snapshot);
+        }
         const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = "競合しました。入力を保持しています。内容を選択してから再操作してください。";
       } else if (!response.ok) throw new Error("Todo update failed");
       else {

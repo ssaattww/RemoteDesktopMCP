@@ -40,6 +40,7 @@ await new Promise<void>((resolve, reject) => { server.once("listening", resolve)
 const address = server.address();
 if (!address || typeof address === "string") throw new Error("Could not resolve the fixture server address.");
 const url = `http://127.0.0.1:${address.port}/user/sessions/${encodeURIComponent(sessionId)}`;
+config.baseUrl = new URL(url).origin;
 console.log(JSON.stringify({ url, login: { email, password }, sessionId, note: "Loopback-only temporary fixture. Sign in through /user/login; stop with Ctrl-C." }, null, 2));
 
 let closing = false;
