@@ -249,16 +249,6 @@ MCP側では公開契約と共通処理利用の境界を重点的に検証す�
 実装後のローカル検証は、対象試験を先に実行し、その後に
 `npm run check`、`npm run build`、`npm run lint`、`npm test`を行う。
 
-## CI診断成果物
-
-通常CIの`.github/workflows/lint.yml`は、テスト実行前から`ci-artifacts`を作成し、
-テスト結果、各工程の標準出力、標準エラー、実行結果、環境情報、
-Windows shard診断を`actions/upload-artifact`で保存している。
-
-本機能の実装で新しいworkflowは追加せず、既存の診断成果物を維持する。
-CI確認ではPRの現在HEADと`headSha`が一致する実行だけを対象とする。
-HEAD更新後に一致する実行がなければ、CI未実施として扱う。
-
 ## 変更予定箇所
 
 - `src/index.ts`

@@ -304,30 +304,20 @@ entries:
   - term: Todo
     description: 作業項目や作業一覧を表す一般的な開発用語。
   - term: SSRF
-    description: Server-Side Request Forgery の略称で、外部URL取得の安全性を扱う一般的なセキュリティ用語。
+    description: 外部URL取得処理で非公開宛先への接続を防ぐ安全設計を示す略称。
   - term: wrapper
-    description: 既存処理を包んで共通処理や入出力変換を追加する構成を表す一般的な開発用語。
+    description: MCP tool共通処理で認証・監査・入出力変換を包む実装構造の名称。
   - term: snake_case
-    description: 単語を下線で区切る識別子命名形式を表す一般的な開発用語。
+    description: MCP公開入力の項目名に使用する識別子命名形式。
   - term: schema
-    description: 入力やデータ構造の定義を表す一般的な開発用語。
+    description: MCP toolの入力項目と型を定義する実装上の構造。
   - term: handler
-    description: 要求やイベントを受けて処理する入口を表す一般的な開発用語。
+    description: MCP tool呼出しを共有service処理へ接続する入口処理の名称。
   - term: rollback
-    description: 変更失敗時に直前の状態へ戻す処理を表す一般的な開発用語。
+    description: セッション情報更新の監査失敗時に直前状態へ戻す実装処理の名称。
   - term: CI
-    description: Continuous Integration の略称で、変更ごとの自動検証を表す一般的な開発用語。
-  - term: shard
-    description: テストや処理を分割して並行実行する単位を表す一般的な開発用語。
-  - term: workflow
-    description: 継続的検証などの一連の自動処理定義を表す一般的な開発用語。
-  - term: PR
-    description: Pull Request の略称で、変更提案を表す一般的な開発用語。
-  - term: HEAD
-    description: Gitで現在のコミット位置を表す一般的な開発用語。
+    description: Continuous Integration の略称で、自動検証自体を設計対象とする文書でも使用する用語。
   - term: PATCH
-    description: HTTPで部分更新を表す標準メソッド名。
+    description: セッション情報を部分更新するHTTP APIの標準メソッド名。
   - term: リンク
-    description: 別の場所や外部URLへの参照を表す一般的な技術用語。
-  - term: コミット
-    description: Gitで変更履歴を確定する操作を表す一般的な開発用語。
+    description: セッションが保持する外部URL参照を表す一般的な技術用語。
