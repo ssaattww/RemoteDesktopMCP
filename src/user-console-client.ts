@@ -257,7 +257,7 @@ function clientBootstrap(): void {
         if (message) message.textContent = "作業一覧を更新しました。";
       }
     } catch { if (message) message.textContent = "更新できませんでした。入力を保持しています。"; }
-    finally { todoMutationRunning = false; todoPanel.querySelectorAll<HTMLButtonElement>("button[data-todo-op]").forEach((button) => { button.disabled = false; }); }
+    finally { todoMutationRunning = false; if (!authenticationEnded && !pageLeft) todoPanel.querySelectorAll<HTMLButtonElement>("button[data-todo-op]").forEach((button) => { button.disabled = false; }); }
   };
   const makeTodoRow = (item: { id: string; text: string; status: string }) => {
     const row = document.createElement("li"); row.dataset.todoId = item.id; row.dataset.baseText = item.text; row.dataset.baseStatus = item.status;
@@ -356,6 +356,8 @@ function clientBootstrap(): void {
   function stopAuthentication() {
     if (authenticationEnded) return;
     authenticationEnded = true;
+    todoPanel?.querySelectorAll<HTMLButtonElement>("button[data-todo-op]").forEach((button) => { button.disabled = true; });
+    todoPanel?.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("textarea,select").forEach((field) => { field.disabled = true; });
     todoFetchGeneration += 1;
     todoRefreshPending = false;
     todoRefreshRunning = false;

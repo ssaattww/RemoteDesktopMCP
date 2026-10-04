@@ -155,6 +155,7 @@ function todoFixture(sessionId = "todo-session", version = 1, text = "server tex
   const status = new FakeElement("select"); status.value = "not_started";
   const save = new FakeElement("button");
   const remove = new FakeElement("button");
+  save.dataset.todoOp = "save"; remove.dataset.todoOp = "delete";
   const conflict = new FakeElement("div"); conflict.hidden = true;
   const latest = new FakeElement("p");
   const useLatest = new FakeElement("button");
@@ -172,6 +173,7 @@ function todoFixture(sessionId = "todo-session", version = 1, text = "server tex
   list.append(row);
   const addText = new FakeElement("textarea");
   const addButton = new FakeElement("button");
+  addButton.dataset.todoOp = "add";
   panel.queries.set("[data-todo-summary]", summary);
   panel.queries.set("[data-todo-status]", notice);
   panel.queries.set("[data-todo-items]", list);
@@ -368,6 +370,21 @@ test("a refresh keeps dirty text as a deleted draft instead of restoring a remov
   assert.equal(fixture.textarea.value, "unsaved work");
   assert.equal(fixture.save.disabled, true);
   void ui;
+});
+
+test("authentication expiry during a Todo refresh disables further Todo actions", async () => {
+  const fixture = todoFixture();
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(401, {});
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.save.disabled, true);
+  assert.equal(fixture.addButton.disabled, true);
+  assert.equal(ui.newest.disabled, true);
 });
 
 test("operation detail keeps its open state when unrelated new logs redraw the table", async () => {

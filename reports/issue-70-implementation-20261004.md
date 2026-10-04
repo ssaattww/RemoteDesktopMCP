@@ -23,12 +23,12 @@
 
 実装後の最終検証:
 
-- `npm test`: exit 0、232 tests / 221 pass / 11 skip / 0 fail。
+- `npm test`: exit 0、233 tests / 222 pass / 11 skip / 0 fail。
 - `npm run check`: exit 0。
 - `npm run build`: exit 0。
 - `npm run lint`: exit 0。TypeScript ESLint、Markdown lint（143 files / 0 issues）、設計文書の日本語whitelist検査を含む。
 - `git diff --check`: exit 0。
-- 対象回帰: 手動更新後GET、更新中の追加入力保持、追加・削除の版付きJSON要求、409入力保持と明示選択、削除済み下書き保持、複数行HTTP保存、詳細上部描画を確認。
+- 対象回帰: 手動更新後GET、更新中の追加入力保持、追加・削除の版付きJSON要求、409入力保持と明示選択、削除済み下書き保持、認証失効時の操作停止、複数行HTTP保存、詳細上部描画を確認。
 
 ## 実UIの確認と未完了事項
 
