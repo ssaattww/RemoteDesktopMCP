@@ -56,7 +56,6 @@
 | T10 | P5 | P1 Issue #46: User Console 自動更新と選択保持 | なし | M | 一覧と交差するlive Rangeの間は破壊的更新を保留し、解除後に最新状態を反映。`pagehide` / 認証失効で保留破棄。PR #50日時表示とPR #60の長時間process context/active-firstを併存。通常・独立レビューと統合後CIを完了 | PR #51 `bfe3793` がmainに統合済み。Ubuntu・Windows 3 shard CI、通常/独立レビュー、FA780 UI 9ケースの証跡を保持 |
 | T11 | P6 | Issue #56 の共有作業一覧と更新期限制御 | なし | L | 利用者決定（セッション単位・初期有効・有効化後5分猶予）を反映した設計を独立レビューし、合格後にテスト駆動で実装。Todo更新と安全例外、所有境界、期限境界、失敗・時計異常の検証と通常レビューを完了。latest main + PR #60を保持して回帰し、reviewを通す | 設計レビューDREV-56-01/02解消。実装、focused 23/23、TypeScript・lint成功。通常レビューNREV-56-01〜03をTDD修正。main `4cd9f8d` をPR #54のローカルmerge候補へ統合。全体204件中193 pass/11 skip/0 fail、check/build/TS lint/Markdown lint(119 files)/design terms/diff-check合格。通常review PR54-NR-008/P2をTDD修正、同一reviewer focused 12/12で解消確認。RDMCP-48-54-IFR-001/P3のtask/phase追跡修正は同一通常reviewerがchecked_no_finding。同じ独立reviewerの限定closure待ち。exact-head CI未実施 |
 
-
 ## Issue #24 の継続作業
 
 この表の `R24` は独立phase/workstream IDであり、mainのP5/R54とは別区分。
