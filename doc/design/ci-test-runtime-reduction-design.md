@@ -265,3 +265,111 @@ Windowsの分割実行より前に、割当記録を一度だけ生成する準�
 3. 手動起動の測定用自動処理と候補成果物を追加する。必須処理単位から分け、自動で変更登録しない。
 4. 共通準備処理の改善は先に計測し、試験集合と隔離境界を維持できる先行試験付きの変更だけにする。
 5. 設計文書を既存の書式検査と用語検査の対象にする。未追跡の保全証跡は変更せず、ローカル検査と自動検査環境の差を報告する。
+
+### 現行枝統合後の律速再選定と`user-console.test.ts`診断（R24-10）
+
+R24-08の統合後、測定処理 `37199719246` は2026-10-04 11:43:52 UTCに作成され、変更識別子 `f20c75e1ecd409f0e8573720c0f74b39d8178f93` を対象に実行された。必須確認 `37199241250` の全10処理単位成功後に単独で起動し、Windows Node 22で版管理対象の全試験ファイルを3回測定した。連続した3回の各回は、追跡ファイル一覧で開始位置を1つずつずらし、同じ測定処理内で個別ファイルを直列に実行した。成果物では全27ファイル×3回の81記録について、同一の変更識別子・実行識別子・環境値と各試行の成功を照合した。環境値と追跡入力から1回計算された`fingerprint`は時間表候補と独立に再計算し、一致を確認した。結果を採用する前に実行状態、成果物の変更識別子、全ファイル集合、各試行の成功と時間を照合した。
+
+先行する同じ内容の必須確認 `37198481953`（`PR #69`の先端 `93cd8e19a6df040e34f5e083ab32249211b164ee`、GitHub統合変更 `1956d890e5a498bea0f4e03e50f673d4763eb156`）は成功した。割当成果物は当時追跡されていた27ファイルを8分割で全件・重複なしに割り当てたが、時間表の照合値は不一致だった。計画は`baseline`、`fingerprint` `4d087dc9d6516bea1e31c483f05cbbf4e5a8231b3f9fb7dabd9cfc560d60060f`。Windows各分割の試験工程時間と割当は次のとおり。
+
+| 分割 | Windows試験工程（秒） | 実割当ファイル |
+| ---: | ---: | --- |
+| 1 | 81 | `test/admin.test.ts`; `test/fixture-runtime.test.ts`; `test/private-storage.test.ts`; `test/user-console-client.test.ts` |
+| 2 | 245 | `test/ci-test-scheduler.test.ts`; `test/http-oauth-regression.test.ts`; `test/public-auth.test.ts`; `test/user-console.test.ts` |
+| 3 | 65 | `test/config-correlation-regression.test.ts`; `test/independent-config-history.test.ts`; `test/search-process-lifecycle.test.ts`; `test/windows-job.test.ts` |
+| 4 | 181 | `test/config-transfer-integrity.test.ts`; `test/independent-process-ownership.test.ts`; `test/session-filesystem-lifecycle.test.ts` |
+| 5 | 93 | `test/desktop-commander-ownership.test.ts`; `test/independent-transfer-lifecycle.test.ts`; `test/session-links.integration.test.ts` |
+| 6 | 21 | `test/emergency-stop-backend.test.ts`; `test/issue-56-shared-todo.test.ts`; `test/session-links.test.ts` |
+| 7 | 50 | `test/emergency-stop-windows.test.ts`; `test/mvp.test.ts`; `test/session-time.test.ts` |
+| 8 | 160 | `test/emergency-stop.test.ts`; `test/operation-audit-details.test.ts`; `test/tool-root-contracts.test.ts` |
+
+最長の分割2には`test/user-console.test.ts`（240.6秒）と`test/public-auth.test.ts`（134.4秒）が含まれ、分割4は181秒、分割8は160秒だった。これは成功した一度の実行記録であり、3回中央値でも因果効果の推定でもない。 分割2/4/8で割当ファイルの最大個別値240.6/178.8/156.9秒に対し試験工程は245/181/160秒であり、単回の観測上は最大ファイルが各工程時間に近い。一方で、分割内の個別値の合計は壁時計時間を大きく上回る。ファイル内をさらに分割すれば並行度を上げる可能性があるが、並列数・起動費用・環境変動の効果をこの1回から分離できず、短縮幅は推定しない。
+
+次表は各割当成果物の試験名と`TAP`の`duration_ms`を対応づけて集計した単回の試験ファイル別時間寄与である。分割工程の壁時計時間ではなく、個別時間の合計から割当変更後の所要時間や効果を推定しない。
+
+| 試験ファイル | 分割 | 試験時間合計（秒、単回） |
+| --- | ---: | ---: |
+| `test/user-console.test.ts` | 2 | 240.6 |
+| `test/config-transfer-integrity.test.ts` | 4 | 178.8 |
+| `test/operation-audit-details.test.ts` | 8 | 156.9 |
+| `test/independent-process-ownership.test.ts` | 4 | 148.7 |
+| `test/public-auth.test.ts` | 2 | 134.4 |
+| `test/emergency-stop.test.ts` | 8 | 97.3 |
+| `test/session-filesystem-lifecycle.test.ts` | 4 | 96.0 |
+| `test/tool-root-contracts.test.ts` | 8 | 92.9 |
+| `test/independent-transfer-lifecycle.test.ts` | 5 | 90.2 |
+| `test/admin.test.ts` | 1 | 78.7 |
+| `test/search-process-lifecycle.test.ts` | 3 | 63.3 |
+| `test/independent-config-history.test.ts` | 3 | 55.7 |
+| `test/mvp.test.ts` | 7 | 47.8 |
+| `test/session-links.integration.test.ts` | 5 | 47.2 |
+| `test/http-oauth-regression.test.ts` | 2 | 46.1 |
+| `test/emergency-stop-windows.test.ts` | 7 | 40.3 |
+| `test/private-storage.test.ts` | 1 | 34.5 |
+| `test/config-correlation-regression.test.ts` | 3 | 32.8 |
+| `test/emergency-stop-backend.test.ts` | 6 | 18.1 |
+| `test/issue-56-shared-todo.test.ts` | 6 | 17.6 |
+| `test/fixture-runtime.test.ts` | 1 | 4.8 |
+| `test/windows-job.test.ts` | 3 | 3.6 |
+| `test/user-console-client.test.ts` | 1 | 2.1 |
+| `test/ci-test-scheduler.test.ts` | 2 | 1.5 |
+| `test/session-links.test.ts` | 6 | 0.3 |
+| `test/desktop-commander-ownership.test.ts` | 5 | 0.1 |
+| `test/session-time.test.ts` | 7 | 0.0 |
+
+未丸めの合計は1730.351秒（小数第1位で1730.4秒）。表の各行を個別に小数第1位へ丸めてから足すと1730.3秒となるため、0.1秒差が生じる。
+
+### R24-10 Windows Node 22単独測定結果と候補選定
+
+単独測定実行 `37199719246` は成功し、成果物 `11303901085`（`test-runtime-measurement-37199719246-1-f20c75e1ecd409f0e8573720c0f74b39d8178f93`、SHA-256 `8e03755d6ea88c078fa1c2391d5e10c8921dba59352931a1394a2ee2221a6957`）を取得した。81件すべての記録が成功し、27個すべての試験ファイルに記録が各3件あった。全記録の変更識別子は`f20c75e1ecd409f0e8573720c0f74b39d8178f93`、実行識別子は`37199719246`、作業単位識別子は`111428729714`である。環境値は全件一致し、Windows `windows-latest`（`Windows Server 2025` 10.0.26100、x64、Node `v22.23.3`、npm `10.9.9`、`package-lock.json` SHA-256 `f153a51e7f8b4592fcea9b9c6ecfaa4fd3fc9912bcf7d410a54c7fb39829067d`）だった。
+
+成果物内の時間表候補と81件の個別記録から、候補生成関数で27件の中央値を独立に再構成した結果は完全一致した。候補の`fingerprint` `4d087dc9d6516bea1e31c483f05cbbf4e5a8231b3f9fb7dabd9cfc560d60060f`は、Windowsの改行表現を含む入力から再計算した値、および先行必須確認 `37198481953` の同じWindows内容の割当`fingerprint`と一致した。これは測定用候補の証跡である。追跡ファイル集合が時間表と一致せず`fingerprint-mismatch`だった現行必須確認には、この時間表を適用していない。中央値順の値を次に示す。
+
+| 試験ファイル | 3回中央値（秒） |
+| --- | ---: |
+| `test/user-console.test.ts` | 163.6 |
+| `test/operation-audit-details.test.ts` | 123.4 |
+| `test/config-transfer-integrity.test.ts` | 108.4 |
+| `test/public-auth.test.ts` | 90.1 |
+| `test/independent-process-ownership.test.ts` | 84.5 |
+| `test/independent-transfer-lifecycle.test.ts` | 77.6 |
+| `test/emergency-stop.test.ts` | 64.8 |
+| `test/tool-root-contracts.test.ts` | 64.2 |
+| `test/admin.test.ts` | 58.3 |
+| `test/search-process-lifecycle.test.ts` | 52.3 |
+| `test/session-filesystem-lifecycle.test.ts` | 51.3 |
+| `test/independent-config-history.test.ts` | 43.9 |
+| `test/session-links.integration.test.ts` | 35.6 |
+| `test/mvp.test.ts` | 28.7 |
+| `test/config-correlation-regression.test.ts` | 22.8 |
+| `test/emergency-stop-windows.test.ts` | 22.6 |
+| `test/private-storage.test.ts` | 21.9 |
+| `test/http-oauth-regression.test.ts` | 21.0 |
+| `test/issue-56-shared-todo.test.ts` | 11.3 |
+| `test/emergency-stop-backend.test.ts` | 10.2 |
+| `test/windows-job.test.ts` | 3.5 |
+| `test/user-console-client.test.ts` | 2.1 |
+| `test/fixture-runtime.test.ts` | 1.4 |
+| `test/ci-test-scheduler.test.ts` | 1.0 |
+| `test/desktop-commander-ownership.test.ts` | 0.5 |
+| `test/session-links.test.ts` | 0.4 |
+| `test/session-time.test.ts` | 0.2 |
+
+同一の変更識別子・Windows環境での測定では、`user-console.test.ts`の中央値163.6秒が最長で、次点の`operation-audit-details.test.ts`の123.4秒より40.2秒（32.6%）長かった。この反復測定は同ファイルを次候補にする根拠を強める。R24-10の推奨候補は上記4意味群へ試験をそのまま分割する変更である。分割後の必須確認の短縮幅は予測・保証しない。`TAP`の群別合計と測定用の全試験ファイル時間は異なる測定量であり、この成果物に`fixture`準備各段階の内訳はない。`fixture`初期化の削減は、明示的に有効化する段階診断を別候補として実施し、全試験の隔離・実際の`Commander`・MCP・`ACL`・後片付けを維持できると設計確認してから選び直す。
+
+同じ実行の`TAP`内訳では`user-console.test.ts`が16件・合計240.6秒で最大の試験ファイルだった。14件は専用の`fixture`を使い、2件（`custom Desktop Commander launcher`、`Google callback`）は使わない。試験を除外・簡略化したり、意図的な`SSE heartbeat`待ちを短縮したりせず、次の意味群へのファイル分割を第一候補として比較する。
+
+| 候補ファイル群 | 既存の試験 | 1回の時間集計（秒、参考） |
+| --- | --- | ---: |
+| `test/user-console-audit-process.test.ts` | `every tool requires a comment that is retained in operation audit history`; `Issue 55: running process details stay ahead of completed details and missing metadata never borrows another process`; `Issue 22: user log API pages owner-scoped persisted events and exposes SSE notifications without bodies`; `Issue 22: SSE stays open through its heartbeat`; `user console lists each active connection's working directory and purpose for its owner` | 103.4 |
+| `test/user-console-auth.test.ts` | `user console authenticates the principal, applies CSRF checks, and hides another principal's logs`; `custom Desktop Commander launchers remain bootstrap-managed`; `Google user login binds callback cookie at the callback path and rechecks approval` | 19.8 |
+| `test/user-console-stop-lifecycle.test.ts` | `emergency stop persists per principal, terminates known processes, and requires a new connection after resume`; `Issue 48: emergency stop is accepted while a session working directory is being validated` | 33.1 |
+| `test/user-console-session-metadata.test.ts` | `Issue 48: session metadata edits require owner and CSRF, compare versions, and reject unsupported states and fields`; `Issue 48: a fetched title does not advance the edit version or get erased by a stale sparse PATCH`; `Issue 48: explicitly clearing an empty failed title retries the fetch`; `Issue 48: a fetched title survives rollback of an unrelated audit failure`; `Issue 48: metadata audit rollback cannot restore session links after emergency stop`; `session edit and process start use one ordering boundary and preserve each start snapshot` | 84.4 |
+
+上記の群別時間は実行 `37198481953` の各試験`TAP`出力にある`duration_ms`を4群に分類した合計であり、丸め前は103.4282、19.7545、33.1095、84.3508秒、総計240.643秒だった。ファイル内時間合計240.6秒との差は小数表示の丸めによる。これは1回の出力からの分類であり、実行時間や改善の保証ではない。再割当の再現可能な根拠が揃うまで、割当変更後の分割時間を推定しない。ファイルを増やすとUの照合値が変わり、現行時間表を適用できない。候補は新しい照合値に対する基準割当から始め、8分割を維持して割当成果物の全件・重複なしを検査する。
+
+今回のR24-10候補は試験ファイルの意味群への分割だけとし、`fixture`初期化削減や段階計測用の新しい処理を含めない。`fixture`準備が後続の律速候補として必要になった場合は、別の候補として設計・承認してから扱う。その別候補ではWindows Node 22において`fixture`を使う試験ごとに安全な時間値を記録し、一時領域作成、`ACL`保護、`service.initialize`の総時間と内側の`DesktopCommander.start`、MCP試験用補助処理の接続/切断、`service.close`、一時領域削除を別々に測る。`DesktopCommander.start`は`service.initialize`の内数として扱い、重ねて総時間へ加算しない。パス、認証情報、試験入力、環境変数値は記録しない。その別候補も診断を明示的に有効化した場合だけ動かし、通常の自動確認の挙動・記録量を変えず、並列試験間で可変状態を共有しない。実際の`Commander`、MCP接続、`ACL`、各試験専用`fixture`と終了処理を省かず、試験集合・試験名・関数本体の保持を機械照合する。
+
+候補選定では、完了した測定処理 `37199719246` の検証済み成果物を使った。`user-console.test.ts`は中央値163.6秒で27ファイル中最長であり、次点の`operation-audit-details.test.ts`（123.4秒）を40.2秒上回ったため、16試験を4つの意味群へ分ける案を次候補に選んだ。この単一測定結果は変更後の実行時間や改善を保証しない。成果物には`fixture`準備段階の時間内訳がないため、今後それを調べる場合は診断対象を絞り、分割だけで十分か、`fixture`準備変更を別候補にするか判定する。診断値だけから短縮を主張しない。
+
+候補を実装するときは、設計確認後に試験本文・名称・検査内容・`fixture`隔離・後片付けを維持し、機械照合する。新しいファイル集合の時間表未適用段階で8分割の必須自動確認を一度実行し、Ubuntu全件試験とWindows 8分割の割当成果物で追跡対象全ファイルが各一度割り当てられ、すべて成功したことを確認する。その確認完了後、必須自動確認と重ねず、追跡対象全試験ファイルをWindows上で3回測定する。測定の変更識別子・成果物・全対象名・成功値を照合してから新しい時間表を登録する。時間表の登録後は別の完全な変更識別子で`applied`と全件割当を確認し、その候補自身の変更識別子で必須自動確認を一度実行して全必須処理成功を検証する。これらの段階ごとの実行は必要な候補確認であり、同じ段階の自動確認や測定を重複起動しない。全体の主指標3回すべてが180秒以内という課題完了条件は維持する。単回観測や`LPT`見積もりだけで効果を認定しない。
