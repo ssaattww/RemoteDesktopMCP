@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
 import { assertPrivateAuditStorage, assertPrivateDirectory, assertPrivateFile, assertSafePrivateParent, createPrivateFile, createPrivateTemporaryFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateDirectory } from "../src/private-storage.js";
+import { protectAndVerifyKind } from "../src/private-storage-protection.js";
 
 const execFileAsync = promisify(execFile);
 const workspace = path.resolve(process.cwd());
@@ -14,6 +15,25 @@ const inside = (parent: string, candidate: string) => {
   const relative = path.relative(parent, candidate);
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 };
+
+test("Windows ACL protection keeps the post-operation path-kind check", async () => {
+  const calls: string[] = [];
+  await protectAndVerifyKind(
+    "abstract-target",
+    "directory",
+    async (target) => { calls.push(`protect:${target}`); },
+    async (target) => { calls.push(`kind:${target}`); return "directory"; },
+  );
+  assert.deepEqual(calls, ["protect:abstract-target", "kind:abstract-target"]);
+
+  await assert.rejects(protectAndVerifyKind(
+    "abstract-target",
+    "directory",
+    async () => { calls.push("protect:mismatch"); },
+    async () => { calls.push("kind:mismatch"); return "file"; },
+  ), /Private storage path type is invalid/);
+  assert.deepEqual(calls.slice(-2), ["protect:mismatch", "kind:mismatch"]);
+});
 
 async function privateBase() {
   await mkdir(validation, { recursive: true });
