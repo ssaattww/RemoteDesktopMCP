@@ -4,7 +4,7 @@
 
 - 目的: PR #68までのIssue #24変更をcurrent mainへ統合したcandidateを通常レビューする。
 - タスク種別: 通常レビュー
-- reviewed implementation HEAD: レポート/検証記録を含むcommit後に確定
+- reviewed implementation HEADs: initial review `75d51a6febea2f6942fdda5061f9c84f266c7efc`; bounded closure `d9de86f9a93cbea85272663d60c5ea28482a25d0`. This is a historical report for the old-main candidate, superseded by the separate latest-main review report.
 - base: `main` at `4cd9f8d42af0e606fab23ba3961d8343259568e2`
 - source: PR #68 head `3a6eac7f6d2968256458f2018305f80666ebd125`
 
@@ -52,11 +52,11 @@
 
 ## 指摘事項
 
-- 指摘要約または「指摘なし」: review pending
+- `NREV-R24-MAIN-001` (Low): R24 task rows used P5 although P5 belongs to T10. The first-pass verdict was `fail`; bounded closure at `d9de86f` was `incomplete` because R24-07 was absent. The later candidate has an R24-07 row, but this historic bounded closure was not reopened or replaced.
 
 ## 結果
 
-- 結果: review pending
+- Historical result: initial normal review `fail` at `75d51a6`; same-reviewer bounded closure `incomplete` at `d9de86f`. The separate latest-main review has its own report and verdict; this record does not attest that later candidate.
 
 ## リスク
 
