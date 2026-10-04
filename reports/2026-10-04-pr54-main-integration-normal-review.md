@@ -62,7 +62,8 @@
 
 - 初回通常レビュー verdict: `fail`（PR54-NR-008 / P2 1件）。他のレビューcriterionはchecked_no_finding。ただし exact-HEAD CI は初回candidateでheld。
 - 同じレビュアーによるfinding-limited修正確認 verdict: `pass`。finding action verified。修正範囲外の全候補について新規全体レビューを行ったとは扱わない。
-- 現候補は全体回帰・ローカルcheck/build/lint合格。正確な新HEADのCIはまだ未実施。
+- final local gate HEAD `4149ff55799a08bea445a1a8478231fe7dab251c` で全体回帰・check/build/lint合格。正確なPR CIはattestation HEADで実施予定。
+- 独立finding `RDMCP-48-54-IFR-001 / P3` のtracking修正はP5/P6/R54-10/R54-11/T11/現在位置で正式ID・重大度・状態を明記。修正差分2ファイルのMarkdown lint 119 files/0 issuesおよびdiff-check後、同一reviewerが `checked_no_finding`。この結果は独立findingの最終 closure ではなく、同じ独立reviewerのfinding-limited closureが残る。
 
 ## End-of-Issue skill gap / feedback
 
