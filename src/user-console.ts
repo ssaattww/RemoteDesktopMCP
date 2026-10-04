@@ -139,6 +139,30 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     if (!result.ok) return res.status(result.status).json({ error: result.error, ...(result.currentVersion === undefined ? {} : { currentVersion: result.currentVersion }) });
     return res.json({ session_id: result.session_id, working_directory: result.working_directory, purpose: result.purpose, external_url: result.external_url ?? null, external_title: result.external_title ?? null, external_title_source: result.external_title_source ?? null, external_title_status: result.external_title_status, version: result.version, changedFields: result.changedFields });
   });
+  app.get("/api/sessions/:sessionId/todo", async (req, res) => {
+    const principal = res.locals.principal as string;
+    if (!service.userOwnsActiveSession(principal, req.params.sessionId)) return res.sendStatus(404);
+    try { return res.json(await service.todoGet(principal, req.params.sessionId)); }
+    catch { return res.sendStatus(404); }
+  });
+  app.put("/api/sessions/:sessionId/todo", async (req, res) => {
+    if (!requireCsrf(req, res)) return;
+    const principal = res.locals.principal as string;
+    if (!service.userOwnsActiveSession(principal, req.params.sessionId)) return res.sendStatus(404);
+    if (!Number.isInteger(req.body?.expected_version) || req.body.expected_version < 0 || !Array.isArray(req.body?.changes)) return res.status(400).json({ error: "invalid_request" });
+    try {
+      const result = await service.todoUpdate(principal, req.params.sessionId, req.body.expected_version, req.body.changes);
+      return res.status("conflict" in result && result.conflict ? 409 : 200).json(result);
+    } catch { return res.status(400).json({ error: "invalid_request" }); }
+  });
+  app.put("/api/sessions/:sessionId/todo/enforcement", async (req, res) => {
+    if (!requireCsrf(req, res)) return;
+    const principal = res.locals.principal as string;
+    if (!service.userOwnsActiveSession(principal, req.params.sessionId)) return res.sendStatus(404);
+    if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ error: "invalid_request" });
+    try { return res.json(await service.todoSetEnforcement(principal, req.params.sessionId, req.body.enabled)); }
+    catch { return res.status(404).json({ error: "session_unavailable" }); }
+  });
   app.get("/api/logs", async (req, res) => {
     if ((req.query.limit !== undefined && typeof req.query.limit !== "string") || (req.query.before !== undefined && typeof req.query.before !== "string") || (req.query.after !== undefined && typeof req.query.after !== "string")) return res.status(400).json({ error: "invalid_request" });
     const supplied = typeof req.query.limit === "string" ? Number(req.query.limit) : 100;
@@ -253,6 +277,27 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
   app.post("/user/logout", (req, res) => { if (!requireCsrf(req, res)) return; logins.delete(cookie(req.header("cookie")) ?? ""); setLoginCookie(res, "", 0); setCookie(res, "", 0, cookieName, "/user"); return res.redirect(303, "/user/login"); });
   app.post("/user/emergency-stop", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.stopUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "停止状態を保存できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
   app.post("/user/resume", async (req, res) => { if (!requireCsrf(req, res)) return; const state = await service.resumeUserExecution(res.locals.principal as string).catch((error: unknown) => ({ error: error instanceof Error ? error.message : "再開できませんでした。" })); if ("error" in state) return res.status(503).type("html").send(page(`<p class="stopped">${escape(state.error)}</p>`)); return res.redirect(303, "/user"); });
+  app.post("/user/sessions/:sessionId/todo", async (req, res) => {
+    if (!requireCsrf(req, res)) return;
+    const principal = res.locals.principal as string; const sessionId = req.params.sessionId;
+    if (!service.userOwnsActiveSession(principal, sessionId)) return res.sendStatus(404);
+    const expectedVersion = Number(req.body?.expected_version); if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) return res.sendStatus(400);
+    let changes: Array<Record<string, unknown>>;
+    if (req.body?.op === "add") changes = [{ op: "add", text: req.body.text }];
+    else if (req.body?.op === "delete") changes = [{ op: "delete", id: req.body.id }];
+    else if (req.body?.op === "edit") changes = [{ op: "edit", id: req.body.id, text: req.body.text }, { op: "status", id: req.body.id, status: req.body.status }];
+    else return res.sendStatus(400);
+    try { const result = await service.todoUpdate(principal, sessionId, expectedVersion, changes); const suffix = "conflict" in result && result.conflict ? "?todo=conflict" : "audit_warning" in result && result.audit_warning ? "?todo=audit" : ""; return res.redirect(303, `/user/sessions/${encodeURIComponent(sessionId)}${suffix}`); }
+    catch { return res.redirect(303, `/user/sessions/${encodeURIComponent(sessionId)}?todo=error`); }
+  });
+  app.post("/user/sessions/:sessionId/todo/enforcement", async (req, res) => {
+    if (!requireCsrf(req, res)) return;
+    const principal = res.locals.principal as string; const sessionId = req.params.sessionId;
+    if (!service.userOwnsActiveSession(principal, sessionId)) return res.sendStatus(404);
+    if (req.body?.enabled !== "true" && req.body?.enabled !== "false") return res.sendStatus(400);
+    try { const result = await service.todoSetEnforcement(principal, sessionId, req.body.enabled === "true"); return res.redirect(303, `/user/sessions/${encodeURIComponent(sessionId)}${result.audit_warning ? "?todo=audit" : ""}`); }
+    catch { return res.redirect(303, `/user/sessions/${encodeURIComponent(sessionId)}?todo=error`); }
+  });
   app.get(["/user", "/user/", "/user/sessions/:sessionId"], async (req, res) => {
     const principal = res.locals.principal as string;
     await service.refreshAuditIndex();
@@ -292,6 +337,12 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     }).sort((left, right) => Date.parse(String(right.event.receivedAt ?? right.event.at)) - Date.parse(String(left.event.receivedAt ?? left.event.at))).slice(0, 200);
     const runningOperations = operations.filter((operation) => operation.status === "running");
     const csrf = escape(res.locals.csrf);
+    const liveSession = selectedSession ? service.sessions.get(selectedSession.id) : undefined;
+    const todoState = liveSession?.todo;
+    const todoAction = selectedSession ? `/user/sessions/${encodeURIComponent(selectedSession.id)}/todo` : "";
+    const todoLabels = { not_started: "未着手", in_progress: "進行中", completed: "完了" };
+    const todoNotice = req.query.todo === "conflict" ? "別の更新があります。最新内容を確認してから操作してください。" : req.query.todo === "audit" ? "監査記録に警告があります。表示された内容が適用済みか確認してください。" : req.query.todo === "error" ? "作業一覧を更新できませんでした。内容を再読み込みしてください。" : "";
+    const todoPanel = selectedSession ? `<section id="session-todo"><h2>作業一覧</h2>${todoNotice ? `<p role="status">${escape(todoNotice)}</p>` : ""}${todoState ? `<p>進捗: ${todoState.items.filter((item) => item.status === "completed").length} / ${todoState.items.length} · 最終更新: ${escape(todoState.lastUpdatedAt ?? "未更新")}</p><p>強制機能: ${todoState.enabled ? "有効" : "無効"}</p>${liveSession?.state === "active" ? `<form method="post" action="${todoAction}/enforcement"><input type="hidden" name="csrf" value="${csrf}"><button name="enabled" value="${todoState.enabled ? "false" : "true"}">${todoState.enabled ? "強制を無効にする" : "強制を有効にする"}</button></form>` : ""}<ul>${todoState.items.map((item) => `<li><form method="post" action="${todoAction}"><input type="hidden" name="csrf" value="${csrf}"><input type="hidden" name="expected_version" value="${todoState.version}"><input type="hidden" name="id" value="${escape(item.id)}"><input type="hidden" name="op" value="edit"><input name="text" value="${escape(item.text)}" maxlength="1000" aria-label="作業項目"><select name="status" aria-label="状態">${Object.entries(todoLabels).map(([value, label]) => `<option value="${value}"${item.status === value ? " selected" : ""}>${label}</option>`).join("")}</select><button>更新</button></form><form method="post" action="${todoAction}"><input type="hidden" name="csrf" value="${csrf}"><input type="hidden" name="expected_version" value="${todoState.version}"><input type="hidden" name="id" value="${escape(item.id)}"><button name="op" value="delete">削除</button></form></li>`).join("")}</ul>${liveSession?.state === "active" ? `<form method="post" action="${todoAction}"><input type="hidden" name="csrf" value="${csrf}"><input type="hidden" name="expected_version" value="${todoState.version}"><input type="hidden" name="op" value="add"><label>作業を追加 <input name="text" required maxlength="1000"></label><button>追加</button></form>` : ""}` : `<p>このセッションの作業一覧はありません。</p>`}</section>` : "";
     const stopWarningLabels: Record<string, string> = { "process.owner_stop_unconfirmed": "停止担当機能から終了確認応答がありません。", "process.owner_stop_failed": "プロセスへの停止要求に失敗しました。", "process.stop_unconfirmed": "プロセスの終了を確認できませんでした。", "process.stop_unconfirmed_after_start": "停止中に開始したプロセスの終了を確認できませんでした。", "process.stop_requested_after_start": "停止中に返されたプロセス ID に停止要求を行いました。", "user.stop_marker_failed": "停止状態の復旧マーカーを保存できませんでした。", "user.stop_persistence_failed": "停止状態を保存できませんでした。" };
     const warningRows = currentStopWarnings.map((warning) => `<li>${escape(stopWarningLabels[warning.event] ?? "停止処理に未確認の結果があります。")}${warning.pid ? ` PID ${escape(warning.pid)}` : ""}</li>`).join("");
     let body = `<header><h1>RDMCP User Console</h1><span id="execution-state" class="${state.stopped ? "stopped" : ""}">${state.stopped ? "STOPPED" : "READY"}</span><span id="log-status">接続中</span><small id="state-updated-at">${jst(new Date().toISOString())}</small>${state.stopped ? `<form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">停止を再試行</button></form><form method="post" action="/user/resume"><input type="hidden" name="csrf" value="${csrf}"><button class="ok">実行を再開</button></form>` : `<form method="post" action="/user/emergency-stop"><input type="hidden" name="csrf" value="${csrf}"><button class="danger">EMERGENCY STOP / 全実行停止</button></form>`}<form method="post" action="/user/logout"><input type="hidden" name="csrf" value="${csrf}"><button>ログアウト</button></form></header>`;
@@ -306,7 +357,7 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
       if (unassignedOperations.length) body += `<section><h2>セッション外の操作</h2><ul>${unassignedOperations.map((session) => `<li>${jst(session.at)} · <a href="/user/sessions/${encodeURIComponent(session.id)}">${escape(session.id)}</a></li>`).join("")}</ul></section>`;
       return res.type("html").send(page(body + stopDetails, res.locals.userNonce));
     }
-    body += `<section><div class="toolbar"><h2>${selectedSession.id.startsWith("request:") ? "セッション外の操作" : "セッションの内容"}</h2><a href="/user">一覧に戻る</a></div><p class="session-meta">Connection ID: ${escape(selectedSession.id)}<br>作成日時: ${jst(selectedSession.at)}<br>最終アクセス日時: ${jst(selectedSession.lastAccessAt ?? selectedSession.at)}<br>作業ディレクトリ: ${escape(selectedSession.workingDirectory ?? "—")}<br>用途: ${escape(selectedSession.purpose ?? "—")}<br>リンク: ${externalLinkMarkup(activeById.get(selectedSession.id))}</p></section>`;
+    body += `${todoPanel}<section><div class="toolbar"><h2>${selectedSession.id.startsWith("request:") ? "セッション外の操作" : "セッションの内容"}</h2><a href="/user">一覧に戻る</a></div><p class="session-meta">Connection ID: ${escape(selectedSession.id)}<br>作成日時: ${jst(selectedSession.at)}<br>最終アクセス日時: ${jst(selectedSession.lastAccessAt ?? selectedSession.at)}<br>作業ディレクトリ: ${escape(selectedSession.workingDirectory ?? "—")}<br>用途: ${escape(selectedSession.purpose ?? "—")}</p></section>`;
     const processMetadata = new Map<string, { purpose: string; command: string }>();
     for (const session of visibleSessions) for (const event of session.events) {
       if (event.event === "process.start" && typeof event.processId === "string") processMetadata.set(`${session.id}:${event.processId}`, { purpose: typeof event.comment === "string" ? event.comment : "", command: typeof event.command === "string" ? event.command : "" });
