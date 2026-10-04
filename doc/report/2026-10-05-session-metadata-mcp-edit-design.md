@@ -65,7 +65,9 @@ Issue #71では、次が要求されている。
 
 ## 設計用語ホワイトリスト
 
-利用者方針に従い、lint回避のために一般的な開発用語を不自然な日本語へ言い換えないよう、次を候補として`tools/lint/markdown-whitelist.yaml`へ追加した。
+利用者確認後、設計文書で自然に使うことを許可された`リンク`、`CI`、`Todo`をホワイトリストに残した。`コミット`も利用者から許可されたが、今回の対象設計書を含む`doc/design`で日本語表記の実使用がなく、reportのためだけに許可語を増やす必要はないため今回の追加から外した。
+
+英語のまま残した次の語は、一般的な作業報告ではなく、プログラム、API、または安全処理そのものを説明する箇所で使う。
 
 - `Todo`
 - `SSRF`
@@ -75,15 +77,12 @@ Issue #71では、次が要求されている。
 - `handler`
 - `rollback`
 - `CI`
-- `shard`
-- `workflow`
-- `PR`
-- `HEAD`
 - `PATCH`
 - `リンク`
-- `コミット`
 
-いずれも本設計または一般的な設計・開発・セキュリティ文脈で意味が固定しやすい用語として説明を付与した。用語を引用符や過剰なコード囲みで逃がす変更は行っていない。
+初回候補に含めていた`shard`、`workflow`、`PR`、`HEAD`は、今回のMCP機能設計では作業・検証運用の説明にしか使っていなかったため削除した。対象設計書からその運用節自体を外したので、カタカナ表記へ置き換えてまでホワイトリストへ残す必要もない。用語を引用符や過剰なコード囲みで逃がす変更は行っていない。
+
+また、対象設計書末尾に置いていたCI診断成果物の節は製品設計ではなく作業・検証運用に属するため削除し、本report側だけに情報を残した。`CI`自体は他のCI構成を直接設計する文書で設計対象として使われるため、許可語として維持した。
 
 新設計書は`package.json`の`lint:md:terms:design`対象にも追加した。
 
@@ -109,7 +108,7 @@ Issue #71では、次が要求されている。
 - `doc/design/session-metadata-mcp-edit.md`
   - MCP後編集の公開契約、共有処理、競合、監査、process、Todo、外部リンク、テスト計画を定義。
 - `tools/lint/markdown-whitelist.yaml`
-  - 一般的な設計・開発用語15件を追加。
+  - 設計で実際に必要な許可語・プログラム説明語10件を追加。
 - `package.json`
   - 新設計書を厳格な設計用語lint対象へ追加。
 
@@ -117,8 +116,10 @@ Issue #71では、次が要求されている。
 
 1. `ec2381f57a95311042bfe5d744e2ebd07819901f` `chore(lint): allow common design terms`
 2. `6ed44d1984fe2c8d584230b67cfaf82a92478f30` `docs: design MCP session metadata editing`
+3. `de1978d7a61f4fa304b1f908727a861ac2d1c50a` `docs: report session metadata design work`
+4. `ff02bdcd23f2941894c9ba7c812fd7b5cdea551e` `docs: narrow design terminology allowlist`
 
-両commitを通常pushし、PR #74を作成した。
+4 commitを通常pushし、PR #74を更新した。
 
 ## 検証
 
@@ -136,7 +137,7 @@ Issue #71では、次が要求されている。
 
 - 結果: 成功
 - TypeScript ESLint、Markdown lint、設計用語lintを含む。
-- Markdown lintは144 files / 0 issuesを確認した段階を含む。
+- 用語方針見直し後はMarkdown lint 145 files / 0 issues、設計用語lintとも成功した。
 
 ### `npm run check`
 
@@ -163,7 +164,7 @@ Issue #71では、次が要求されている。
 
 PR #74は`main`向けに作成済み。
 
-report/handoff commit前のPR HEADは`6ed44d1984fe2c8d584230b67cfaf82a92478f30`である。report/handoff保存後にHEADが更新されるため、CIは最終push後のPR current HEADとworkflow runの`headSha`が一致する実行だけを確認する。別SHAのrunは代用しない。
+用語方針見直し後の設計HEADは`ff02bdcd23f2941894c9ba7c812fd7b5cdea551e`である。本report/handoff更新後にHEADが再度更新されるため、CIは最終push後にPR current HEADとworkflow runの`headSha`が一致する実行だけを一度確認する。利用者指示によりCI完了待機は行わず、別SHAのrunは代用しない。
 
 ## 残作業
 

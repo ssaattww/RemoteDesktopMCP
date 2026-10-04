@@ -2,7 +2,7 @@
 producer:
   skill: chat-handoff-manager
   mode: initial_implementation
-  generated_at: "2026-10-05T06:48:42+09:00"
+  generated_at: "2026-10-05T08:13:52+09:00"
 
 repository: ssaattww/RemoteDesktopMCP
 issue_or_pr: "Issue #71 / PR #74"
@@ -10,9 +10,9 @@ task_id: null
 branch: design/session-metadata-mcp-edit
 base_ref: main
 target:
-  current_head: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+  current_head: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
   reviewed_head: null
-  commit_range: f20c75e1ecd409f0e8573720c0f74b39d8178f93..6ed44d1984fe2c8d584230b67cfaf82a92478f30
+  commit_range: f20c75e1ecd409f0e8573720c0f74b39d8178f93..ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
 
 execution_environment:
   kind: connected_computer
@@ -24,9 +24,9 @@ execution_environment:
   working_directory: 'C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP'
   repository: ssaattww/RemoteDesktopMCP
   branch: design/session-metadata-mcp-edit
-  head_sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
-  source_state: clean
-  source_fingerprint: "git HEAD 6ed44d1984fe2c8d584230b67cfaf82a92478f30; report/handoff files pending after this snapshot"
+  head_sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
+  source_state: dirty_report_handoff_only
+  source_fingerprint: "git HEAD ff02bdcd23f2941894c9ba7c812fd7b5cdea551e; only report/handoff follow-up edits pending"
   ownership: current_task
   writable_paths:
     - doc/design/session-metadata-mcp-edit.md
@@ -45,7 +45,7 @@ execution_environment:
       status: available
       evidence: npm ci succeeded; npm run lint and npm run check succeeded
   evidence:
-    - PR #74 baseRefOid=f20c75e1ecd409f0e8573720c0f74b39d8178f93 and headRefOid=6ed44d1984fe2c8d584230b67cfaf82a92478f30 before report commit
+    - PR #74 design terminology refinement was pushed at headRefOid=ff02bdcd23f2941894c9ba7c812fd7b5cdea551e before the follow-up report/handoff commit
     - RDMCP node local was connected and the session working directory was fixed to the repository
 
 verification:
@@ -54,25 +54,28 @@ verification:
     - npm run lint completed with exit code 0
     - npm run check completed with exit code 0
     - git diff --check completed with exit code 0
-  technical_head: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
-  administrative_parent: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+  technical_head: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
+  administrative_parent: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
   commit:
-    state: commit_pending
-    review_target_sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+    state: report_handoff_commit_pending
+    review_target_sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
   push:
     state: pushed
-    head_sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+    head_sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
   ci_wait:
-    state: ci_wait_pending
-    required_for: route_verification
+    state: do_not_wait_by_user_instruction
+    required_for: exact_head_status_observation_only
   final_publication:
-    sequence: final_push_then_authorized_pr_create_or_update_then_exact_head_pull_request_ci_wait
+    sequence: final_push_then_pr_update_then_exact_head_status_check_without_wait
     pr_action: update
 
 authoritative_requirements:
   - source: user_instruction
     reference: current chat
     summary: Design RemoteDesktopMCP Issue #71 using RDMCP, publish a PR, and list/add suitable common design terms to the whitelist.
+  - source: user_instruction
+    reference: current chat follow-up
+    summary: Allow リンク/コミット/CI/Todo, keep other English design terms only when they directly describe the program, prefer katakana otherwise, and do not put report-only CI/commit operation details into the product design.
   - source: issue
     reference: Issue #71
     summary: Add MCP editing of existing session working directory, purpose, URL and title while reusing the HTTP shared mutation, versioning, safety, audit and process semantics.
@@ -144,7 +147,7 @@ scope:
   - Design the MCP contract for editing existing session metadata.
   - Reuse RemoteDesktopService.updateSessionMetadata rather than duplicate mutation rules.
   - Define expected_version, session_list version exposure, process ordering, audit behavior, Todo gate behavior, and external-link safety.
-  - Add common design/development terms to the markdown whitelist when natural Japanese technical writing benefits.
+  - Keep whitelist terms minimal: allowed general terms plus English terms that directly describe the program/API/security behavior; do not whitelist report-only operation vocabulary.
   - Publish the design in PR #74 with report and handoff evidence.
 
 non_goals:
@@ -158,7 +161,7 @@ non_goals:
 files:
   changed:
     - path: tools/lint/markdown-whitelist.yaml
-      purpose: Add 15 common design/development/security terms.
+      purpose: Keep 10 actually needed allowed/program-description terms; remove report-only shard/workflow/PR/HEAD/コミット entries.
     - path: doc/design/session-metadata-mcp-edit.md
       purpose: Define the complete MCP session metadata edit design.
     - path: package.json
@@ -202,19 +205,19 @@ commands:
     execution_environment: null
     source_fingerprint: null
   - command: git diff --check
-    purpose: Verify patch whitespace and diff integrity.
+    purpose: Verify patch whitespace and diff integrity after terminology refinement.
     exit_code: 0
     result: passed
-    head_sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+    head_sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
     evidence: no errors
     execution_environment: null
     source_fingerprint: null
   - command: npm run lint
-    purpose: Run TypeScript lint, Markdown lint and strict design-term lint.
+    purpose: Run TypeScript lint, Markdown lint and strict design-term lint after terminology refinement.
     exit_code: 0
     result: passed
-    head_sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
-    evidence: completed successfully; Markdown lint had 144 files and zero issues in the validated working tree
+    head_sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
+    evidence: completed successfully; Markdown lint had 145 files and zero issues; target design had no CI/PR/HEAD/shard/workflow/コミット operation vocabulary
     execution_environment: null
     source_fingerprint: null
   - command: npm run check
@@ -230,7 +233,7 @@ tests:
   - name: product tests
     phase: not_applicable
     result: not_run
-    head_sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+    head_sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
     evidence: Design-only change; future implementation plan explicitly requires TDD.
 
 ci:
@@ -243,12 +246,16 @@ ci:
 
 implementation:
   outcome: completed
-  final_head: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+  final_head: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
   commits:
     - sha: ec2381f57a95311042bfe5d744e2ebd07819901f
-      purpose: Add common design-term whitelist candidates.
+      purpose: Add initial design-term whitelist candidates.
     - sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
       purpose: Add MCP session metadata edit design and strict lint coverage.
+    - sha: de1978d7a61f4fa304b1f908727a861ac2d1c50a
+      purpose: Persist the initial detailed report and handoff.
+    - sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
+      purpose: Remove report-only CI operation details from the design and narrow the whitelist to needed terms.
   addressed_findings: []
   failure_diagnostics:
     - type: standard_error
@@ -259,9 +266,10 @@ implementation:
       summary: Existing CI captures test results, stdout, stderr, result files, environment information and Windows shard diagnostics.
   blocked_items: []
   summary:
-    - Design and whitelist changes are complete and pushed.
+    - Design and whitelist terminology refinement is complete and pushed at ff02bdc.
+    - Report-only CI operation details were removed from the product design and retained in the report.
     - PR #74 is open and unmerged.
-    - report/handoff commit and exact-head CI verification remain after this packet is persisted.
+    - A final report/handoff commit and one exact-head CI status observation remain; do not wait for CI completion.
 
 review:
   mode: not_applicable
@@ -291,6 +299,6 @@ review:
 
 next_action:
   - Commit and push this report and handoff without changing the technical design.
-  - Post the concise design/validation summary to PR #74.
-  - Verify only a required workflow run whose headSha exactly matches the final PR current HEAD; report CI unexecuted if no matching run exists.
+  - Update PR #74 body/comment with the terminology decision.
+  - Observe exact-head CI status once after the final push; do not wait for completion and never substitute another SHA.
   - Hand PR #74 to a separate normal design reviewer; do not merge.
