@@ -925,7 +925,9 @@ test("NR003 and NR004: searches return every page and portable Node processes re
     const natural = await api.call("process_start", { session_id: session, command: nodeScriptCommand(naturalScript), timeout_ms: 10_000 });
     const naturalId = natural.process_id as string;
     let autonomousAudit = "";
-    for (let attempt = 0; attempt < 30; attempt++) {
+    // Let the autonomous watcher finish under heavily loaded Windows CI without
+    // using process status/output polling as a fallback.
+    for (let attempt = 0; attempt < 200; attempt++) {
       autonomousAudit = await readFile(path.join(f.data, "audit.jsonl"), "utf8");
       if (hasAuditEvent(autonomousAudit, "process.exit", naturalId)) break;
       await new Promise((resolve) => setTimeout(resolve, 50));

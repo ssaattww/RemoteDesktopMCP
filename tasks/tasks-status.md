@@ -37,10 +37,12 @@
 | F02 | P4 | ノード間相互認証・複数PC経路・再接続 | T08 | L | 登録2台以上、切断・世代交代・再送・転送中継の試験が合格 | 後続 |
 | F03 | P4 | 単一 PC の Tailscale Funnel と ChatGPT 公開接続検証 | F01,F01a,F01b,F01c | M | 実際の公開経路から認証と操作、再起動後の接続を確認 | 公開起動済み。HTTPSの認証案内と未認証401確認、ChatGPT実操作を利用者へ依頼中 |
 | F04 | P4 | 公開接続の通常・独立レビュー | F01a,F01b,F01c | M | Sol / high で公開用変更を確認し、F03 の実運用結果と未検証事項を区別 | 通常10件解消後、3ffd783の独立レビューで追加3件。F01dで対応し同じ独立担当へ限定確認 |
-| T09 | P4 | Issue #55: 長時間実行プロセスの目的・コマンド表示 | T08 | M | 設計レビュー、Red/Green、所有者・認可・マスク回帰、Windows実画面確認手順と証拠、Draft PR | 設計レビューpass。通常reviewのNR55-1/2はfix-verification pass_with_held。最新全体試験120件中109成功・skip 11・失敗0、lint/build成功。FA780実画面・画像証拠とDraft更新・push待ち |
-| T10 | P5 | P1 Issue #46: User Console 自動更新と選択保持 | なし | M | 一覧と交差するlive Rangeの間は破壊的更新を保留し、解除後に最新状態を反映。`pagehide` / 認証失効で保留破棄。PR #50日時表示とPR #60の長時間process context/active-firstを併存。通常・独立レビューと統合後CIを完了 | 当初実装・通常fix verification・独立レビュー・FA780実画面9ケースと旧HEAD CIは成功。PR #60取り込みでpackage.json、client、test、trackingの競合を検出し、両featureを維持して通常統合中。旧attestationの有効性は撤回。統合後の通常レビュー、同じ独立reviewerの差分確認、exact-head CI待ち。PR #51未マージ |
+| T09 | P4 | Issue #55: 長時間実行プロセスの目的・コマンド表示 | T08 | M | 設計レビュー、Red/Green、所有者・認可・マスク回帰、Windows実画面確認手順と証拠、Draft PR | PR #60 merged at `ed4d9b9`; process context design, implementation, reviews and Windows evidence are on main |
+| T10 | P5 | P1 Issue #46: User Console 自動更新と選択保持 | なし | M | 一覧と交差するlive Rangeの間は破壊的更新を保留し、解除後に最新状態を反映。`pagehide` / 認証失効で保留破棄。PR #50日時表示とPR #60の長時間process context/active-firstを併存。通常・独立レビューと統合後CIを完了 | PR #51 merged at `bfe3793`; Ubuntu and all three Windows shard checks passed; normal/independent review and nine FA780 UI cases passed per retained evidence |
+| T11 | P6 | Issue #56 の共有作業一覧と更新期限制御 | なし | L | 利用者決定（セッション単位・初期有効・有効化後5分猶予）を反映した設計を独立レビューし、合格後にテスト駆動で実装。Todo更新と安全例外、所有境界、期限境界、失敗・時計異常の検証と通常レビューを完了。latest main + PR #60を保持して回帰し、reviewを通す | 設計レビューDREV-56-01/02解消。実装、focused 23/23、TypeScript・lint成功。通常レビューNREV-56-01〜03をTDD修正。origin/mainとの競合解消中。統合後回帰とsame-reviewer fix verification待ち |
 
 S/M/L は相対的な作業規模であり、所要時間の保証ではない。
+T11 の設計と現行コードに基づく保存/API/時計/監査/終了確認案は `doc/design/shared-todo-and-stale-update-gate.md` に記載。初回設計レビューDREV-56-01、選択反映後レビューDREV-56-02は修正差分の限定確認で設計上解消し、過去のfail判定は報告に保持した。2026-10-03の利用者決定はセッション単位・初期有効・有効化後5分猶予。有効なTDD Redは `reports/issue-56-tdd-tests-red-evidence-20261003202741.md` を参照。通常レビュー報告 `reports/issue-56-normal-review-20261003213135.md` は対象HEAD `d00909e35028dd7ded72130d317e2d0d41afd60e` に3件のmedium findingを記録し、TDD修正を `8586650` へコミットした。PR #51 merge SHA `bfe3793` とPR #60 merge SHA `ed4d9b9`を含むlatest mainを `origin/main` として統合。統合後focused regression・同一normal reviewerのfix verification・matching CIは未完了。設計確認報告は `reports/2026-10-03-issue-56-design-review.md`。
 コードの結合が強いため T03〜T06 は同じ Terra 担当が依存順に実装する。
 設計作業の既存レポート: `reports/2026-09-25-design-followup.md`。
 環境確認: `reports/2026-09-25-environment.md`。
