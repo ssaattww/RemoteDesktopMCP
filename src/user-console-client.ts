@@ -29,6 +29,128 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
 }
 
 function clientBootstrap(): void {
+  type SessionState = { session_id: string; working_directory?: string; purpose?: string; external_url?: string | null; external_title?: string | null; external_title_source?: string | null; external_title_status?: string; version?: number; created_at: string; last_used_at?: string; state: string; active: boolean };
+  const renderExternalLink = (cell: HTMLElement, session: { external_url?: string | null; external_title?: string | null; external_title_source?: string | null; external_title_status?: string }) => {
+    cell.replaceChildren();
+    if (!session.external_url) {
+      if (session.external_title) { const title = document.createElement("span"); title.className = "session-external-title"; title.textContent = session.external_title; cell.append(title); }
+      else cell.textContent = "—";
+    } else try {
+      const url = new URL(session.external_url);
+      if (!(url.protocol === "http:" || url.protocol === "https:") || url.username || url.password) cell.textContent = "—";
+      else { const anchor = document.createElement("a"); anchor.className = "session-external-link"; anchor.href = url.href; anchor.target = "_blank"; anchor.rel = "noopener noreferrer"; anchor.referrerPolicy = "no-referrer"; anchor.textContent = session.external_title ?? url.href; cell.append(anchor); }
+    } catch { cell.textContent = "—"; }
+    const source = session.external_title_source === "manual" ? "手入力" : session.external_title_source === "fetched" ? "自動取得" : session.external_title_status === "pending" ? "題名を取得中" : session.external_title_status === "failed" ? "題名を取得できません" : "";
+    if (source) { const label = document.createElement("small"); label.className = "session-external-source"; label.textContent = source; cell.append(label); }
+  };
+  let stateRequestGeneration = 0;
+  const latestSavedVersionBySession = new Map<string, number>();
+  const latestSessionStateById = new Map<string, SessionState>();
+  const initializeSessionEditor = (form: HTMLFormElement) => {
+    const conflict = form.querySelector<HTMLElement>("[data-session-conflict]");
+    const conflictSummary = form.querySelector<HTMLElement>("[data-session-conflict-summary]");
+    const directory = form.elements.namedItem("workingDirectory") as HTMLInputElement | null;
+    const purpose = form.elements.namedItem("purpose") as HTMLInputElement | null;
+    const externalUrl = form.elements.namedItem("externalUrl") as HTMLInputElement | null;
+    const externalTitle = form.elements.namedItem("externalTitle") as HTMLInputElement | null;
+    if (externalUrl) form.dataset.initialExternalUrl = externalUrl.value;
+    if (externalTitle) form.dataset.initialExternalTitle = externalTitle.value;
+    const applyLatest = (keepDraft: boolean) => {
+      const version = Number(form.dataset.latestVersion);
+      if (!Number.isSafeInteger(version) || !directory || !purpose) return;
+      if (!keepDraft) {
+        directory.value = form.dataset.latestDirectory ?? directory.value;
+        purpose.value = form.dataset.latestPurpose ?? purpose.value;
+        if (externalUrl) { externalUrl.value = form.dataset.latestExternalUrl ?? ""; form.dataset.initialExternalUrl = externalUrl.value; }
+        if (externalTitle) { externalTitle.value = form.dataset.latestExternalTitle ?? ""; form.dataset.initialExternalTitle = externalTitle.value; }
+        const row = form.closest("tr");
+        const directoryCell = row?.querySelector<HTMLElement>("[data-session-directory]");
+        const purposeCell = row?.querySelector<HTMLElement>("[data-session-purpose]");
+        if (directoryCell) directoryCell.textContent = directory.value;
+        if (purposeCell) purposeCell.textContent = purpose.value;
+      }
+      form.dataset.version = String(version);
+      if (conflict) conflict.hidden = true;
+      const output = form.querySelector<HTMLElement>("output");
+      if (output) output.textContent = keepDraft ? "自分の入力を残しました。内容を確認して保存してください。" : "最新値を取り込みました。内容を確認して保存してください。";
+    };
+    form.querySelector<HTMLButtonElement>('[data-session-conflict-action="keep-draft"]')?.addEventListener("click", () => applyLatest(true));
+    form.querySelector<HTMLButtonElement>('[data-session-conflict-action="use-latest"]')?.addEventListener("click", () => applyLatest(false));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const sessionId = form.dataset.sessionEdit;
+      const csrf = (form.elements.namedItem("csrf") as HTMLInputElement | null)?.value ?? "";
+      const status = form.querySelector("output");
+      const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
+      const expectedVersion = Number(form.dataset.version);
+      if (!sessionId || !directory || !purpose || !Number.isSafeInteger(expectedVersion)) return;
+      if (button) button.disabled = true;
+      if (status) status.textContent = "保存中…";
+      const submittedDirectory = directory.value;
+      const submittedPurpose = purpose.value;
+      const submittedExternalUrl = externalUrl?.value;
+      const submittedExternalTitle = externalTitle?.value;
+      const payload: Record<string, unknown> = { expectedVersion, workingDirectory: directory.value, purpose: purpose.value };
+      if (externalUrl && externalUrl.value !== (form.dataset.initialExternalUrl ?? "")) payload.externalUrl = externalUrl.value || null;
+      if (externalTitle && externalTitle.value !== (form.dataset.initialExternalTitle ?? "")) payload.externalTitle = externalTitle.value || null;
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json", "x-csrf-token": csrf },
+          body: JSON.stringify(payload),
+        });
+        const result = await response.json() as { error?: string; version?: number; working_directory?: string; purpose?: string; external_url?: string | null; external_title?: string | null; external_title_source?: string | null; external_title_status?: string };
+        if (!response.ok || result.version === undefined || result.working_directory === undefined || result.purpose === undefined) {
+          if (response.status === 409) {
+            try {
+              const latestResponse = await fetch("/api/console-state", { credentials: "same-origin", headers: { Accept: "application/json" } });
+              const latestState = await latestResponse.json() as { sessions?: Array<{ session_id: string; active: boolean; version?: number; working_directory?: string; purpose?: string; external_url?: string | null; external_title?: string | null }> };
+              const latest = latestState.sessions?.find((session) => session.session_id === sessionId && session.active && Number.isSafeInteger(session.version));
+              if (latest) {
+                form.dataset.latestVersion = String(latest.version);
+                form.dataset.latestDirectory = latest.working_directory ?? "";
+                form.dataset.latestPurpose = latest.purpose ?? "";
+                form.dataset.latestExternalUrl = latest.external_url ?? "";
+                form.dataset.latestExternalTitle = latest.external_title ?? "";
+                if (conflictSummary) conflictSummary.textContent = `サーバーの最新値（版 ${latest.version}）: 作業ディレクトリ ${latest.working_directory ?? "—"} · 用途 ${latest.purpose ?? "—"}`;
+                if (conflict) conflict.hidden = false;
+                if (status) status.textContent = "版が競合しました。自分の入力を再編集するか、最新値を取り込んでください。";
+              } else if (status) status.textContent = "競合後の最新状態を取得できませんでした。入力は保持しています。";
+            } catch { if (status) status.textContent = "競合後の最新状態を取得できませんでした。入力は保持しています。"; }
+          } else if (status) status.textContent = response.status === 404 ? "編集できるセッションではありません。" : result.error === "unsupported_field" ? "URL・題名の編集はまだ利用できません。" : "保存できませんでした。入力内容を確認してください。";
+          return;
+        }
+        form.dataset.version = String(result.version);
+        latestSavedVersionBySession.set(sessionId, Math.max(latestSavedVersionBySession.get(sessionId) ?? 0, result.version));
+        const priorSession = latestSessionStateById.get(sessionId);
+        if (priorSession) latestSessionStateById.set(sessionId, { ...priorSession, version: result.version, working_directory: result.working_directory, purpose: result.purpose, external_url: result.external_url ?? null, external_title: result.external_title ?? null, external_title_source: result.external_title_source ?? null, external_title_status: result.external_title_status });
+        // Any state request started before this committed write must not restore its older snapshot.
+        stateRequestGeneration++;
+        const addedDirectoryInput = directory.value !== submittedDirectory;
+        const addedPurposeInput = purpose.value !== submittedPurpose;
+        const addedExternalUrl = externalUrl?.value !== submittedExternalUrl;
+        const addedExternalTitle = externalTitle?.value !== submittedExternalTitle;
+        if (!addedDirectoryInput) directory.value = result.working_directory;
+        if (!addedPurposeInput) purpose.value = result.purpose;
+        if (externalUrl) { form.dataset.initialExternalUrl = result.external_url ?? ""; if (!addedExternalUrl) externalUrl.value = result.external_url ?? ""; }
+        if (externalTitle) { form.dataset.initialExternalTitle = result.external_title ?? ""; if (!addedExternalTitle) externalTitle.value = result.external_title ?? ""; }
+        const row = form.closest("tr");
+        const directoryCell = row?.querySelector<HTMLElement>("[data-session-directory]");
+        const purposeCell = row?.querySelector<HTMLElement>("[data-session-purpose]");
+        if (directoryCell) directoryCell.textContent = result.working_directory;
+        if (purposeCell) purposeCell.textContent = result.purpose;
+        const linkCell = row?.querySelector<HTMLElement>("[data-session-external-link]");
+        if (linkCell) renderExternalLink(linkCell, result);
+        if (status) status.textContent = addedDirectoryInput || addedPurposeInput || addedExternalUrl || addedExternalTitle ? "保存しました。追加の入力は未保存です。" : "保存しました。";
+      } catch {
+        if (status) status.textContent = "通信できませんでした。入力内容は保持しています。";
+      } finally {
+        if (button) button.disabled = false;
+      }
+    });
+  };
+  document.querySelectorAll<HTMLFormElement>("[data-session-edit]").forEach(initializeSessionEditor);
   const consoleRoot = document.getElementById("log-console");
   if (!consoleRoot) return;
   const root = consoleRoot;
@@ -39,10 +161,11 @@ function clientBootstrap(): void {
   type LogState = "current" | "pending" | "refreshing" | "resync-required";
   type ConsoleState = {
     stopped: boolean; activeSessions: number; runningProcesses: number; updatedAt: string;
-    sessions?: Array<{ session_id: string; working_directory?: string; purpose?: string; created_at: string; last_used_at?: string; state: string; active: boolean }>;
+    sessions?: SessionState[];
     running?: Array<{ operation_id: string; connection_id: string; label: string; status: string; purpose?: string; command?: string }>;
   };
   const sessionId = root.dataset.sessionId ?? "";
+  const sessionCsrf = root.dataset.csrf ?? "";
   const operationRows = document.getElementById("operation-rows") as HTMLTableSectionElement | null;
   const processDetails = document.getElementById("process-details");
   const status = document.getElementById("log-status");
@@ -90,7 +213,6 @@ function clientBootstrap(): void {
   let autoPending = false;
   let manualPending = false;
   let noticeGeneration = 0;
-  let stateRequestGeneration = 0;
   let statePending = false;
   let deferredConsoleState: ConsoleState | undefined;
   let resyncPending = false;
@@ -220,11 +342,6 @@ function clientBootstrap(): void {
     if (Number.isNaN(date.getTime())) return "—";
     return new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "medium", hourCycle: "h23" }).format(date) + " JST";
   };
-  const addCell = (row: HTMLTableRowElement, value: unknown) => {
-    const cell = row.insertCell();
-    cell.textContent = String(value ?? "—");
-    return cell;
-  };
   const appendSessionTimeCell = (row: HTMLTableRowElement, value: unknown, id: string, kind: "created" | "last-access", open: boolean) => {
     const cell = row.insertCell();
     cell.className = "session-time-cell";
@@ -248,6 +365,21 @@ function clientBootstrap(): void {
     details.append(exact);
     cell.append(details);
     return details;
+  };
+  const addCell = (row: HTMLTableRowElement, value: unknown) => {
+    const cell = row.insertCell();
+    cell.textContent = String(value ?? "—");
+    return cell;
+  };
+  const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+  const appendSessionEditorCell = (row: HTMLTableRowElement, session: { session_id: string; working_directory?: string; purpose?: string; external_url?: string | null; external_title?: string | null; version?: number }, stopped: boolean) => {
+    const cell = row.insertCell();
+    if (stopped || !Number.isSafeInteger(session.version)) { cell.textContent = "—"; return cell; }
+    const sessionKey = escapeHtml(session.session_id);
+    cell.innerHTML = `<details><summary>編集</summary><form class="session-editor" data-session-edit="${sessionKey}" data-version="${session.version}"><input type="hidden" name="csrf" value="${escapeHtml(sessionCsrf)}"><label>作業ディレクトリ <input name="workingDirectory" required maxlength="4096" value="${escapeHtml(session.working_directory)}"></label><label>用途 <input name="purpose" required maxlength="200" value="${escapeHtml(session.purpose)}"></label><label>URL <input name="externalUrl" type="url" maxlength="2048" value="${escapeHtml(session.external_url)}"></label><label>題名 <input name="externalTitle" maxlength="200" value="${escapeHtml(session.external_title)}"></label><button type="submit">保存</button><output aria-live="polite"></output><div data-session-conflict hidden><p data-session-conflict-summary></p><button type="button" data-session-conflict-action="keep-draft">自分の入力で再編集</button><button type="button" data-session-conflict-action="use-latest">最新値を取り込む</button></div></form><small>変更は保存後に開始するプロセスから適用されます。</small></details>`;
+    const form = cell.querySelector<HTMLFormElement>("form[data-session-edit]");
+    if (form) initializeSessionEditor(form);
+    return cell;
   };
   const operationStatus = (event: Record<string, unknown>) => typeof event.status === "string" ? event.status : typeof event.event === "string" && event.event.startsWith("operation.") && !["operation.received", "operation.started"].includes(event.event) ? event.event.slice("operation.".length) : "running";
   const renderOperations = () => {
@@ -716,6 +848,14 @@ function clientBootstrap(): void {
     return anchorInside !== focusInside;
   };
   const refreshStateFrom = async (state: ConsoleState) => {
+      const sessions = state.sessions?.map((incoming) => {
+        const previous = latestSessionStateById.get(incoming.session_id);
+        const savedVersion = latestSavedVersionBySession.get(incoming.session_id) ?? 0;
+        const knownVersion = Math.max(savedVersion, previous?.version ?? 0);
+        if (Number.isSafeInteger(incoming.version) && incoming.version! < knownVersion) return previous;
+        latestSessionStateById.set(incoming.session_id, incoming);
+        return incoming;
+      }).filter((session): session is SessionState => session !== undefined);
       if (state.sessions && selectionIntersectsSessionRows()) {
         deferredConsoleState = state;
         return;
@@ -759,18 +899,38 @@ function clientBootstrap(): void {
         const anchorRow = visibleRows.find((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > 0 && rect.top < window.innerHeight; });
         const scrollAnchor = anchorRow ? { sessionId: anchorRow.dataset.sessionId ?? "", top: anchorRow.getBoundingClientRect().top } : undefined;
         const priorScrollY = window.scrollY;
-        const visibleSessions = root.dataset.filter === "active" ? state.sessions.filter((session) => session.active) : state.sessions;
+        const freshSessions = sessions ?? state.sessions;
+        const visibleSessions = root.dataset.filter === "active" ? freshSessions.filter((session) => session.active) : freshSessions;
         const savedOpenByKey = new Map<string, boolean>();
         let focusedTimeKey: string | undefined;
+        const editorCells = new Map<string, HTMLTableCellElement>();
+        let focusedEditor: HTMLElement | undefined;
+        let focusedEditorId: string | undefined;
+        const activeElement = document.activeElement as HTMLElement | null;
+        for (const form of sessionRows.querySelectorAll<HTMLFormElement>("form[data-session-edit]")) {
+          const sessionKey = form.dataset.sessionEdit;
+          const incoming = sessionKey ? freshSessions.find((session) => session.session_id === sessionKey) : undefined;
+          const externalUrlInput = form.elements.namedItem("externalUrl") as HTMLInputElement | null;
+          const externalTitleInput = form.elements.namedItem("externalTitle") as HTMLInputElement | null;
+          if (incoming && externalUrlInput && externalUrlInput.value === (form.dataset.initialExternalUrl ?? "")) { externalUrlInput.value = incoming.external_url ?? ""; form.dataset.initialExternalUrl = externalUrlInput.value; }
+          if (incoming && externalTitleInput && externalTitleInput.value === (form.dataset.initialExternalTitle ?? "")) { externalTitleInput.value = incoming.external_title ?? ""; form.dataset.initialExternalTitle = externalTitleInput.value; }
+          const editorCell = form.closest("td") as HTMLTableCellElement | null;
+          if (sessionKey && editorCell) {
+            editorCells.set(sessionKey, editorCell);
+            if (activeElement && editorCell.contains(activeElement)) { focusedEditor = activeElement; focusedEditorId = sessionKey; }
+          }
+        }
         for (const details of sessionRows.querySelectorAll<HTMLDetailsElement>("details[data-session-time]")) {
           const key = JSON.stringify([details.dataset.sessionId ?? "", details.dataset.sessionTime ?? ""]);
           savedOpenByKey.set(key, details.open);
-          if (details.querySelector("summary") === document.activeElement) focusedTimeKey = key;
+          const summary = details.querySelector("summary");
+          if (summary && activeElement === summary) focusedTimeKey = key;
         }
         const restoredSummaries = new Map<string, HTMLElement>();
+        const restoredEditorIds = new Set<string>();
         sessionRows.replaceChildren();
         if (!visibleSessions.length) {
-          const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 7;
+          const row = sessionRows.insertRow(); const cell = row.insertCell(); cell.colSpan = 9;
           cell.textContent = root.dataset.filter === "active" ? "有効なセッションはありません。" : "表示できるセッションはありません。";
         } else for (const session of visibleSessions) {
           const row = sessionRows.insertRow();
@@ -785,16 +945,28 @@ function clientBootstrap(): void {
           const lastAccessDetails = appendSessionTimeCell(row, session.last_used_at ?? session.created_at, session.session_id, "last-access", savedOpenByKey.get(lastAccessKey) ?? false);
           const lastAccessSummary = lastAccessDetails?.querySelector("summary") as HTMLElement | null;
           if (lastAccessSummary) restoredSummaries.set(lastAccessKey, lastAccessSummary);
-          addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
-          addCell(row, session.purpose ?? "—");
+          const stateCell = addCell(row, session.active ? "有効" : session.state === "closed" ? "終了" : "履歴");
+          stateCell.dataset.sessionState = "true";
+          const purposeCell = addCell(row, session.purpose ?? "—"); purposeCell.dataset.sessionPurpose = "true";
           addCell(row, session.session_id);
-          addCell(row, session.working_directory ?? "—");
+          const directoryCell = addCell(row, session.working_directory ?? "—"); directoryCell.dataset.sessionDirectory = "true";
+          const externalLinkCell = addCell(row, "—"); externalLinkCell.className = "session-external-link-cell"; externalLinkCell.dataset.sessionExternalLink = "true"; renderExternalLink(externalLinkCell, session);
+          if (session.active && !state.stopped) {
+            const existingEditor = editorCells.get(session.session_id);
+            if (existingEditor) { row.append(existingEditor); restoredEditorIds.add(session.session_id); }
+            else appendSessionEditorCell(row, session, state.stopped);
+          } else addCell(row, "—");
         }
         if (focusedSessionId) {
           const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === focusedSessionId);
           if (!selection || selection.isCollapsed) restoredRow?.querySelector("a")?.focus();
         }
         if (focusedTimeKey) restoredSummaries.get(focusedTimeKey)?.focus({ preventScroll: true });
+        else if (focusedEditor && focusedEditorId && restoredEditorIds.has(focusedEditorId)) focusedEditor.focus({ preventScroll: true });
+        if (!focusedTimeKey && !(focusedEditor && focusedEditorId && restoredEditorIds.has(focusedEditorId)) && focusedSessionId && (!selection || selection.isCollapsed)) {
+          const restoredRow = [...sessionRows.querySelectorAll<HTMLTableRowElement>("tr[data-session-id]")].find((row) => row.dataset.sessionId === focusedSessionId);
+          restoredRow?.querySelector("a")?.focus({ preventScroll: true });
+        }
         if (savedSelection && selection) {
           const locate = (point: NonNullable<typeof savedSelection.anchor>) => {
             if (!point) return undefined;
@@ -920,6 +1092,7 @@ function clientBootstrap(): void {
       if (pendingCount || pendingOverflow) { noticeGeneration += 1; updateLogState("pending"); showPending(); if (autoEnabled()) { autoPending = true; scheduleAutomatic(); } }
       else if (logState !== "refreshing") { updateLogState("current"); showPending(); }
     });
+    source.addEventListener("session-link-updated", () => { if (generation === currentGeneration && autoEnabled()) void refreshState(); });
     source.addEventListener("resync-required", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; setStatus(); if (listPage) { resyncPending = true; autoPending = true; if (autoEnabled()) scheduleAutomatic(); else updateLogState("resync-required"); } else void resync(); });
     source.addEventListener("auth-expired", () => { if (generation !== currentGeneration) return; source.close(); connectionState = "disconnected"; stopAuthentication(); });
     source.addEventListener("heartbeat", () => { if (generation === currentGeneration && source.readyState === EventSource.OPEN) { connectionState = "connected"; setStatus(); } });

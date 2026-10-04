@@ -114,3 +114,28 @@
 - Next action: correct NREV-R24-MAIN-001 in the task tracking, then complete the post-report full local validation and obtain main-targeted exact-head required CI including Windows. Parent should perform cumulative final review after these gates; do not merge based on this normal review alone.
 - reserved_report_paths: none (this report is a pre-reserved child-owned section in the existing report).
 - report_attestation_allowed: false (this is not an independent-final-review attestation; review report edit is not a new implementation verdict or authorization to commit).
+
+## Fix verification closure (child-owned; bounded to NREV-R24-MAIN-001)
+
+- Reviewer continuity: same normal reviewer as the initial review; this is finding-limited verification, not a new exhaustive pass.
+- Initial reviewed HEAD: `75d51a6febea2f6942fdda5061f9c84f266c7efc`.
+- Closure reviewed HEAD: `d9de86f9a93cbea85272663d60c5ea28482a25d0`.
+- Closure diff: initial reviewed HEAD to closure HEAD changes only this review report, the validation report, `tasks/phases-status.md`, and `tasks/tasks-status.md`; no product code, tests, workflows, or dependencies changed. Closure HEAD remained stable during review.
+- Initial finding continuity: `NREV-R24-MAIN-001`, Low, retained without reclassification. The initial review verdict remains `fail`; this section records closure status only.
+
+### Bounded verification
+
+| Required action / sibling check | Disposition | Evidence |
+| --- | --- | --- |
+| Register an independent R24 phase and preserve P5/T10 | checked_no_finding | `tasks/phases-status.md` now defines `R24` for the Issue #24 independent workstream. P5 remains User Console / T10. Its current-position summary distinguishes R24 from P5/T10. |
+| Change R24 task rows to the R24 phase identifier | checked_finding | Existing rows R24-01 through R24-06 and R24-08 use `R24` in `tasks/tasks-status.md`; the header note distinguishes that ID from P5/T10. However, R24-07 has no task row although the phase registry scopes R24 as R24-01 through R24-08. The requested full 01–08 alignment cannot be confirmed. |
+| Check same-class phase-label references | checked_finding | `rg` over task tracking finds no remaining R24 task row labeled P5. The unresolved sibling inconsistency is the missing R24-07 task row while the registry includes it. |
+| Validation evidence accuracy | checked_no_finding | The validation report now explicitly states that the local full gate ran at `75d51a6`: 187 tests (176 pass / 11 skip / 0 fail), with check, build, lint and diff check successful. This is local evidence for that HEAD, not exact-head CI evidence for `d9de86f`. |
+
+### Closure finding status
+
+The original P5/T10 collision is corrected for every R24 row present in the task table, while P5/T10 itself remains unchanged. Closure is **incomplete** because the required R24-01–R24-08 task coverage is not fully represented: R24-07 is absent from `tasks/tasks-status.md`, despite the canonical R24 phase row listing it. To close the finding class, the owner must either record the paused R24-07 work item under phase `R24` or revise the registry scope and current-position references so they accurately enumerate only tracked items. This reviewer made no task-tracking edits.
+
+- Bounded closure disposition: `incomplete` (finding action partially addressed; no new finding identity or severity assigned).
+- CI/local validation: not rerun, as instructed. Exact candidate CI remains unverified.
+- Next action: reconcile the missing R24-07 task representation with the R24 phase scope, then request same-reviewer bounded closure verification. The first-pass coverage and `fail` verdict above remain intact.
