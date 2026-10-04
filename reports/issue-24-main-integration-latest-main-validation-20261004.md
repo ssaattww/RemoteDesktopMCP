@@ -7,7 +7,14 @@
 - Cumulative R24 source `3a6eac7f6d2968256458f2018305f80666ebd125` is an ancestor of the candidate.
 - PR #54 session metadata editing, external links, main Todo, and its four service-close process regression tests are present. The four tests were integrated into `test/independent-process-ownership.test.ts` alongside the existing R24 process ownership cases.
 - PR #62's exclusive branch is not part of this integration. Its separate head is not an ancestor of the candidate; this candidate preserves the PR #68 cumulative source and excludes PR #62-specific changes.
-- No merge to main was performed. PR creation and exact-head remote CI remain pending normal review.
+- No merge to main was performed. At the time of this local-gate record, normal review, PR creation, and remote CI were pending; the subsequent PR and CI result are recorded below.
+
+## Exact-head PR validation after review
+
+- Draft PR #69 targets `main`. Reviewed candidate head `959c544ca18c3171018d8aec809f681e9c4f3c55`; the review-report commit was `2d9c2844d718802220469a44952aeaf09f78ebc8`.
+- Required workflow run `37193712973` on PR head `2d9c284` completed successfully. Ubuntu lint/check/build/test, assignment preparation, and Windows shards 1/8 through 8/8 all succeeded.
+- Assignment artifact `11299254653` (`sha256:5883fbb7ac12709c5a9bbb061c0e8aa8e783bf7330d40aeec5977b14d03f07dd`) selected baseline mode because the existing manifest fingerprint did not match the integrated test inventory. Its eight assignments cover all 27 tracked test files exactly once with no overlap.
+- This CI success validates the reviewed integration candidate. It is workflow/functional validation, not a runtime optimization measurement; the three-minute Issue #24 target remains unmet.
 
 ## Local validation
 
