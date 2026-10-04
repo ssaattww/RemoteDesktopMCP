@@ -74,5 +74,5 @@
 - 検証能力: `local_execution_available`
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
 - Push: 修正ブランチの最新HEADを通常push済み。PR #72はDraft維持。
-- CI: 新修正のpush後にexact-head checksを確認する。
+- CI: code HEAD `0859747c51f52626956c7f0df6af128cdf99a34c` の exact-head run `37206981513` はUbuntu lint/check/build/test、Windows準備job、8/8 Windows shardがすべて成功。レポート追記後の最新HEADでもCIを再確認する。
 - 独立final review / merge: 未実施。
