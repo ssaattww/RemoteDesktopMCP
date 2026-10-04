@@ -98,6 +98,11 @@ test("pinned HTTP transport honors Node autoSelectFamily lookup contract using o
   }
 });
 
+test("leaves invalid numeric title references literal", async () => {
+  const fake = transport([{ status: 200, contentType: "text/html", body: "<title>before &#0; &#xD800; &#1114112; after</title>" }]);
+  assert.equal(await fetchSessionLinkTitle("https://example.com/", { transport: fake }), "before &#0; &#xD800; &#1114112; after");
+});
+
 test("accepts quoted UTF-8 charset parameters and rejects malformed or other charsets", async () => {
   const quoted = transport([{ status: 200, contentType: 'text/html; charset="UTF-8"', body: "<title>Quoted UTF-8</title>" }]);
   assert.equal(await fetchSessionLinkTitle("https://example.com/", { transport: quoted }), "Quoted UTF-8");

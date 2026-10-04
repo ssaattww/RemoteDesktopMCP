@@ -274,16 +274,16 @@ function decodeTitle(body: Uint8Array): string {
   if (!match) throw new Error("HTML title is missing.");
   const value = match[1]!.replace(/<[^>]*>/gu, "").replace(/&(amp|lt|gt|quot|apos);|&#(\d+);|&#x([\da-f]+);/giu, (entity, name: string | undefined, decimal: string | undefined, hexadecimal: string | undefined) => {
     if (name) return ({ amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" })[name.toLowerCase()]!;
-    if (decimal) return decodeCodePoint(Number(decimal));
-    if (hexadecimal) return decodeCodePoint(Number.parseInt(hexadecimal, 16));
+    if (decimal) return decodeCodePoint(Number(decimal)) ?? entity;
+    if (hexadecimal) return decodeCodePoint(Number.parseInt(hexadecimal, 16)) ?? entity;
     return entity;
   }).trim();
   if (!value || codePoints(value) > MAX_TITLE_CODE_POINTS) throw new Error("HTML title is empty or exceeds the supported length.");
   return value;
 }
 
-function decodeCodePoint(value: number): string {
-  if (!Number.isInteger(value) || value <= 0 || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) throw new Error("HTML title contains an invalid character reference.");
+function decodeCodePoint(value: number): string | undefined {
+  if (!Number.isInteger(value) || value <= 0 || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) return undefined;
   return String.fromCodePoint(value);
 }
 
