@@ -47,10 +47,12 @@ function manifest(overrides: Record<string, unknown> = {}) {
 }
 
 test("baseline round robin and optimized LPT are deterministic", () => {
-  assert.deepEqual(buildAssignments(files, 3, "baseline", {}), [
-    { shardId: 1, files: [files[0], files[3]], estimatedDurationMs: 0 },
+  assert.deepEqual(buildAssignments(files, 5, "baseline", {}), [
+    { shardId: 1, files: [files[0]], estimatedDurationMs: 0 },
     { shardId: 2, files: [files[1]], estimatedDurationMs: 0 },
     { shardId: 3, files: [files[2]], estimatedDurationMs: 0 },
+    { shardId: 4, files: [files[3]], estimatedDurationMs: 0 },
+    { shardId: 5, files: [], estimatedDurationMs: 0 },
   ]);
   const first = buildAssignments(files, 2, "optimized", Object.fromEntries(files.map((file) => [file, 10])));
   const second = buildAssignments([...files].reverse(), 2, "optimized", Object.fromEntries(files.map((file) => [file, 10])));
@@ -59,7 +61,21 @@ test("baseline round robin and optimized LPT are deterministic", () => {
     { shardId: 1, files: [files[0], files[2]], estimatedDurationMs: 20 },
     { shardId: 2, files: [files[1], files[3]], estimatedDurationMs: 20 },
   ]);
-  assert.deepEqual(buildAssignments([files[0]], 3, "baseline", {})[2].files, []);
+  assert.deepEqual(buildAssignments([files[0]], 5, "baseline", {})[4].files, []);
+});
+
+test("Windows scheduler workflow plans and dispatches exactly five listed shards", async () => {
+  const workflow = parseYaml(await readFile(path.join(process.cwd(), ".github/workflows/lint.yml"), "utf8"));
+  const prepare = workflow.jobs["windows-scheduler"].steps.find((step: { name?: string }) => step.name === "Prepare assignment");
+  assert.ok(prepare, "Windows scheduler Prepare assignment step exists");
+  assert.match(prepare.run, /scripts\/ci-test-scheduler\.mjs plan .*--shard-count 5/);
+
+  const windows = workflow.jobs.windows;
+  assert.deepEqual(windows.strategy.matrix.shard, [1, 2, 3, 4, 5]);
+  assert.match(windows.name, /Windows shard \$\{\{ matrix\.shard \}\}\/5/);
+  const dispatch = windows.steps.find((step: { run?: string }) => step.run?.includes("ci-test-scheduler.mjs dispatch"));
+  assert.ok(dispatch, "Windows shard dispatch step exists");
+  assert.match(dispatch.run, /--shard-count 5/);
 });
 
 test("fingerprints sort inventory paths and bind raw file bytes plus every environment identity value", () => {
@@ -71,10 +87,10 @@ test("fingerprints sort inventory paths and bind raw file bytes plus every envir
 });
 
 test("assignment rejects an empty universe and proves disjoint exact coverage", () => {
-  assert.throws(() => buildAssignments([], 3, "baseline", {}), /test universe is empty/i);
-  const plan = buildPlan({ sourceCommit: "1".repeat(40), workflowRunId: 7, runAttempt: 1, shardCount: 3, generatedAt: "2026-10-02T12:00:00Z",
+  assert.throws(() => buildAssignments([], 5, "baseline", {}), /test universe is empty/i);
+  const plan = buildPlan({ sourceCommit: "1".repeat(40), workflowRunId: 7, runAttempt: 1, shardCount: 5, generatedAt: "2026-10-02T12:00:00Z",
     fingerprint: "b".repeat(64), mode: "baseline", manifestStatus: "missing", files, durations: {} });
-  assert.deepEqual(validatePlan(plan, { files, sourceCommit: "1".repeat(40), workflowRunId: 7, runAttempt: 1, shardCount: 3 }).assignments, plan.assignments);
+  assert.deepEqual(validatePlan(plan, { files, sourceCommit: "1".repeat(40), workflowRunId: 7, runAttempt: 1, shardCount: 5 }).assignments, plan.assignments);
   assert.throws(() => validatePartition(files, [{ shardId: 1, files: [files[0], files[0]], estimatedDurationMs: 0 }], 1), /duplicate|ordering|path/i);
   assert.throws(() => validatePartition(files, [{ shardId: 1, files: [files[0]], estimatedDurationMs: 0 }], 1), /coverage|missing/i);
 });
@@ -119,15 +135,15 @@ test("malformed or unsafe manifests hard-fail even when stale; matching manifest
 
 test("plan digest and common plan validation bind every shard to the same source and run", () => {
   const selected = selectManifest(null, { files, fingerprint: "b".repeat(64), environment, createdAt: "2026-10-02T12:00:00Z" });
-  const input = { sourceCommit: "1".repeat(40), workflowRunId: 7, runAttempt: 1, shardCount: 3, generatedAt: "2026-10-02T12:00:00Z",
+  const input = { sourceCommit: "1".repeat(40), workflowRunId: 7, runAttempt: 1, shardCount: 5, generatedAt: "2026-10-02T12:00:00Z",
     fingerprint: "b".repeat(64), manifestStatus: selected.manifestStatus, mode: selected.mode, files, durations: selected.durations };
   const plan = buildPlan(input);
-  for (let shardId = 1; shardId <= 3; shardId++) {
-    assert.equal(validatePlan(JSON.parse(JSON.stringify(plan)), { files, sourceCommit: input.sourceCommit, workflowRunId: 7, runAttempt: 1, shardCount: 3 }).planDigest, plan.planDigest);
+  for (let shardId = 1; shardId <= 5; shardId++) {
+    assert.equal(validatePlan(JSON.parse(JSON.stringify(plan)), { files, sourceCommit: input.sourceCommit, workflowRunId: 7, runAttempt: 1, shardCount: 5 }).planDigest, plan.planDigest);
   }
   const corrupt = { ...plan, assignments: [...plan.assignments].reverse() };
-  assert.throws(() => validatePlan(corrupt, { files, sourceCommit: input.sourceCommit, workflowRunId: 7, runAttempt: 1, shardCount: 3 }), /digest|assignment|order/i);
-  assert.throws(() => validatePlan(plan, { files, sourceCommit: input.sourceCommit, workflowRunId: 8, runAttempt: 1, shardCount: 3 }), /run/i);
+  assert.throws(() => validatePlan(corrupt, { files, sourceCommit: input.sourceCommit, workflowRunId: 7, runAttempt: 1, shardCount: 5 }), /digest|assignment|order/i);
+  assert.throws(() => validatePlan(plan, { files, sourceCommit: input.sourceCommit, workflowRunId: 8, runAttempt: 1, shardCount: 5 }), /run/i);
   const optimizedPlan = buildPlan({ ...input, mode: "optimized", manifestStatus: "applied", durations: Object.fromEntries(files.map((file) => [file, 10])) });
   assert.throws(() => validateRuntimeFingerprint(optimizedPlan, "c".repeat(64)), /fingerprint/i);
   assert.equal(validateRuntimeFingerprint(plan, "c".repeat(64)), true);
@@ -307,7 +323,7 @@ test("measurement workflow is opt-in on same-repository label events with read-o
 });
 
 test("scheduler CLI executes its entry point and rejects unknown commands", () => {
-  assert.deepEqual(parseArgs(["--shard-id", "2", "--shard-count", "3"]), { shardId: "2", shardCount: "3" });
+  assert.deepEqual(parseArgs(["--shard-id", "2", "--shard-count", "5"]), { shardId: "2", shardCount: "5" });
   const script = fileURLToPath(new URL("../scripts/ci-test-scheduler.mjs", import.meta.url));
   const result = spawnSync(process.execPath, [script, "unknown"], { cwd: process.cwd(), encoding: "utf8" });
   assert.equal(result.status, 1);
