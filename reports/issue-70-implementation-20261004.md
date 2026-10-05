@@ -53,7 +53,8 @@
 
 実装後の最終検証:
 
-- 最新head検証: `npm test` は exit 0、254 tests / 243 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint`（TypeScript ESLint、Markdown lint 144 files / 0 issues、日本語design whitelist）、`git diff --check` はすべて exit 0。
+- N16/N17までのhead検証: `npm test` は exit 0、254 tests / 243 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint`、`git diff --check` はすべてexit 0。
+- 開発preview追加後の新head検証: `npm test` は exit 0、255 tests / 244 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint`（TypeScript ESLint、Markdown lint 145 files / 0 issues、日本語design whitelist）、`git diff --check` はすべてexit 0。`npm run preview:issue70` で成果HTMLを生成。
 - `npm run check`: exit 0。
 - `npm run build`: exit 0。
 - `npm run lint`: exit 0。TypeScript ESLint、Markdown lint（144 files / 0 issues）、設計文書の日本語whitelist検査を含む。
@@ -66,6 +67,14 @@
 
 画面幅のviewport計測は未完了。正規cloud browserはlocalhost URLを `ERR_BLOCKED_BY_CLIENT` で拒否したため、別host回避やheadless再試行は行っていない。実画面の320 CSS px/PC幅、改行/長文折返し、操作配置、横overflowは親の正規fixture環境で確認が必要。テストfixture processとtemp directoryは終了・cleanup済み。
 
+## 開発時オフラインHTML preview
+
+- 再生成: `npm run preview:issue70`。成果物: `artifacts/issue70-todo-preview.html`。簡単な操作案内: `doc/dev/issue70-todo-preview.md`。
+- 出力は一時Loopback fixtureの合成sessionを用いて、実際の `/user/sessions/:sessionId` 製品routeからHTMLを取得する。生成時にfixture認証を自動処理し、出力後はserverと一時データ領域を終了・削除する。開発者はサーバー起動、ログイン、応答の手動確認をせず、保存HTMLを開けばよい。
+- 製品SSR/CSSと `userConsoleClientScript` をそのまま含める。保存HTML内のpreview-only bridgeはTodo GET/PUT、console-state、logs、EventSourceを明示的なメモリfixtureに置換し、強制切替もページ内で完結する。未登録のfetchは例外にして気付けるようにする。製品API/auth経路にはpreview動作を追加しない。
+- fixtureは未着手・進行中・完了・長文複数行の合成項目を表示。追加欄は初期折りたたみ、強制機能は無効状態から切替可能。previewの操作はメモリだけに反映し、ログインCSRF値を固定のpreview用文字列に置換、credential/cookieはHTMLへ含めない。
+- 出力HTMLを再生成し、テストでSSR CSSと正確な製品client script、各Todo状態、オフラインfetch/EventSource stub、認証値不在、外部URL不在を確認した。通常ブラウザを利用した320 CSS px/desktopの実画面確認は引き続き未完了。
+
 初回レビューのfail判定は履歴として維持する。全指摘の修正をpush後、同一通常reviewerによる再確認待ち。マージしない。
 
 ## 変更対象
@@ -75,6 +84,9 @@
 - `test/issue-56-shared-todo.test.ts`
 - `test/user-console-client.test.ts`
 - `scripts/issue70-ui-fixture.ts`
+- `artifacts/issue70-todo-preview.html`
+- `doc/dev/issue70-todo-preview.md`
+- `package.json`（再生成script）
 - `tasks/tasks-status.md`
 - `tasks/phases-status.md`
 - `reports/issue-70-implementation-20261004.md`
@@ -85,4 +97,5 @@
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
 - Push: N16/N17修正を含むcode commit `cc198421f40c8b35e080739ce32cb1e3e2d129ec` を通常push済み。PR #72はDraft維持。
 - CI: exact-head run `37242547410` は `cc198421f40c8b35e080739ce32cb1e3e2d129ec` に対し全10 job成功（Prepare、Ubuntu、Windows 8 shards）。
+- 開発preview追加後の新source変更はこのレポート作成時点で通常reviewとCIが未完了。再テストとpush後にcurrent-head CI、同一normal-reviewerで確認が必要。PRはDraft維持、mergeしない。
 - 独立final review / merge: 未実施。
