@@ -114,20 +114,34 @@ class OfflinePreviewEventSource {
   close() { this.readyState = 2; }
 }
 window.EventSource = OfflinePreviewEventSource;
+const isEnforcementForm = (form) => form.action.endsWith("/todo/enforcement");
+const explainBlockedAction = () => {
+  const notice = document.querySelector("[data-issue70-preview-notice]");
+  if (notice) notice.textContent = "この操作はオフラインプレビューでは利用できません。サーバーへの送信やページ移動は行われません。";
+};
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  const link = target?.closest?.("a[href]");
+  if (link && !link.getAttribute("href").startsWith("#")) { event.preventDefault(); explainBlockedAction(); return; }
+  const button = target?.closest?.("button");
+  const submitForm = button && button.type !== "button" ? button.form : target?.closest?.("input[type=submit]")?.form;
+  if (submitForm && !isEnforcementForm(submitForm)) { event.preventDefault(); explainBlockedAction(); }
+}, true);
 document.addEventListener("submit", (event) => {
   const form = event.target;
-  if (!(form instanceof HTMLFormElement) || !form.action.endsWith("/todo/enforcement")) return;
+  if (!(form instanceof HTMLFormElement)) return;
   event.preventDefault();
+  if (!isEnforcementForm(form)) { explainBlockedAction(); return; }
   enforcementEnabled = !enforcementEnabled;
   const state = form.closest("#session-todo")?.querySelector("[data-todo-enforcement-state]");
   const button = form.querySelector("[data-todo-enforcement]");
   if (state) state.textContent = enforcementEnabled ? "有効" : "無効";
   if (button) { button.value = String(!enforcementEnabled); button.textContent = enforcementEnabled ? "強制を無効にする" : "強制を有効にする"; }
-});
+}, true);
 window.__issue70TodoPreview = { marker, snapshot };
 })();</script>`;
     if (!html.includes("<script nonce=\"offline-preview-nonce\">")) throw new Error("Product client script was not found for offline preview injection.");
-    html = html.replace("<main>", `<main><aside style="border:1px solid #9ab7df;background:#e8f1ff;border-radius:8px;padding:10px;margin:8px 0">開発用オフラインプレビュー · 合成データ · API応答をローカルfixtureで再現します</aside>`)
+    html = html.replace("<main>", `<main><aside data-issue70-preview-notice style="border:1px solid #9ab7df;background:#e8f1ff;border-radius:8px;padding:10px;margin:8px 0">開発用オフラインプレビュー · 合成データ · API応答をローカルfixtureで再現します</aside>`)
       .replace('<script nonce="offline-preview-nonce">', offlineBridge + '<script nonce="offline-preview-nonce">');
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, html, "utf8");

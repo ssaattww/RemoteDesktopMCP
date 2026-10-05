@@ -48,13 +48,15 @@
 
 - R70-F01 Medium: 本文変更でactive textareaの値が変わったとき、行順が同じでも選択範囲・方向を復元し、focus/scrollも保持。既存N09の行移動追跡は変更せず存続。
 - R70-F02 Medium: R70-N16と同内容。動的行の状態欄がSSR/CSS契約と異なる点を追加・409再描画の両方で検証。
+- R70-F04 Medium（開発preview独立review）: 保存HTMLに残る緊急停止/ログアウトformと一覧linkがpreviewを離脱またはnative送信できる懸念。preview-only capture bridgeで強制機能toggle以外の全form submitを取消し、submit button clickとfragment以外のlink navigationも取消して通知する。製品route/認証formは編集しない。R70-F04回帰は実装前にcapture handler不在でfailし、修正後にbridge契約テストpass。独立reviewerのfix verification待ち。
 - UI依頼: 強制切替を状態右横、状態・select・更新・削除を単一行に配置。コントロールはmin-width/min-height 44px、ボタン文字を本文と同じ継承サイズにする。Todo追加欄は初期折りたたみのネイティブdetails/summaryで、通常refresh中はopen状態と入力draftを保つ。
 - 画像 `IMG_6246.jpg` / `IMG_6247.jpg` を確認し、モバイル操作列と強制切替の参照として利用。#71へのコード変更なし。
 
 実装後の最終検証:
 
 - N16/N17までのhead検証: `npm test` は exit 0、254 tests / 243 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint`、`git diff --check` はすべてexit 0。
-- 開発preview追加後の新head検証: `npm test` は exit 0、255 tests / 244 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint`（TypeScript ESLint、Markdown lint 145 files / 0 issues、日本語design whitelist）、`git diff --check` はすべてexit 0。`npm run preview:issue70` で成果HTMLを生成。
+- 開発preview initial head検証: `npm test` は exit 0、255 tests / 244 pass / 11 skip / 0 fail。`npm run check`、`npm run build`、`npm run lint`（TypeScript ESLint、Markdown lint 145 files / 0 issues、日本語design whitelist）、`git diff --check` はすべてexit 0。`npm run preview:issue70` で成果HTMLを生成。
+- R70-F04後のfocused確認: HTML generation + `test/issue70-ui-fixture.test.ts` は2/2 pass。full suite/check/build/lint/new-head CIはこの修正を含むpush後に実施する。
 - `npm run check`: exit 0。
 - `npm run build`: exit 0。
 - `npm run lint`: exit 0。TypeScript ESLint、Markdown lint（144 files / 0 issues）、設計文書の日本語whitelist検査を含む。
@@ -97,5 +99,5 @@
 - 検証能力: `local_execution_available`; branch上の修正ソースに対し実行。
 - Push: N16/N17修正を含むcode commit `cc198421f40c8b35e080739ce32cb1e3e2d129ec` を通常push済み。PR #72はDraft維持。
 - CI: exact-head run `37242547410` は `cc198421f40c8b35e080739ce32cb1e3e2d129ec` に対し全10 job成功（Prepare、Ubuntu、Windows 8 shards）。
-- 開発preview追加後の新source変更はこのレポート作成時点で通常reviewとCIが未完了。再テストとpush後にcurrent-head CI、同一normal-reviewerで確認が必要。PRはDraft維持、mergeしない。
+- 開発preview追加とR70-F04修正の新source変更はこのレポート作成時点でfull regression/CIとreviewer fix verificationが未完了。PRはDraft維持、mergeしない。
 - 独立final review / merge: 未実施。

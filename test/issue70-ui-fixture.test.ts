@@ -71,7 +71,16 @@ test("Issue 70 preview writes a product-rendered, offline HTML file with represe
     assert.match(html, /offline-preview-token/);
     assert.match(html, /Offline preview blocked an unmocked request/);
     assert.match(html, /window\.EventSource = OfflinePreviewEventSource/);
-    assert.match(html, /addEventListener\("submit"/);
+    assert.match(html, /const isEnforcementForm = \(form\) => form\.action\.endsWith\("\/todo\/enforcement"\)/);
+    assert.match(html, /addEventListener\("submit",[\s\S]*?}, true\)/, "the capture handler must block native non-fixture form submissions");
+    assert.match(html, /addEventListener\("click",[\s\S]*?}, true\)/, "the capture handler must stop page-changing links and native submit buttons");
+    assert.match(html, /if \(link && !link\.getAttribute\("href"\)\.startsWith\("#"\)\) \{ event\.preventDefault\(\); explainBlockedAction\(\); return; \}/);
+    assert.match(html, /if \(submitForm && !isEnforcementForm\(submitForm\)\) \{ event\.preventDefault\(\); explainBlockedAction\(\); \}/);
+    assert.match(html, /if \(!isEnforcementForm\(form\)\) \{ explainBlockedAction\(\); return; \}/);
+    assert.match(html, /action="\/user\/emergency-stop"/);
+    assert.match(html, /action="\/user\/logout"/);
+    assert.match(html, /href="\/user"/);
+    assert.match(html, /オフラインプレビューでは利用できません/);
     assert.doesNotMatch(html, /issue70-review-fixture|issue70-ui-fixture-secret|rdmcp_user=|\/workspace\/RemoteDesktopMCP-issue70/);
     assert.doesNotMatch(html, /https?:\/\//, "the saved preview must not include a remote endpoint");
   } finally {
