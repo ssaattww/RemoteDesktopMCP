@@ -131,7 +131,7 @@ class OfflinePreviewEventSource {
   close() { this.readyState = 2; }
 }
 window.EventSource = OfflinePreviewEventSource;
-const isEnforcementForm = (form) => form.action.endsWith("/todo/enforcement");
+const isEnforcementForm = (form) => form.classList.contains("todo-enforcement-form");
 const explainBlockedAction = () => {
   const notice = document.querySelector("[data-issue70-preview-notice]");
   if (notice) notice.textContent = "この操作はオフラインプレビューでは利用できません。サーバーへの送信やページ移動は行われません。";

@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { userConsoleClientScript } from "../src/user-console-client.js";
 
@@ -71,7 +72,7 @@ test("Issue 70 preview writes a product-rendered, offline HTML file with represe
     assert.match(html, /offline-preview-token/);
     assert.match(html, /Offline preview blocked an unmocked request/);
     assert.match(html, /window\.EventSource = OfflinePreviewEventSource/);
-    assert.match(html, /const isEnforcementForm = \(form\) => form\.action\.endsWith\("\/todo\/enforcement"\)/);
+    assert.match(html, /const isEnforcementForm = \(form\) => form\.classList\.contains\("todo-enforcement-form"\)/);
     assert.match(html, /addEventListener\("submit",[\s\S]*?}, true\)/, "the capture handler must block native non-fixture form submissions");
     assert.match(html, /addEventListener\("click",[\s\S]*?}, true\)/, "the capture handler must stop page-changing links and native submit buttons");
     assert.match(html, /if \(link && !link\.getAttribute\("href"\)\.startsWith\("#"\)\) \{ event\.preventDefault\(\); explainBlockedAction\(\); return; \}/);
@@ -82,9 +83,45 @@ test("Issue 70 preview writes a product-rendered, offline HTML file with represe
     assert.match(markup, /<div data-issue70-blocked-form>/, "emergency and logout forms must be removed as submission targets in the generated markup");
     assert.doesNotMatch(markup, /\/user\/(?:emergency-stop|logout)|\s(?:action|method|target|formaction|formmethod|formtarget)=(['"])/i, "generated form markup must not retain a server destination or native submission method");
     assert.doesNotMatch(markup, /href="\/user"/, "non-fragment navigation destinations must be absent from generated markup");
+    assert.match(markup, /<form class="todo-enforcement-form">/, "the action-free local enforcement form must be preserved");
     assert.match(html, /オフラインプレビューでは利用できません/);
     assert.doesNotMatch(html, /issue70-review-fixture|issue70-ui-fixture-secret|rdmcp_user=|\/workspace\/RemoteDesktopMCP-issue70/);
     assert.doesNotMatch(html, /https?:\/\//, "the saved preview must not include a remote endpoint");
+
+    const bridge = html.match(/<script nonce="offline-preview-nonce">([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(bridge?.includes('const marker = "todo-preview-offline-fixture"'));
+    const listeners = new Map<string, (event: { target: unknown; preventDefault: () => void }) => void>();
+    const notice = { textContent: "" };
+    const localState = { textContent: "無効" };
+    const localButton = { value: "true", textContent: "強制を有効にする" };
+    const sessionTodo = { querySelector: (selector: string) => selector === "[data-todo-enforcement-state]" ? localState : selector === "[data-todo-enforcement]" ? localButton : null };
+    class PreviewForm {
+      classList = { contains: (name: string) => name === "todo-enforcement-form" };
+      closest(selector: string) { return selector === "#session-todo" ? sessionTodo : null; }
+      querySelector(selector: string) { return sessionTodo.querySelector(selector); }
+    }
+    class PreviewHtmlForm extends PreviewForm {}
+    const document = {
+      addEventListener: (name: string, listener: (event: { target: unknown; preventDefault: () => void }) => void) => listeners.set(name, listener),
+      querySelector: () => notice,
+    };
+    const window: Record<string, unknown> = {};
+    runInNewContext(bridge, { document, window, HTMLFormElement: PreviewHtmlForm, Response, URL });
+    const localForm = new PreviewHtmlForm();
+    for (const [expectedState, expectedValue, expectedLabel] of [["有効", "false", "強制を無効にする"], ["無効", "true", "強制を有効にする"]]) {
+      let prevented = false;
+      listeners.get("submit")?.({ target: localForm, preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, true, "local enforcement toggles must still suppress native submission");
+      assert.equal(localState.textContent, expectedState);
+      assert.equal(localButton.value, expectedValue);
+      assert.equal(localButton.textContent, expectedLabel);
+    }
+    class BlockedPreviewForm extends PreviewHtmlForm { classList = { contains: () => false }; }
+    let blockedPrevented = false;
+    listeners.get("submit")?.({ target: new BlockedPreviewForm(), preventDefault: () => { blockedPrevented = true; } });
+    assert.equal(blockedPrevented, true, "other action-free forms remain blocked");
+    assert.equal(notice.textContent, "この操作はオフラインプレビューでは利用できません。サーバーへの送信やページ移動は行われません。");
+    assert.equal(localState.textContent, "無効", "blocked forms must not change enforcement state");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
