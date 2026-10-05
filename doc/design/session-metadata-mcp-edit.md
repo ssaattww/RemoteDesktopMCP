@@ -31,7 +31,7 @@ MCP用の薄い変換層から同じ共有処理を呼び出す。
 - `expectedVersion`を現在の`version`と比較し、古い更新を拒否する。
 - 作業ディレクトリを絶対パスとして再検証し、`realpath`、ディレクトリ実体、実行可能性を確認する。
 - 用途は前後空白を除き、空文字を拒否し、200文字以内に制限する。
-- URLと題名は`session-links.ts`の共通処理を使い、既存の形式検査、取得世代、SSRF対策を維持する。
+- URLと題名は`session-links.ts`の共通処理を使い、既存の形式検査、取得世代、サーバーサイドリクエストフォージェリ対策を維持する。
 - 変更を`processLock`と`executionStateLock`の既存順序で確定する。
 - 実変更時だけ`version`を一度増やし、`touched`と有効期限を更新する。
 - `session.metadata.updated`には値を記録せず、変更項目名と版だけを記録する。
@@ -61,12 +61,12 @@ MCP経路はこの処理を直接再利用し、所有者確認、入力検証�
 | `purpose` | 任意 | 文字列 | 新しい用途 |
 | `url` | 任意 | 文字列または`null` | 外部URL。`null`または空文字で解除 |
 | `title` | 任意 | 文字列または`null` | 手入力題名。`null`または空文字で手入力上書きを解除 |
-| `comment` | 必須 | 文字列 | 既存共通wrapperが要求する操作目的 |
+| `comment` | 必須 | 文字列 | 既存共通ラッパーが要求する操作目的 |
 
 `working_directory`、`purpose`、`url`、`title`のうち一項目以上を指定する。
 省略した項目は変更しない。
 
-MCPのsnake_case入力を共有処理の既存名へ一度だけ変換する。
+MCPのスネークケース入力を共有処理の既存名へ一度だけ変換する。
 
 | MCP入力 | 共有処理 |
 | --- | --- |
@@ -76,7 +76,7 @@ MCPのsnake_case入力を共有処理の既存名へ一度だけ変換する。
 | `url` | `externalUrl` |
 | `title` | `externalTitle` |
 
-MCP schemaは型と必須項目だけを表し、作業ディレクトリの実体確認、用途の正規化、
+MCPスキーマは型と必須項目だけを表し、作業ディレクトリの実体確認、用途の正規化、
 URLと題名の意味検証を再実装しない。意味検証は`updateSessionMetadata`に委譲する。
 
 ### 成功結果
@@ -104,7 +104,7 @@ URLと題名の意味検証を再実装しない。意味検証は`updateSession
 ### 拒否結果
 
 共有処理が入力または状態を拒否した場合は、MCP呼び出し自体の再試行を促す例外へ変換せず、
-次の構造化結果を返す。これは更新結果を表す業務上の拒否であり、共通wrapperが呼び出し処理を完了したことを示す
+次の構造化結果を返す。これは更新結果を表す業務上の拒否であり、共通ラッパーが呼び出し処理を完了したことを示す
 `operation.succeeded`とは区別する。更新成否は`ok`と`session.metadata.updated`の有無で判定する。
 
 - `ok: false`
@@ -125,7 +125,7 @@ URLと題名の意味検証を再実装しない。意味検証は`updateSession
 `version_conflict`を自動再送しない。利用者は`session_list`で最新状態と版を読み直し、
 更新意図を再評価した後に新しい`expected_version`で明示的に再実行する。
 
-緊急停止とTodo更新期限の拒否は、共有MCP wrapperの既存規則を維持する。
+緊急停止とTodo更新期限の拒否は、共有MCPラッパーの既存規則を維持する。
 `session_update`をTodo更新期限の例外操作には追加しない。
 
 ## `session_list`との整合
@@ -142,14 +142,14 @@ MCP利用者は更新前に`session_list`から対象の現在値と`version`を
 
 ## 共有処理の再利用
 
-`session_update`のhandlerは次の順序だけを担当する。
+`session_update`のハンドラーは次の順序だけを担当する。
 
 1. 公開入力名を共有処理の入力名へ変換する。
 2. `updateSessionMetadata`を一回呼ぶ。
 3. 成功または拒否結果をMCP用の名前へ変換する。
 
 所有者、稼働状態、有効期限、緊急停止、版、作業ディレクトリ、用途、外部リンクを
-handler側で先行判定しない。同じ検証を二経路へ複製すると、
+ハンドラー側で先行判定しない。同じ検証を二経路へ複製すると、
 HTTP編集とMCP編集で許可範囲や競合時点がずれるためである。
 
 HTTP経路も引き続き同じ`updateSessionMetadata`を呼ぶ。
@@ -187,17 +187,17 @@ URL、題名、URLに含まれる付加値を監査、エラー、診断へ複�
 記録するのは利用者、セッション識別子、変更前後の版、変更項目名であり、
 作業ディレクトリ、用途、URL、題名の値は記録しない。
 
-MCP共通wrapperの`operation.received`、`operation.started`、`operation.succeeded`は維持する。
+MCP共通ラッパーの`operation.received`、`operation.started`、`operation.succeeded`は維持する。
 `session_update`専用の値を含む`operationDetail`は追加しない。
 
-MCP schemaで拒否された呼び出しを監査する`rejectedArgumentProjection`には、
+MCPスキーマで拒否された呼び出しを監査する`rejectedArgumentProjection`には、
 `session_update`の`session_id`と`expected_version`だけを追加する。
 作業ディレクトリ、用途、URL、題名は投影しない。
 
-共有処理の更新監査が失敗した場合は既存rollbackを使い、
+共有処理の更新監査が失敗した場合は既存ロールバックを使い、
 `ok: false`、`error: update_unavailable`として返す。
 
-共有処理の更新監査は成功したが、MCP共通wrapperの終端監査だけが失敗した場合は、
+共有処理の更新監査は成功したが、MCP共通ラッパーの終端監査だけが失敗した場合は、
 既に適用済みの更新を巻き戻さない。`appliedByTool`に`session_update`の
 `ok: true`を追加し、`audit_warning: true`と`applied: true`を返して適用状態を明示する。
 
@@ -207,9 +207,9 @@ MCP schemaで拒否された呼び出しを監査する`rejectedArgumentProjecti
 他人所有、存在しない、終了済み、期限切れ、停止によって閉じられたセッションは
 同じ`session_unavailable`として扱い、存在や所有者の違いをMCP利用者へ細分化して明かさない。
 
-緊急停止がMCP共通wrapperへ入る前に有効であれば、既存の
+緊急停止がMCP共通ラッパーへ入る前に有効であれば、既存の
 `USER_STOP_REQUESTED`を返す。更新処理中に停止世代が変わった場合も、
-既存wrapperと共有処理の終端遷移優先規則を維持する。
+既存ラッパーと共有処理の終端遷移優先規則を維持する。
 
 停止解除によって閉じたセッションを再開しない。
 
@@ -238,9 +238,9 @@ MCP側では公開契約と共通処理利用の境界を重点的に検証す�
 8. 他人所有、存在しない、終了済み、期限切れ、緊急停止中のセッションを更新できない。
 9. Todo更新期限が切れている場合は共有処理を呼ばず`TODO_STALE`になる。
 10. 作業ディレクトリ変更前から走るプロセスは元の`workingDirectorySnapshot`を保持し、変更後の新規プロセスは新しい値を使う。
-11. `session.metadata.updated`の監査失敗では更新が戻り、終了などの終端遷移をrollbackが打ち消さない。
-12. MCP共通wrapperの終端監査だけが失敗した場合は、成功済み更新について`audit_warning`と`applied: true`を返す。
-13. schema拒否、成功、競合、URL・題名更新の監査と診断に更新値が含まれない。
+11. `session.metadata.updated`の監査失敗では更新が戻り、終了などの終端遷移をロールバックが打ち消さない。
+12. MCP共通ラッパーの終端監査だけが失敗した場合は、成功済み更新について`audit_warning`と`applied: true`を返す。
+13. スキーマ拒否、成功、競合、URL・題名更新の監査と診断に更新値が含まれない。
 14. 更新成功後の`session_update`結果、`session_list`、`/api/console-state`で値と`version`が一致する。
 
 `test/tool-root-contracts.test.ts`の必須MCP操作一覧も更新し、
@@ -262,7 +262,7 @@ MCP側では公開契約と共通処理利用の境界を重点的に検証す�
 - `test/tool-root-contracts.test.ts`
   - MCP操作一覧と既存セッション操作の互換性を回帰する。
 
-既存の`updateSessionMetadata`、`session-links.ts`、使用者画面のPATCH処理は、
+既存の`updateSessionMetadata`、`session-links.ts`、使用者画面のHTTP更新処理は、
 MCP専用の規則を追加せず共有正本として維持する。
 
 ## 対象外

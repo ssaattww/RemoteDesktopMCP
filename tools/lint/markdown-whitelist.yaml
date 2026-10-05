@@ -303,21 +303,19 @@ entries:
     description: 静的な規約や構文の検査を表す一般的な開発用語。
   - term: Todo
     description: 作業項目や作業一覧を表す一般的な開発用語。
-  - term: SSRF
-    description: 外部URL取得処理で非公開宛先への接続を防ぐ安全設計を示す略称。
-  - term: wrapper
-    description: MCP tool共通処理で認証・監査・入出力変換を包む実装構造の名称。
-  - term: snake_case
-    description: MCP公開入力の項目名に使用する識別子命名形式。
-  - term: schema
-    description: MCP toolの入力項目と型を定義する実装上の構造。
-  - term: handler
-    description: MCP tool呼出しを共有service処理へ接続する入口処理の名称。
-  - term: rollback
-    description: セッション情報更新の監査失敗時に直前状態へ戻す実装処理の名称。
+  - term: サーバーサイドリクエストフォージェリ
+    description: 外部URL取得処理で非公開宛先への接続を防ぐ安全設計を表す用語。
+  - term: ラッパー
+    description: 認証、監査、入出力変換などの共通処理で既存処理を包む実装構造を表す用語。
+  - term: スネークケース
+    description: 単語を下線で区切る識別子命名形式を表す用語。
+  - term: スキーマ
+    description: 入力項目やデータ構造と型の定義を表す用語。
+  - term: ハンドラー
+    description: 要求やイベントを受けて処理へ接続する入口を表す用語。
+  - term: ロールバック
+    description: 変更失敗時に直前状態へ戻す処理を表す用語。
   - term: CI
     description: Continuous Integration の略称で、自動検証自体を設計対象とする文書でも使用する用語。
-  - term: PATCH
-    description: セッション情報を部分更新するHTTP APIの標準メソッド名。
   - term: リンク
     description: セッションが保持する外部URL参照を表す一般的な技術用語。
