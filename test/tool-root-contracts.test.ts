@@ -24,6 +24,27 @@ async function upload(api: Awaited<ReturnType<typeof mcp>>, session: string, nam
   return begun.transfer_id as string;
 }
 
+async function processOutputAfterStart(
+  api: Awaited<ReturnType<typeof mcp>>,
+  session: string,
+  started: Record<string, unknown>,
+  hasExpectedOutput: (output: string) => boolean,
+): Promise<string> {
+  let output = String(started.output ?? "");
+  if (hasExpectedOutput(output)) return output;
+  assert.equal(typeof started.process_id, "string", "process_start returns a process_id for output polling");
+  const processId = started.process_id as string;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const observed = await api.call("process_output", { session_id: session, process_id: processId });
+    const nextOutput = String(observed.output ?? "");
+    if (nextOutput) output = `${output}\n${nextOutput}`;
+    if (hasExpectedOutput(output) || observed.state === "finished") break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return output;
+}
+
 
 
 test("Issue 13: published tool descriptions match session, file-root, transfer, and process boundaries", async () => {
@@ -53,9 +74,10 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
     await writeFile(outside, "reachable-through-command");
     await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "../outside-root.txt" }), /Path/);
     const script = path.join(f.base, "read-outside-root.cjs");
-    await writeFile(script, `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(outside)}, 'utf8'))`);
+    await writeFile(script, `setTimeout(() => console.log(require('node:fs').readFileSync(${JSON.stringify(outside)}, 'utf8')), 1800)`);
     const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(script), timeout_ms: 10_000 });
-    assert.match(String(started.output), /reachable-through-command/, "process_start keeps the server OS user's file access outside configured file roots");
+    const output = await processOutputAfterStart(api, session, started, (value) => /reachable-through-command/.test(value));
+    assert.match(output, /reachable-through-command/, "process_start keeps the server OS user's file access outside configured file roots");
   } finally { await api.close(); await f.cleanup(); }
 });
 
@@ -91,7 +113,9 @@ test("Issue 20: root-scoped file operations expose their canonical path when the
     assert.equal(node.path_base, "root");
 
     const startedProcess = await api.call("process_start", { session_id: session, command: nodeScriptCommand(path.join(workingDirectory, "report-cwd.cjs")), timeout_ms: 10_000 });
-    assert.match(String(startedProcess.output), new RegExp(workingDirectory.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")), "process_start uses the session working directory");
+    const workingDirectoryPattern = new RegExp(workingDirectory.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"));
+    const processCwdOutput = await processOutputAfterStart(api, session, startedProcess, (value) => workingDirectoryPattern.test(value));
+    assert.match(processCwdOutput, workingDirectoryPattern, "process_start uses the session working directory");
 
     const names = await api.call("file_search", { session_id: session, root_id: "files", query: "root-only" });
     assert.match(String(names.output), /root-only\.txt/, "file search uses root_id rather than the session working directory");
@@ -152,7 +176,8 @@ test("Issue 9: sessions require a working directory and purpose, and commands st
     assert.equal(row?.purpose, "Inspect a project");
 
     const started = await api.call("process_start", { session_id: session, command: nodeScriptCommand(script), timeout_ms: 10_000 });
-    assert.ok(String(started.output).includes(workingDirectory));
-    assert.match(String(started.output), /available outside the working directory/);
+    const commandOutput = await processOutputAfterStart(api, session, started, (value) => value.includes(workingDirectory) && /available outside the working directory/.test(value));
+    assert.ok(commandOutput.includes(workingDirectory));
+    assert.match(commandOutput, /available outside the working directory/);
   } finally { await api.close(); await f.cleanup(); }
 });

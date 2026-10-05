@@ -3,7 +3,7 @@
 ## 課題と調査
 
 - Issue #32 は open、未割当で、本文に記載されたコメントはありません。REST API で全文を読み、Issue #32 を関連付けた open PR がないことを確認しました。
-- Issue の症状は、長い `process_start` が Code Mode のRPC待機上限に達してタイムアウトすることです。再試行時にはコマンドが完了していたため成功しており、ユーザーから見た再試行は実行結果確認ではなく、長い初期応答待ちを繰り返していました。
+- Issue の症状は、長い `process_start` が Code Mode のRPC待機上限に達してタイムアウトすることです。Issue本文では、検索条件を単純化した別の rg 再実行が成功したと報告されています。先の試行がその間に完了したかどうかは、本文から確認できません。
 - 固定依存 `@wonderwhy-er/desktop-commander@0.2.51` の `dist/terminal-manager.js` を確認しました。`executeCommand` は子プロセスを登録した後、`timeout_ms` で初期応答を解決し、タイムアウト時にも PID と出力を返します。この値はコマンドの実行期限ではありません。子プロセスは別途追跡できます。
 - Issue #32 の対応PRや実装は見つかりませんでした。open PR #28 は Issue #25 の複数ノード作業で、プロセス関連実装を含みますが、Issue #32 の初期待機時間を制限する変更ではありません。#28 のブランチには手を加えていません。Issue #24 のCI系列、#72、#74も変更対象外です。Issue #31には触れていません。
 - 対象repoには `AGENTS.md` と `.agents/skills` はありませんでした。Project 4 の priority/status は確認できていないため記載していません。
@@ -19,6 +19,7 @@
 
 - `src/index.ts`: Desktop Commander と process adapter へ渡す初期出力待ちを最大1000 msに制限し、ツール説明を更新。
 - `test/search-process-lifecycle.test.ts`: 15秒動作するプロセスを `timeout_ms: 60000` で開始し、開始応答が5秒未満であること、実行中の状態と終了要求が引き続き機能することを確認。
+- `test/tool-root-contracts.test.ts`: 初期応答に必要な出力がない場合、返された `process_id` で期限付きpollを行い、取得した出力へ既存の内容assertionを適用。
 - `README.md`: `timeout_ms` とプロセス実行期限の違い、長時間コマンドの追跡方法を追加。
 
 ## TDDと検証
@@ -31,8 +32,16 @@
 4. **型検査** — `npm run check` 成功。
 5. **lint** — `npm run lint` 成功。Markdownlintは147ファイル、問題0件。TypeScript lint と design terms lint も成功。
 6. **ビルド** — `npm run build` 成功。
-7. **全体テスト** — `npm test` 成功、226件中215件成功、失敗0件、skip 11件。skipは主にWindows専用テストです。
+7. **全体テスト** — レビュー指摘対応後の `npm test` 成功、226件中215件成功、失敗0件、skip 11件、duration `137743.841368ms`。skipは主にWindows専用テストです。
 8. `git diff --check` 成功。
+
+## 通常レビュー指摘対応
+
+- **R75-COV-01 (P3)** — `test/tool-root-contracts.test.ts` の3箇所で、初期 `output` に必要な内容がなければ返却 `process_id` に対して10秒期限・50 ms間隔の `process_output` pollを行い、得た出力へ既存assertionを適用するよう変更しました。Issue 13 fixtureは line-terminated output を1800 ms遅らせ、初期応答だけでは既存assertionが満たされない回帰にしています。Red (`node_modules/.bin/tsx --test --test-name-pattern='published tool descriptions' test/tool-root-contracts.test.ts`) は1件失敗し、実際の初期応答にはPIDと空の初期出力案内だけで、期待文字列がありませんでした。Green (`node_modules/.bin/tsx --test --test-name-pattern='published tool descriptions|Issue 20: root-scoped file operations|Issue 9: sessions require' test/tool-root-contracts.test.ts`) は3/3成功し、ファイル全体も3/3成功しました。Windows shard 3の前回失敗原因とは結び付けていません。
+- **R75-DOC-01 (P3)** — Issue本文にない「再試行までに元コマンドが完了した」という説明を除き、本文で確認できる単純化した別 rg 再実行の成功へ訂正しました。
+- **Code Mode E2E** — 実際のCode Mode経由E2Eは未実施です。ローカルのMCP fixture / InMemoryTransportおよびDesktop Commander統合テストと混同しません。
+
+R75-COV-01 / R75-DOC-01 対応後の `npm run check`、`npm run lint`（Markdownlint 148ファイル、0 issues）、`npm run build` と `git diff --check` は成功しました。
 
 `npm ci --no-audit --no-fund` は `/tmp/rdmcp-issue32-npm-cache` を指定して成功し、672 packages をインストールしました。`package.json` と `package-lock.json` に差分はありません。
 
