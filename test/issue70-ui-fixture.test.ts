@@ -75,11 +75,13 @@ test("Issue 70 preview writes a product-rendered, offline HTML file with represe
     assert.match(html, /addEventListener\("submit",[\s\S]*?}, true\)/, "the capture handler must block native non-fixture form submissions");
     assert.match(html, /addEventListener\("click",[\s\S]*?}, true\)/, "the capture handler must stop page-changing links and native submit buttons");
     assert.match(html, /if \(link && !link\.getAttribute\("href"\)\.startsWith\("#"\)\) \{ event\.preventDefault\(\); explainBlockedAction\(\); return; \}/);
+    assert.match(html, /target\?\.closest\?\.\("\[data-issue70-blocked-form\]"\)/, "the preview must explain clicks on inert emergency and logout controls");
     assert.match(html, /if \(submitForm && !isEnforcementForm\(submitForm\)\) \{ event\.preventDefault\(\); explainBlockedAction\(\); \}/);
     assert.match(html, /if \(!isEnforcementForm\(form\)\) \{ explainBlockedAction\(\); return; \}/);
-    assert.match(html, /action="\/user\/emergency-stop"/);
-    assert.match(html, /action="\/user\/logout"/);
-    assert.match(html, /href="\/user"/);
+    const markup = html.slice(0, html.search(/<script\b/i));
+    assert.match(markup, /<div data-issue70-blocked-form>/, "emergency and logout forms must be removed as submission targets in the generated markup");
+    assert.doesNotMatch(markup, /\/user\/(?:emergency-stop|logout)|\s(?:action|method|target|formaction|formmethod|formtarget)=(['"])/i, "generated form markup must not retain a server destination or native submission method");
+    assert.doesNotMatch(markup, /href="\/user"/, "non-fragment navigation destinations must be absent from generated markup");
     assert.match(html, /オフラインプレビューでは利用できません/);
     assert.doesNotMatch(html, /issue70-review-fixture|issue70-ui-fixture-secret|rdmcp_user=|\/workspace\/RemoteDesktopMCP-issue70/);
     assert.doesNotMatch(html, /https?:\/\//, "the saved preview must not include a remote endpoint");

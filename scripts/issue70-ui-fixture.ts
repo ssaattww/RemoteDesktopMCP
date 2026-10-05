@@ -73,6 +73,23 @@ if (mode === "--write-html") {
     const nonce = html.match(/<script nonce="([^"]+)"/)?.[1];
     if (!csrf || !nonce) throw new Error("Rendered product HTML did not contain its expected Todo CSRF value and script nonce.");
     html = html.replaceAll(csrf, "offline-preview-token").replaceAll(nonce, "offline-preview-nonce");
+    const firstScript = html.search(/<script\b/i);
+    const markup = firstScript < 0 ? html : html.slice(0, firstScript);
+    const rest = firstScript < 0 ? "" : html.slice(firstScript);
+    const safeMarkup = markup
+      .replace(/<a\b[^>]*>/gi, (tag) => {
+        const href = tag.match(/\shref=(['"])(.*?)\1/i)?.[2];
+        return href && !href.startsWith("#") ? tag.replace(/\s+href=(['"])[\s\S]*?\1/i, "") : tag;
+      })
+      .replace(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi, (_form, rawAttributes: string, contents: string) => {
+        const action = rawAttributes.match(/\saction=(['"])(.*?)\1/i)?.[2] ?? "";
+        if (/^\/user\/(?:emergency-stop|logout)(?:[?#]|$)/i.test(action)) {
+          return `<div data-issue70-blocked-form>${contents}</div>`;
+        }
+        const attributes = rawAttributes.replace(/\s+(?:action|method|target|enctype|formaction|formmethod|formtarget)=(['"])[\s\S]*?\1/gi, "");
+        return `<form${attributes}>${contents}</form>`;
+      });
+    html = safeMarkup + rest;
     const itemsJson = JSON.stringify(previewTodoItems).replace(/</g, "\\u003c");
     const offlineBridge = `<script nonce="offline-preview-nonce">(() => {
 const marker = "todo-preview-offline-fixture";
@@ -123,6 +140,7 @@ document.addEventListener("click", (event) => {
   const target = event.target;
   const link = target?.closest?.("a[href]");
   if (link && !link.getAttribute("href").startsWith("#")) { event.preventDefault(); explainBlockedAction(); return; }
+  if (target?.closest?.("[data-issue70-blocked-form]")) { event.preventDefault(); explainBlockedAction(); return; }
   const button = target?.closest?.("button");
   const submitForm = button && button.type !== "button" ? button.form : target?.closest?.("input[type=submit]")?.form;
   if (submitForm && !isEnforcementForm(submitForm)) { event.preventDefault(); explainBlockedAction(); }
