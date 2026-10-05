@@ -39,5 +39,7 @@
 ## 残る確認
 
 - Code Mode 側のRPC待機上限値はIssue本文にありません。初期待機を1000 msに制限したローカル統合テストは5秒未満で成功しましたが、Code Mode 側の上限が1秒未満の場合や著しく遅いホストでの応答保証はできません。
-- この実装時点ではpush前です。GitHub CIのUbuntu/Windows結果は未取得です。Draft PR作成後、PR head SHAに対するCI結果を追記します。
-- push/Draft PR後はIssue #28の並行変更が `src/index.ts` に触れている点を考慮し、main取り込み時の差分・CIを再確認します。#28、#72、#74、Issue #24系列の既存作業を変更しません。
+- コミット `c83e3379f38cd4b09dd3d88d27cdf282acc3d62f` をpushし、Draft PR [#75](https://github.com/ssaattww/RemoteDesktopMCP/pull/75) を作成しました。PRはopen / draftです。
+- 同headの[CI run 37300792243](https://github.com/ssaattww/RemoteDesktopMCP/actions/runs/37300792243)ではUbuntuゲート、Windows割当、Windows shard 1、2、4〜8がpassしました。Windows shard 3は `Test` stepでfailしました。同jobのinstall、型検査、buildはpassです。
+- GitHubで同jobのログ取得 (`gh api repos/ssaattww/RemoteDesktopMCP/actions/jobs/111732877498/logs`) と診断artifact取得 (`gh run download 37300792243 --name windows-diagnostics-shard-3-e1f785d4ee223193b5158ef153547b230639619f --dir /tmp/rdmcp-issue32-windows-shard3-diagnostics`) を試みましたが、どちらも `Forbidden` でした。アクセス制限を迂回しないため、失敗したテスト名と原因は未特定です。コード回帰か環境要因か判断できないため、PRはDraftのままです。
+- main取り込み時は、Issue #28 の並行変更が `src/index.ts` に触れている点を考慮して差分とCIを再確認してください。#28、#72、#74、Issue #24系列の既存作業を変更していません。
