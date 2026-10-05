@@ -455,8 +455,7 @@ function clientBootstrap(): void {
   };
   const makeTodoRow = (item: TodoItem) => {
     const row = document.createElement("li"); row.dataset.todoId = item.id; row.dataset.baseText = item.text; row.dataset.baseStatus = item.status; row.dataset.baseVersion = String(todoVersion);
-    const textLabel = document.createElement("label"); textLabel.className = "todo-text-label"; const title = document.createElement("span"); title.textContent = "作業項目";
-    const text = document.createElement("textarea") as HTMLTextAreaElement; text.dataset.todoText = "true"; text.rows = 2; text.maxLength = 1000; text.setAttribute("aria-label", "作業項目"); text.value = item.text; textLabel.append(title, text);
+    const text = document.createElement("textarea") as HTMLTextAreaElement; text.dataset.todoText = "true"; text.rows = 2; text.maxLength = 1000; text.setAttribute("aria-label", "作業項目"); text.value = item.text;
     const statusLabel = document.createElement("label"); statusLabel.className = "todo-status"; const statusTitle = document.createElement("span"); statusTitle.textContent = "状態"; const select = document.createElement("select") as HTMLSelectElement; select.dataset.todoStatus = "true"; select.setAttribute("aria-label", "状態");
     for (const [value, label] of [["not_started", "未着手"], ["in_progress", "進行中"], ["completed", "完了"]]) { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); } select.value = item.status; statusLabel.append(statusTitle, select);
     const controls = document.createElement("div"); controls.className = "todo-controls";
@@ -470,7 +469,7 @@ function clientBootstrap(): void {
     const readdConfirm = document.createElement("div"); readdConfirm.dataset.todoReaddConfirm = "true"; readdConfirm.hidden = true;
     const confirmText = document.createElement("p"); confirmText.textContent = "追加欄の入力を置き換えますか？"; readdConfirm.append(confirmText, button("replace-add-draft", "追加欄を置き換える"), button("keep-add-draft", "追加欄を保つ"));
     const deletedActions = document.createElement("div"); deletedActions.dataset.todoDeletedActions = "true"; deletedActions.hidden = true; deletedActions.append(button("discard-deleted", "入力を捨てる"), button("readd-deleted", "新しい項目として編集"));
-    row.append(textLabel, controls, conflict, deletedNotice, deletedActions, readdConfirm);
+    row.append(text, controls, conflict, deletedNotice, deletedActions, readdConfirm);
     rowStates.set(row, { baseVersion: todoVersion, baseText: item.text, baseStatus: item.status, textGeneration: 0, savedTextGeneration: 0, statusGeneration: 0, savedStatusGeneration: 0, deletedDraft: false });
     return row;
   };

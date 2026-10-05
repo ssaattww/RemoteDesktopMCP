@@ -46,7 +46,8 @@ class FakeElement {
   name = "";
   type = "";
   required = false;
-  setAttribute(_name: string, _value: string) {}
+  ariaLabel = "";
+  setAttribute(name: string, value: string) { if (name === "aria-label") this.ariaLabel = value; }
   maxLength = 0;
   rows = 0;
   scrollHeight = 80;
@@ -370,6 +371,8 @@ test("adding and deleting a Todo use versioned JSON updates and reconcile the vi
   assert.equal(requests[0]?.body.changes[0]?.op, "add");
   const added = fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").find((row) => row.dataset.todoId === "todo-2");
   assert.ok(added);
+  assert.equal(added.children[0]?.tagName, "textarea", "the dynamic row must omit the visible item label wrapper");
+  assert.equal(added.querySelector<FakeElement>("[data-todo-text]")?.ariaLabel, "作業項目", "the textarea keeps its accessible name");
   const addedControls = added.children.find((child) => child.className === "todo-controls");
   assert.equal(addedControls?.children[0]?.className, "todo-status");
   assert.equal(addedControls?.children[0]?.children[0]?.tagName, "span");

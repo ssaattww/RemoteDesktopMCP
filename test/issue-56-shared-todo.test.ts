@@ -797,7 +797,8 @@ test("session detail renders the Todo panel before session metadata", async () =
     assert.ok(html.includes('id="session-todo"'));
     assert.ok(html.indexOf('id="session-todo"') < html.indexOf("セッションの内容"));
     assert.ok(html.includes('<textarea rows="2" data-todo-text="true" maxlength="1000"'));
-    assert.ok(html.includes('class="todo-text-label"'));
+    assert.ok(html.includes('aria-label="作業項目"'));
+    assert.doesNotMatch(html, /<label class="todo-text-label">|<span>作業項目<\/span>/, "item text must not have a repeated visible title");
     assert.ok(html.includes('class="todo-controls"'));
     assert.ok(html.includes('class="todo-enforcement"'));
     assert.ok(html.includes('class="todo-enforcement-toggle"'));

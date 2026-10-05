@@ -68,6 +68,9 @@ test("Issue 70 preview writes a product-rendered, offline HTML file with represe
     assert.match(html, /todo-preview-completed/);
     assert.match(html, /todo-preview-active/);
     assert.match(html, /todo-enforcement-toggle/);
+    const productMarkup = html.slice(0, html.search(/<script\b/i));
+    assert.match(productMarkup, /<textarea rows="2" data-todo-text="true" maxlength="1000" aria-label="作業項目"/);
+    assert.doesNotMatch(productMarkup, /<label class="todo-text-label">|<span>作業項目<\/span>/, "the offline fixture must omit repeated visible item labels");
     assert.match(html, /<details class="todo-add" data-todo-add-details/);
     assert.match(html, /offline-preview-token/);
     assert.match(html, /Offline preview blocked an unmocked request/);
