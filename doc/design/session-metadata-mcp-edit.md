@@ -31,7 +31,7 @@ MCP用の薄い変換層から同じ共有処理を呼び出す。
 - `expectedVersion`を現在の`version`と比較し、古い更新を拒否する。
 - 作業ディレクトリを絶対パスとして再検証し、`realpath`、ディレクトリ実体、実行可能性を確認する。
 - 用途は前後空白を除き、空文字を拒否し、200文字以内に制限する。
-- URLと題名は`session-links.ts`の共通処理を使い、既存の形式検査、取得世代、サーバーサイドリクエストフォージェリ対策を維持する。
+- URLと題名は`session-links.ts`の共通処理を使い、既存の形式検査、取得世代、SSRF対策を維持する。
 - 変更を`processLock`と`executionStateLock`の既存順序で確定する。
 - 実変更時だけ`version`を一度増やし、`touched`と有効期限を更新する。
 - `session.metadata.updated`には値を記録せず、変更項目名と版だけを記録する。

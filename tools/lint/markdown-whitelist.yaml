@@ -303,8 +303,8 @@ entries:
     description: 静的な規約や構文の検査を表す一般的な開発用語。
   - term: Todo
     description: 作業項目や作業一覧を表す一般的な開発用語。
-  - term: サーバーサイドリクエストフォージェリ
-    description: 外部URL取得処理で非公開宛先への接続を防ぐ安全設計を表す用語。
+  - term: SSRF
+    description: 外部URL取得処理で非公開宛先への接続を防ぐ安全設計で一般的に使われる略称。
   - term: ラッパー
     description: 認証、監査、入出力変換などの共通処理で既存処理を包む実装構造を表す用語。
   - term: スネークケース
@@ -316,6 +316,6 @@ entries:
   - term: ロールバック
     description: 変更失敗時に直前状態へ戻す処理を表す用語。
   - term: CI
-    description: Continuous Integration の略称で、自動検証自体を設計対象とする文書でも使用する用語。
+    description: 継続的な自動検証を表す一般的な略称。
   - term: リンク
     description: セッションが保持する外部URL参照を表す一般的な技術用語。
