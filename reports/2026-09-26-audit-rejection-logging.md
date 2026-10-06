@@ -6,7 +6,7 @@
 - Branch: `fix/audit-rejection-context`
 - Base: `865f6cd65763f36e0b48f39e1f3d402e696c8308` (`origin/main`)
 - Technical implementation HEAD: `ef39dfbd67eb2e99a812a363b19cc2857e265c38`
-- Execution environment: connected Windows PC `FA780` through RemoteDesktopMCP
+- Execution environment: connected Windows test environment through RemoteDesktopMCP; machine-specific identifiers are redacted.
 - Report persistence: repository file; report commit is administrative and is not part of the technical implementation HEAD above.
 
 ## Purpose and scope
@@ -70,7 +70,7 @@ Local diagnostic files are under `reference/validation/audit-logging/` and are i
 
 - `.github/workflows/*`
 - `tasks/tasks-status.md`
-- live `C:\Users\donabe\RemoteDesktopMCP-data\audit.jsonl`
+- live audit log in the connected Windows environment (user-specific path redacted)
 - running RemoteDesktopMCP service/processes
 
 ## Remaining risk and next action
