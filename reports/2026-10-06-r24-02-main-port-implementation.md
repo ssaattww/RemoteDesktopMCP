@@ -31,7 +31,7 @@ The fixture preparation section of `doc/design/ci-test-runtime-reduction-design.
 
 - Current-main focused validation: 10/10 pass, 0 fail, 0 skip on `7c4b8570215144c97bbd507c3a476443f605c189`; see `reports/2026-10-06-r24-02-main-port-targeted-validation.md`.
 - Full local equivalence gate: pending.
-- Normal review on current-main candidate: pending.
+- Normal review on current-main candidate `f59d59793472597bdaaf58f399937c88999fafa4`: `pass_with_held`, no findings; Windows junction and exact-head CI remain held. See `reports/2026-10-06-r24-02-main-port-normal-review.md`.
 - Independent final review: pending.
 - Exact-head required PR CI: pending after publication.
 
