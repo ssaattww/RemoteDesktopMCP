@@ -182,9 +182,19 @@ test("failed operation audit records safe exception name and code", async () => 
     assert.equal(event.errorCode, "ENOENT");
     assert.equal(JSON.stringify({ errorName: event.errorName, errorCode: event.errorCode }).includes("missing-diagnostic-file"), false, "exception details must not enter new diagnostic fields");
 
-    const secret = "untrusted-exception-sentinel";
+    const busySecret = "private-busy-path-sentinel";
     const service = f.service as unknown as { safePath: (...args: unknown[]) => Promise<string> };
     const safePath = service.safePath;
+    service.safePath = async () => { throw Object.assign(new Error(`EBUSY ${busySecret}`), { code: "EBUSY" }); };
+    try { await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "busy-diagnostic-file.txt" })); }
+    finally { service.safePath = safePath; }
+    const busy = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_read" && candidate.status === "failed" && candidate.target === "busy-diagnostic-file.txt");
+    assert.ok(busy, "missing audit for EBUSY operation");
+    assert.equal(busy.errorCode, "EBUSY");
+    assert.equal(JSON.stringify({ errorName: busy.errorName, errorCode: busy.errorCode }).includes(busySecret), false);
+
+    const secret = "untrusted-exception-sentinel";
     service.safePath = async () => {
       const error = Object.assign(new Error(`Private detail ${secret}`), { name: secret, code: secret });
       throw error;
@@ -211,6 +221,7 @@ test("failed operation audit records safe exception name and code", async () => 
       candidate.tool === "file_read" && candidate.status === "failed" && candidate.target === "known-numeric-code.txt");
     assert.ok(knownNumeric, "missing audit for known numeric code");
     assert.equal(knownNumeric.errorCode, -32_001);
+
     service.safePath = safePath;
 
     await assert.rejects(api.callRaw("file_read", { comment: "Verify rejection diagnostics", session_id: session, root_id: "files", relative_path: "invalid-offset.txt", offset: -1, length: 1 }), /Input validation error/);

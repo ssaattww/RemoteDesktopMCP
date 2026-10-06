@@ -70,7 +70,7 @@ const overlaps = (a: string, b: string) => inside(a, b) || inside(b, a);
 const result = (body: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(body, null, 2) }] });
 const failure = (message: string) => ({ isError: true as const, content: [{ type: "text" as const, text: message }] });
 const stoppedFailure = (state: UserExecutionState) => ({ isError: true as const, content: [{ type: "text" as const, text: JSON.stringify({ error: { code: "USER_STOP_REQUESTED", message: "The user has explicitly requested that remote execution stop.", required_action: "Do not retry, continue the task, or create another execution path until the user explicitly resumes remote execution.", stop_id: state.stopId, stop_generation: state.stopGeneration } }) }] });
-const AUDIT_ERROR_CODES = new Set(["EACCES", "EEXIST", "EISDIR", "EINVAL", "EIO", "EMFILE", "ENAMETOOLONG", "ENFILE", "ENOENT", "ENOMEM", "ENOSPC", "ENOTDIR", "ENOTEMPTY", "ENOTSUP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "ABORT_ERR", "ERR_INVALID_ARG_TYPE", "ERR_OUT_OF_RANGE"]);
+const AUDIT_ERROR_CODES = new Set(["EACCES", "EBUSY", "EEXIST", "EISDIR", "EINVAL", "EIO", "EMFILE", "ENAMETOOLONG", "ENFILE", "ENOENT", "ENOMEM", "ENOSPC", "ENOTDIR", "ENOTEMPTY", "ENOTSUP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "ABORT_ERR", "ERR_INVALID_ARG_TYPE", "ERR_OUT_OF_RANGE"]);
 const AUDIT_NUMERIC_ERROR_CODES = new Set([-32_000, -32_001, -32_042, -32_700, -32_600, -32_601, -32_602, -32_603]);
 const auditErrorName = (error: unknown): string => error instanceof AggregateError ? "AggregateError"
   : error instanceof TypeError ? "TypeError"
