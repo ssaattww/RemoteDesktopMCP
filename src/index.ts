@@ -72,21 +72,27 @@ const failure = (message: string) => ({ isError: true as const, content: [{ type
 const stoppedFailure = (state: UserExecutionState) => ({ isError: true as const, content: [{ type: "text" as const, text: JSON.stringify({ error: { code: "USER_STOP_REQUESTED", message: "The user has explicitly requested that remote execution stop.", required_action: "Do not retry, continue the task, or create another execution path until the user explicitly resumes remote execution.", stop_id: state.stopId, stop_generation: state.stopGeneration } }) }] });
 const AUDIT_ERROR_CODES = new Set(["EACCES", "EBUSY", "EEXIST", "EISDIR", "EINVAL", "EIO", "EMFILE", "ENAMETOOLONG", "ENFILE", "ENOENT", "ENOMEM", "ENOSPC", "ENOTDIR", "ENOTEMPTY", "ENOTSUP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "ABORT_ERR", "ERR_INVALID_ARG_TYPE", "ERR_OUT_OF_RANGE"]);
 const AUDIT_NUMERIC_ERROR_CODES = new Set([-32_000, -32_001, -32_042, -32_700, -32_600, -32_601, -32_602, -32_603]);
-const auditErrorName = (error: unknown): string => error instanceof AggregateError ? "AggregateError"
-  : error instanceof TypeError ? "TypeError"
-  : error instanceof RangeError ? "RangeError"
-  : error instanceof ReferenceError ? "ReferenceError"
-  : error instanceof SyntaxError ? "SyntaxError"
-  : error instanceof URIError ? "URIError"
-  : error instanceof EvalError ? "EvalError"
-  : error instanceof Error ? "Error"
-  : typeof error;
+const auditErrorName = (error: unknown): string => {
+  try {
+    return error instanceof AggregateError ? "AggregateError"
+      : error instanceof TypeError ? "TypeError"
+      : error instanceof RangeError ? "RangeError"
+      : error instanceof ReferenceError ? "ReferenceError"
+      : error instanceof SyntaxError ? "SyntaxError"
+      : error instanceof URIError ? "URIError"
+      : error instanceof EvalError ? "EvalError"
+      : error instanceof Error ? "Error"
+      : typeof error;
+  } catch { return "UnknownError"; }
+};
 const auditErrorCode = (error: unknown): string | number | undefined => {
-  if (typeof error !== "object" || error === null) return undefined;
-  const descriptor = Object.getOwnPropertyDescriptor(error, "code");
-  const code = descriptor && "value" in descriptor ? descriptor.value : undefined;
-  if (typeof code === "string") return AUDIT_ERROR_CODES.has(code) ? code : undefined;
-  return typeof code === "number" && AUDIT_NUMERIC_ERROR_CODES.has(code) ? code : undefined;
+  try {
+    if (typeof error !== "object" || error === null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+    const code = descriptor && "value" in descriptor ? descriptor.value : undefined;
+    if (typeof code === "string") return AUDIT_ERROR_CODES.has(code) ? code : undefined;
+    return typeof code === "number" && AUDIT_NUMERIC_ERROR_CODES.has(code) ? code : undefined;
+  } catch { return undefined; }
 };
 const equal = (left: string, right: string) => { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); };
 

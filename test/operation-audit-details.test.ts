@@ -233,6 +233,81 @@ test("failed operation audit records safe exception name and code", async () => 
   } finally { await api.close(); await f.cleanup(); }
 });
 
+test("unknown thrown values and code getters cannot leak through audit diagnostics", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  const service = f.service as unknown as { safePath: (...args: unknown[]) => Promise<string> };
+  const safePath = service.safePath;
+  try {
+    const session = await openSession(api);
+    const primitiveSecret = "primitive-throw-secret";
+    service.safePath = async () => { throw primitiveSecret; };
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "thrown-primitive.txt" }));
+    const primitive = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_read" && candidate.status === "failed" && candidate.target === "thrown-primitive.txt");
+    assert.ok(primitive, "missing audit for an unknown primitive throw value");
+    assert.equal(primitive.errorName, "string");
+    assert.equal(JSON.stringify(primitive).includes(primitiveSecret), false);
+
+    const getterSecret = "throwing-code-getter-secret";
+    let getterCalled = false;
+    const getterError = new Error(`Private ${getterSecret}`);
+    Object.defineProperty(getterError, "code", { get() { getterCalled = true; throw new Error(getterSecret); } });
+    service.safePath = async () => { throw getterError; };
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "throwing-code-getter.txt" }));
+    const getter = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_read" && candidate.status === "failed" && candidate.target === "throwing-code-getter.txt");
+    assert.ok(getter, "missing audit for a throwing code getter");
+    assert.equal(getterCalled, false, "diagnostics must inspect descriptors without invoking getters");
+    assert.equal("errorCode" in getter, false);
+    assert.equal(JSON.stringify(getter).includes(getterSecret), false);
+  } finally { service.safePath = safePath; await api.close(); await f.cleanup(); }
+});
+
+test("terminal audit survives a throw from a code descriptor proxy", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  const service = f.service as unknown as { safePath: (...args: unknown[]) => Promise<string> };
+  const safePath = service.safePath;
+  try {
+    const session = await openSession(api);
+    const secret = "proxy-descriptor-trap-secret";
+    const thrown = new Proxy(Object.create(null) as object, {
+      getOwnPropertyDescriptor() { throw new Error(secret); },
+    });
+    service.safePath = async () => { throw thrown; };
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "throwing-code-proxy.txt" }));
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_read" && candidate.status === "failed" && candidate.target === "throwing-code-proxy.txt");
+    assert.ok(event, "missing terminal audit when a code descriptor trap throws");
+    assert.equal("errorCode" in event, false);
+    assert.equal(JSON.stringify(event).includes(secret), false);
+  } finally { service.safePath = safePath; await api.close(); await f.cleanup(); }
+});
+
+test("terminal audit survives a throw from an error-name prototype proxy", async () => {
+  const f = await fixture(); const api = await mcp(f.service);
+  const service = f.service as unknown as { safePath: (...args: unknown[]) => Promise<string> };
+  const safePath = service.safePath;
+  try {
+    const session = await openSession(api);
+    const secret = "proxy-prototype-trap-secret";
+    let checks = 0;
+    const thrown = new Proxy(Object.create(null) as object, {
+      getPrototypeOf() {
+        checks += 1;
+        if (checks <= 2) return null;
+        throw new Error(secret);
+      },
+    });
+    service.safePath = async () => { throw thrown; };
+    await assert.rejects(api.call("file_read", { session_id: session, root_id: "files", relative_path: "throwing-name-proxy.txt" }));
+    const event = f.service.auditEntriesForConsole().findLast((candidate) =>
+      candidate.tool === "file_read" && candidate.status === "failed" && candidate.target === "throwing-name-proxy.txt");
+    assert.ok(event, "missing terminal audit when an error-name prototype trap throws");
+    assert.equal(event.errorName, "UnknownError");
+    assert.equal(JSON.stringify(event).includes(secret), false);
+  } finally { service.safePath = safePath; await api.close(); await f.cleanup(); }
+});
+
 
 
 
