@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -94,7 +94,7 @@ export async function prepareWindowsJobLauncher(dataDir) {
     await removeRegularCacheFile(manifestPath);
     const compiler = findCSharpCompiler();
     if (!compiler) throw new Error("The .NET Framework C# compiler is unavailable; owned process launch is disabled.");
-    const temporaryRunnerPath = `${runnerPath}.${randomUUID()}.tmp.exe`;
+    const temporaryRunnerPath = path.join(cacheDir, `runner-${randomBytes(16).toString("hex")}.exe`);
     try {
       execFileSync(compiler, ["/nologo", "/target:exe", `/out:${temporaryRunnerPath}`, sourcePath], {
         windowsHide: true,
@@ -120,7 +120,7 @@ export async function prepareWindowsJobLauncher(dataDir) {
     }
     const runnerInfo = await lstat(runnerPath);
     if (runnerInfo.isSymbolicLink() || !runnerInfo.isFile()) throw new Error("The Windows Job Object runner cache entry is unsafe.");
-    const manifestTempPath = `${manifestPath}.${randomUUID()}.tmp`;
+    const manifestTempPath = path.join(cacheDir, `manifest-${randomBytes(16).toString("hex")}.tmp`);
     const manifest = JSON.stringify({ sourceSha256: hash, runnerSha256: sha256(await readFile(runnerPath)) });
     try {
       await writeFile(manifestTempPath, manifest, { flag: "wx", mode: 0o600 });

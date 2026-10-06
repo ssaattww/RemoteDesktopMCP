@@ -116,6 +116,20 @@ test("the launcher does not wrap calls outside the owner context", { skip: !onWi
   assert.equal(result.stdout, "direct");
 });
 
+test("the launcher compiles its private runner when the data path approaches the Windows compiler path limit", { skip: !onWindows }, async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "rdmcp-job-long-"));
+  const dataDir = path.join(base, "a".repeat(44), "b".repeat(44));
+  try {
+    await mkdir(dataDir, { recursive: true });
+    assert.ok(path.join(dataDir, ".wj", `${"f".repeat(64)}.exe`).length < 260);
+    await prepareWindowsJobLauncher(dataDir);
+    const { runnerPath, manifestPath } = await getCachePaths(dataDir);
+    await assertRunnerManifest(runnerPath, manifestPath);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("a corrupted cached runner is recompiled and receives a matching digest manifest", { skip: !onWindows }, async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "rdmcp-job-corrupt-"));
   try {
