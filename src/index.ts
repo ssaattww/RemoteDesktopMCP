@@ -1,6 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { access, appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import express, { type Express, type Request, type Response } from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,21 +15,37 @@ import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
 import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
-import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, protectPrivateFile } from "./private-storage.js";
+import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateFile } from "./private-storage.js";
+
+import { mountAdmin } from "./admin.js";
+import { mountUserConsole } from "./user-console.js";
+import { applySessionLinkFetchResult, captureSessionLinkFetchLease, createSessionLink, fetchSessionLinkTitle, updateSessionLink, type SessionLinkOwnerState, type SessionLinkTransport } from "./session-links.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
 type OAuthClient = { client_id: string; client_name: string; redirect_uris: string[] };
 type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string; expires: number; scope: "mcp" };
-type Session = { id: string; user: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
+type TodoItem = { id: string; text: string; status: "not_started" | "in_progress" | "completed"; order: number; createdBy: string; createdAt: string; updatedAt: string };
+type TodoState = { items: TodoItem[]; version: number; lastTodoUpdatedMono: number | null; lastUpdatedAt: string | null; enabled: boolean; enabledAtMono: number; lastGateMono?: number; lastGateWall?: number; clockAnomaly?: boolean };
+type Session = { id: string; user: string; version: number; workingDirectory: string; purpose: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed"; todo: TodoState } & SessionLinkOwnerState;
 // Node's default Stats numbers lose NTFS file-id precision above 2^53.  Keep
 // identity values as decimal strings derived from bigint stats so unrelated
 // files cannot collide with a protected config pin or an owned upload.
 type FileIdentity = { dev: string; ino: string };
 type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type ProtectedConfigIdentity = FileIdentity & { pin: string };
-type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash> };
-type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
+type Transfer = { id: string; direction: "download" | "upload"; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; committedPreview?: OperationDetailEntry };
+type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; workingDirectorySnapshot: string; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; lastTerminationAttemptMono?: number; observationFailures?: number; nextObservationAt?: number };
+export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
+type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; sessionAccessAt?: string; todoStale?: boolean };
+type OperationDetailEntry = { label: string; value: string; format: "text" | "diff"; truncated?: boolean };
+type OperationDetail = { version: 1; summary: string; entries: OperationDetailEntry[] };
+export type AuditLogItem = { id: string; cursor: string; event: Record<string, unknown> & { event: string; at: string } };
+type AuditLogEntry = { sequence: number; event: Record<string, unknown> & { event: string; at: string } };
+
+class UserStopRequested extends Error {
+  constructor(readonly state: UserExecutionState) { super("USER_STOP_REQUESTED"); }
+}
 
 const SESSION_TTL = 24 * 60 * 60_000;
 const TRANSFER_TTL = 30 * 60_000;
@@ -33,25 +53,41 @@ const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_TRANSFERS = 20;
 const MAX_TERMINAL_TRANSFERS = 100;
 const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
-const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions"];
+const MAX_AUDIT_EVENTS = 20_000;
+const TODO_GRACE_MS = 300_000;
+const todoChangeSchema = z.discriminatedUnion("op", [z.object({ op: z.literal("add"), text: z.string().trim().min(1).max(1000), status: z.enum(["not_started", "in_progress", "completed"]).optional() }), z.object({ op: z.literal("edit"), id: z.string().min(1), text: z.string().trim().min(1).max(1000) }), z.object({ op: z.literal("status"), id: z.string().min(1), status: z.enum(["not_started", "in_progress", "completed"]) }), z.object({ op: z.literal("delete"), id: z.string().min(1) }), z.object({ op: z.literal("move"), id: z.string().min(1), order: z.number().int().nonnegative() })]);
+const todoChangesSchema = z.array(todoChangeSchema).min(1).max(200);
+const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
-export type ProcessAdapter = { start(command: string, timeoutMs: number): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter };
+export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; sessionLinkTransport?: SessionLinkTransport };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const inside = (parent: string, candidate: string) => { const relative = path.relative(parent, candidate); return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)); };
 const overlaps = (a: string, b: string) => inside(a, b) || inside(b, a);
 const result = (body: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(body, null, 2) }] });
 const failure = (message: string) => ({ isError: true as const, content: [{ type: "text" as const, text: message }] });
-const auditDiagnosticDetail = (value: string) => value
-  .replace(/(?:[A-Za-z]:)?(?:[\\/][^\s"']+)+/g, "[path]")
-  .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-  .replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:\s*|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
-  .replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]")
-  .replace(/[\r\n\t]+/g, " ")
-  .slice(0, 240);
-const auditErrorCode = (error: unknown): string | number | undefined => typeof error === "object" && error !== null && "code" in error && (typeof (error as { code?: unknown }).code === "string" || typeof (error as { code?: unknown }).code === "number") ? (error as { code: string | number }).code : undefined;
+const stoppedFailure = (state: UserExecutionState) => ({ isError: true as const, content: [{ type: "text" as const, text: JSON.stringify({ error: { code: "USER_STOP_REQUESTED", message: "The user has explicitly requested that remote execution stop.", required_action: "Do not retry, continue the task, or create another execution path until the user explicitly resumes remote execution.", stop_id: state.stopId, stop_generation: state.stopGeneration } }) }] });
+const AUDIT_ERROR_CODES = new Set(["EACCES", "EEXIST", "EISDIR", "EINVAL", "EIO", "EMFILE", "ENAMETOOLONG", "ENFILE", "ENOENT", "ENOMEM", "ENOSPC", "ENOTDIR", "ENOTEMPTY", "ENOTSUP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "ABORT_ERR", "ERR_INVALID_ARG_TYPE", "ERR_OUT_OF_RANGE"]);
+const AUDIT_NUMERIC_ERROR_CODES = new Set([-32_000, -32_001, -32_042, -32_700, -32_600, -32_601, -32_602, -32_603]);
+const auditErrorName = (error: unknown): string => error instanceof AggregateError ? "AggregateError"
+  : error instanceof TypeError ? "TypeError"
+  : error instanceof RangeError ? "RangeError"
+  : error instanceof ReferenceError ? "ReferenceError"
+  : error instanceof SyntaxError ? "SyntaxError"
+  : error instanceof URIError ? "URIError"
+  : error instanceof EvalError ? "EvalError"
+  : error instanceof Error ? "Error"
+  : typeof error;
+const auditErrorCode = (error: unknown): string | number | undefined => {
+  if (typeof error !== "object" || error === null) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+  const code = descriptor && "value" in descriptor ? descriptor.value : undefined;
+  if (typeof code === "string") return AUDIT_ERROR_CODES.has(code) ? code : undefined;
+  return typeof code === "number" && AUDIT_NUMERIC_ERROR_CODES.has(code) ? code : undefined;
+};
 const equal = (left: string, right: string) => { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); };
 
 export function configFromEnv(env = process.env): RuntimeConfig {
@@ -69,7 +105,7 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   if (authMode === "password" && (users.length !== 1 || !users[0]?.email || !users[0]?.passwordHash)) throw new Error("AUTHORIZED_USERS_JSON must contain exactly one complete local-development user.");
   if (!roots.length || roots.some((root) => !root.id || !root.path) || new Set(roots.map((root) => root.id)).size !== roots.length) throw new Error("FILE_ROOTS_JSON must contain unique complete roots.");
   if (env.REMOTE_NODES_JSON || env.NODE_ROLE && env.NODE_ROLE !== "local") throw new Error("This MVP supports one local node only; remote roles are rejected.");
-  const chunkBytes = Number(env.TRANSFER_CHUNK_BYTES ?? 128 * 1024);
+  const chunkBytes = Number(env.TRANSFER_CHUNK_BYTES ?? 512 * 1024);
   if (!Number.isInteger(chunkBytes) || chunkBytes < 1024 || chunkBytes > 512 * 1024) throw new Error("TRANSFER_CHUNK_BYTES must be between 1024 and 524288.");
   const bundled = fileURLToPath(new URL("../node_modules/@wonderwhy-er/desktop-commander/dist/index.js", import.meta.url));
   const allowedRedirectOrigins = new Set((env.ALLOWED_REDIRECT_ORIGINS ?? "https://chatgpt.com").split(",").map((value) => value.trim()).filter(Boolean));
@@ -78,7 +114,11 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   const googleClientSecret = env.GOOGLE_CLIENT_SECRET;
   const googleRedirectUri = env.GOOGLE_REDIRECT_URI ?? `${baseUrl}/google/callback`;
   if (authMode === "google" && (!googleClientId || !googleClientSecret || googleRedirectUri !== `${baseUrl}/google/callback`)) throw new Error("Google mode requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI=${BASE_URL}/google/callback.");
-  return { baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: env.DESKTOP_COMMANDER_COMMAND ?? process.execPath, dcArgs: env.DESKTOP_COMMANDER_COMMAND ? (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean) : [bundled, "--no-onboarding"], allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
+  // Owner-scoped termination depends on the fixed Desktop Commander module
+  // layout. Arbitrary launchers cannot be verified to install that bridge.
+  const customArgs = (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean);
+  if (env.DESKTOP_COMMANDER_COMMAND || customArgs.length) throw new Error("Only the managed Desktop Commander launcher is supported because owner-scoped emergency stop requires the pinned backend.");
+  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: process.execPath, dcArgs: [bundled, "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
 }
 
 class Mutex {
@@ -92,7 +132,7 @@ class DesktopCommander {
   private generation?: string;
   private tools = new Set<string>();
   private allowedDirectories: string[] = [];
-  constructor(private readonly cfg: RuntimeConfig, private readonly audit: (name: string, data: Record<string, unknown>) => Promise<void>, private readonly configPrepared: () => Promise<void>) {}
+  constructor(private readonly cfg: RuntimeConfig, private readonly audit: (name: string, data: Record<string, unknown>) => Promise<void>, private readonly configPrepared: () => Promise<void>, private readonly requireCurrentOperation: () => void) {}
   currentGeneration(): string { if (!this.client || !this.generation) throw new Error("Desktop Commander is unavailable for this operation."); return this.generation; }
   async start(): Promise<void> {
     const home = path.join(this.cfg.dataDir, "desktop-commander-home");
@@ -103,11 +143,16 @@ class DesktopCommander {
     this.allowedDirectories = await Promise.all(this.cfg.roots.map((root) => realpath(root.path)));
     await writeFile(config, JSON.stringify({ allowedDirectories: this.allowedDirectories, telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }), { mode: 0o600 });
     await this.configPrepared();
-    const drive = path.parse(home).root;
     const blocked = new Set(["TOKEN_SECRET", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "REMOTE_AUTH_MODE", "AUTHORIZED_USERS_JSON"]);
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => !blocked.has(key) && value !== undefined)) as Record<string, string>;
-    Object.assign(env, { HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"), LOCALAPPDATA: path.join(home, "AppData", "Local"), HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) });
-    this.transport = new StdioClientTransport({ command: this.cfg.dcCommand, args: this.cfg.dcArgs, env, stderr: "pipe", cwd: process.cwd() });
+    let args = this.cfg.dcArgs;
+    if (this.cfg.dcManagedConfig) {
+      const entry = args[0];
+      if (!entry) throw new Error("Managed Desktop Commander requires an entry module.");
+      const bootstrap = fileURLToPath(new URL("../scripts/desktop-commander-bootstrap.mjs", import.meta.url));
+      args = [bootstrap, entry, config, ...args.slice(1)];
+    }
+    this.transport = new StdioClientTransport({ command: this.cfg.dcCommand, args, env, stderr: "pipe", cwd: process.cwd() });
     // Desktop Commander writes diagnostics for every get_config call. Consume
     // the private pipe without retaining or exposing its contents; otherwise
     // stderr backpressure can block the child and its MCP stdout responses.
@@ -140,9 +185,15 @@ class DesktopCommander {
     if (timeout) clearTimeout(timeout);
     if (!closed) await this.audit("desktop_commander.shutdown_timeout", {});
   }
-  async call(name: string, args: Record<string, unknown>, timeout?: number): Promise<string> {
+  async call(name: string, args: Record<string, unknown>, timeout?: number, options: { skipRootPreflight?: boolean; allowStoppedOperation?: boolean } = {}): Promise<string> {
     if (!this.client || !this.tools.has(name)) throw new Error("Desktop Commander is unavailable for this operation.");
-    if (name !== "get_config") await this.verifyAllowedRoots();
+    // Emergency-stop control is deliberately independent from ordinary tool
+    // preflight: a wedged backend must not make the owner latch wait on an
+    // unbounded get_config request.
+    if (!options.skipRootPreflight && name !== "get_config" && name !== "_rdmcp_stop_owner" && name !== "_rdmcp_resume_owner") await this.verifyAllowedRoots();
+    // Root verification is asynchronous. Recheck the operation generation
+    // after it and immediately before any ordinary backend request.
+    if (!options.allowStoppedOperation) this.requireCurrentOperation();
     const value = await this.client.callTool({ name, arguments: args }, undefined, timeout ? { timeout } : undefined);
     if ("isError" in value && value.isError) {
       const content = value.content as Array<{ type: string; text?: string }>;
@@ -179,6 +230,7 @@ export class RemoteDesktopService {
   readonly authorizations = new Map<string, Authorization>();
   readonly codes = new Map<string, Authorization>();
   private readonly processLock = new Mutex();
+  private readonly todoLock = new Mutex();
   private readonly transferLock = new Mutex();
   private readonly dc: DesktopCommander;
   private readonly linkNoReplace: (existingPath: string, newPath: string) => Promise<void>;
@@ -186,13 +238,44 @@ export class RemoteDesktopService {
   private readonly terminalTransfers: string[] = [];
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
+  private readonly processWatcherRuns = new Set<Promise<void>>();
+  private processWatcherFailure?: unknown;
+  private processWatcherFailed = false;
+  private closing = false;
+  private closePromise?: Promise<void>;
   private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
   private readonly configIdentityLock = new Mutex();
+  private readonly executionStates = new Map<string, UserExecutionState>();
+  private readonly executionStateLock = new Mutex();
+  private readonly executionResumes = new Set<string>();
+  private readonly operationContext = new AsyncLocalStorage<ExecutionOperation>();
+  private auditGeneration = makeId();
+  private readonly auditEntries: AuditLogEntry[] = [];
+  private readonly auditListeners = new Set<(event: Record<string, unknown> & { event: string; at: string }) => void>();
+  private readonly sessionLinkListeners = new Set<(user: string, sessionId: string, linkRevision: number) => void>();
+  private readonly auditConnectionClosers = new Set<() => void>();
+  private readonly auditProcessOwners = new Map<string, { user: string; sessionId?: string }>();
+  private readonly auditLock = new Mutex();
+  private auditSequence = 0;
+  private auditFileIdentity?: FileIdentity;
+  private auditFileBytes = 0n;
+  private executionStateUnavailable = false;
   readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
-  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
+  private clearSessionLink(session: Session): void { session.externalUrl = undefined; session.externalTitle = undefined; session.externalTitleSource = undefined; session.externalTitleStatus = "not_requested"; }
+  private startSessionLinkTitleFetch(session: Session): void {
+    const lease = captureSessionLinkFetchLease(session);
+    if (!lease) return;
+    void fetchSessionLinkTitle(lease.url, { transport: this.cfg.sessionLinkTransport }).then(
+      (title) => this.executionStateLock.run(async () => { const current = this.sessions.get(lease.id); if (current && this.userOwnsActiveSession(lease.user, lease.id) && applySessionLinkFetchResult(current, lease, title)) this.notifySessionLinkUpdated(lease.user, lease.id, lease.revision); }),
+      () => this.executionStateLock.run(async () => { const current = this.sessions.get(lease.id); if (current && this.userOwnsActiveSession(lease.user, lease.id) && applySessionLinkFetchResult(current, lease)) this.notifySessionLinkUpdated(lease.user, lease.id, lease.revision); }),
+    );
+  }
+  constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
   async initialize(): Promise<void> {
-    await ensurePrivateDirectory(this.cfg.dataDir);
+    await ensureSafeDataDirectory(this.cfg.dataDir);
+    await this.loadAuditIndex();
+    await this.loadExecutionStates();
     const protectedParent = path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander");
     const actualData = await realpath(this.cfg.dataDir);
     for (const root of this.cfg.roots) {
@@ -213,8 +296,232 @@ export class RemoteDesktopService {
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
     this.expiryTimer.unref();
   }
-  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
-  async audit(event: string, fields: Record<string, unknown>): Promise<void> { const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); } await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), event, ...fields })}\n`); }
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.closePromise = this.finishClose();
+    return this.closePromise;
+  }
+  private async finishClose(): Promise<void> {
+    const failures: unknown[] = [];
+    const attempt = async (work: () => Promise<unknown>) => {
+      try { await work(); } catch (error) { failures.push(error); }
+    };
+    if (this.expiryTimer) clearInterval(this.expiryTimer);
+    for (const watcher of this.processWatchers.values()) clearInterval(watcher);
+    this.processWatchers.clear();
+    await attempt(() => this.processLock.run(async () => undefined));
+    await attempt(async () => { await Promise.all([...this.processWatcherRuns]); });
+    if (this.processWatcherFailed) failures.push(this.processWatcherFailure);
+    for (const close of this.auditConnectionClosers) {
+      try { close(); } catch (error) { failures.push(error); }
+    }
+    this.auditConnectionClosers.clear();
+    this.auditListeners.clear();
+    this.sessionLinkListeners.clear();
+    await attempt(() => this.transferLock.run(async () => {
+      for (const item of this.transfers.values()) {
+        try { await this.cleanup(item); } catch (error) { failures.push(error); }
+      }
+    }));
+    await attempt(() => this.dc.close());
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(failures, "Remote Desktop service close encountered multiple failures.");
+    }
+  }
+  async audit(event: string, fields: Record<string, unknown>): Promise<void> { await this.auditLock.run(async () => { await this.refreshAuditIndexLocked(); const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); await this.refreshAuditIndexLocked(); } const entry = { at: new Date().toISOString(), event, ...fields }; const line = `${JSON.stringify(entry)}\n`; await appendFile(file, line); this.rememberAuditEntry(entry); const stats = await lstat(file, { bigint: true }); const identity = this.identityFromStats(stats); const expectedBytes = this.auditFileBytes + BigInt(Buffer.byteLength(line)); if (this.auditFileIdentity && this.auditFileIdentity.dev === identity.dev && this.auditFileIdentity.ino === identity.ino && stats.size === expectedBytes) this.auditFileBytes = stats.size;
+    else await this.loadAuditIndex(true);
+  }); }
+  private rememberAuditEntry(value: Record<string, unknown>, notify = true): void {
+    if (typeof value.event !== "string" || typeof value.at !== "string") return;
+    const processId = typeof value.processId === "string" ? value.processId : undefined;
+    const known = processId ? this.auditProcessOwners.get(processId) : undefined;
+    const user = typeof value.user === "string" ? value.user : known?.user;
+    const sessionId = typeof value.sessionId === "string" ? value.sessionId : known?.sessionId;
+    const event = { ...value, ...(user ? { user } : {}), ...(sessionId ? { sessionId } : {}) } as Record<string, unknown> & { event: string; at: string };
+    if (processId && typeof event.user === "string") { this.auditProcessOwners.delete(processId); while (this.auditProcessOwners.size >= 2_000) this.auditProcessOwners.delete(this.auditProcessOwners.keys().next().value!); this.auditProcessOwners.set(processId, { user: event.user, ...(typeof event.sessionId === "string" ? { sessionId: event.sessionId } : {}) }); }
+    this.auditEntries.push({ sequence: ++this.auditSequence, event });
+    while (this.auditEntries.length > MAX_AUDIT_EVENTS) this.auditEntries.shift();
+    if (notify) for (const listener of this.auditListeners) listener(event);
+  }
+  private async loadAuditIndex(reset = false): Promise<void> {
+    const file = path.join(this.cfg.dataDir, "audit.jsonl");
+    if (reset) { this.auditGeneration = makeId(); this.auditEntries.length = 0; this.auditProcessOwners.clear(); this.auditSequence = 0; }
+    try { await assertPrivateAuditStorage(this.cfg.dataDir, file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.auditFileIdentity = undefined; this.auditFileBytes = 0n; return; } throw error; }
+    const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+    for await (const line of lines) {
+      try { this.rememberAuditEntry(JSON.parse(line) as Record<string, unknown>, false); }
+      catch { /* Keep valid persisted entries available when one historical line is malformed. */ }
+    }
+    const stats = await lstat(file, { bigint: true }); this.auditFileIdentity = this.identityFromStats(stats); this.auditFileBytes = stats.size;
+  }
+  private async refreshAuditIndexLocked(): Promise<void> {
+    const file = path.join(this.cfg.dataDir, "audit.jsonl");
+    let stats: Awaited<ReturnType<typeof lstat>>;
+    try { stats = await lstat(file, { bigint: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { if (this.auditFileIdentity || this.auditFileBytes !== 0n || this.auditEntries.length) await this.loadAuditIndex(true); return; } throw error; }
+    const identity = this.identityFromStats(stats as Awaited<ReturnType<typeof lstat>> & { dev: bigint; ino: bigint });
+    if (!this.auditFileIdentity || this.auditFileIdentity.dev !== identity.dev || this.auditFileIdentity.ino !== identity.ino || this.auditFileBytes !== (stats as { size: bigint }).size) await this.loadAuditIndex(true);
+  }
+  async refreshAuditIndex(): Promise<void> { await this.auditLock.run(() => this.refreshAuditIndexLocked()); }
+  private auditCursor(user: string, sessionId: string | undefined, sequence: number): string {
+    const encoded = Buffer.from(JSON.stringify({ generation: this.auditGeneration, sequence, user, sessionId: sessionId ?? null })).toString("base64url");
+    return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`;
+  }
+  private parseAuditCursor(cursor: string, user: string, sessionId: string | undefined): number {
+    const [encoded, signature, extra] = cursor.split(".");
+    if (!encoded || !signature || extra || !equal(createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url"), signature)) throw new Error("Invalid log cursor.");
+    let body: { generation?: unknown; sequence?: unknown; user?: unknown; sessionId?: unknown };
+    try { body = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")); } catch { throw new Error("Invalid log cursor."); }
+    if (body.generation !== this.auditGeneration) throw new Error("Log cursor expired.");
+    const sequence = body.sequence;
+    if (body.user !== user || body.sessionId !== (sessionId ?? null) || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0 || sequence > this.auditSequence) throw new Error("Invalid log cursor.");
+    const first = this.auditEntries[0]?.sequence;
+    if (first !== undefined && sequence < first - 1) throw new Error("Log cursor expired.");
+    return sequence;
+  }
+  private ownsAuditEvent(event: AuditLogEntry["event"], user: string, sessionId?: string): boolean {
+    if (event.user !== user) return false;
+    if (sessionId === undefined || event.sessionId === sessionId) return true;
+    // A session-less rejected/open operation is rendered as `request:<operationId>`.
+    // Only accept that server-derived identifier when its exact operation record
+    // belongs to this principal; never turn an arbitrary supplied session ID into
+    // an owner correlation.
+    const operationId = sessionId.startsWith("request:") ? sessionId.slice("request:".length) : "";
+    return Boolean(operationId && event.sessionId === undefined && event.operationId === operationId);
+  }
+  getUserAuditPage(user: string, sessionId: string | undefined, query: { limit: number; before?: string; after?: string }) {
+    if (query.before && query.after) throw new Error("before and after cannot be combined.");
+    const boundary = query.before ? this.parseAuditCursor(query.before, user, sessionId) : query.after ? this.parseAuditCursor(query.after, user, sessionId) : undefined;
+    const available = this.auditEntries.filter((entry) => this.ownsAuditEvent(entry.event, user, sessionId));
+    const selected = query.after
+      ? available.filter((entry) => entry.sequence > boundary!).slice(0, query.limit).reverse()
+      : available.filter((entry) => boundary === undefined || entry.sequence < boundary).slice(-query.limit).reverse();
+    const newest = selected[0]?.sequence ?? (boundary ?? this.auditSequence);
+    const oldest = selected.at(-1)?.sequence ?? (boundary ?? this.auditSequence);
+    return {
+      items: selected.map((entry) => ({ id: `${this.auditGeneration}:${entry.sequence}`, cursor: this.auditCursor(user, sessionId, entry.sequence), event: entry.event })),
+      newestCursor: this.auditCursor(user, sessionId, newest),
+      oldestCursor: this.auditCursor(user, sessionId, oldest),
+      hasMoreOlder: available.some((entry) => entry.sequence < oldest),
+      hasMoreNewer: available.some((entry) => entry.sequence > newest),
+    };
+  }
+  countNewUserAuditEvents(user: string, sessionId: string | undefined, after?: string): { count: number; latestCursor: string; overflow: boolean } {
+    const boundary = after ? this.parseAuditCursor(after, user, sessionId) : this.auditSequence;
+    const count = this.auditEntries.filter((entry) => entry.sequence > boundary && this.ownsAuditEvent(entry.event, user, sessionId)).length;
+    return { count: Math.min(count, 1_000), latestCursor: this.auditCursor(user, sessionId, this.auditSequence), overflow: count > 1_000 };
+  }
+  userCanViewAuditEvent(user: string, sessionId: string | undefined, event: Record<string, unknown>): boolean {
+    return typeof event.event === "string" && typeof event.at === "string" && this.ownsAuditEvent(event as AuditLogEntry["event"], user, sessionId);
+  }
+  userOwnsActiveSession(user: string, sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
+  }
+  checkSessionWorkingDirectoryAccess(directory: string): Promise<void> {
+    return access(directory, constants.X_OK);
+  }
+  async resolveSessionWorkingDirectory(supplied: string): Promise<string | undefined> {
+    try {
+      const resolved = await realpath(supplied);
+      if (!(await lstat(resolved)).isDirectory()) return undefined;
+      await this.checkSessionWorkingDirectoryAccess(resolved);
+      return resolved;
+    } catch { return undefined; }
+  }
+  async updateSessionMetadata(user: string, sessionId: string, input: unknown) {
+    const fail = (status: number, error: string, extra: { currentVersion?: number } = {}) => ({ ok: false as const, status, error, ...extra });
+    if (!isRecord(input)) return fail(400, "invalid_request");
+    const allowed = new Set(["expectedVersion", "workingDirectory", "purpose", "externalUrl", "externalTitle"]);
+    if (Object.keys(input).some((key) => !allowed.has(key))) return fail(400, "invalid_request");
+    if (!Object.hasOwn(input, "expectedVersion") || !Number.isSafeInteger(input.expectedVersion) || Number(input.expectedVersion) < 1) return fail(400, "invalid_request");
+    const hasWorkingDirectory = Object.hasOwn(input, "workingDirectory");
+    const hasPurpose = Object.hasOwn(input, "purpose");
+    const hasExternalUrl = Object.hasOwn(input, "externalUrl");
+    const hasExternalTitle = Object.hasOwn(input, "externalTitle");
+    if (!hasWorkingDirectory && !hasPurpose && !hasExternalUrl && !hasExternalTitle) return fail(400, "invalid_request");
+    if ((hasExternalUrl && input.externalUrl !== null && typeof input.externalUrl !== "string") || (hasExternalTitle && input.externalTitle !== null && typeof input.externalTitle !== "string")) return fail(400, "invalid_external_link");
+    const externalUrlInput = hasExternalUrl ? input.externalUrl === null ? "" : input.externalUrl as string : undefined;
+    const externalTitleInput = hasExternalTitle ? input.externalTitle === null ? "" : input.externalTitle as string : undefined;
+    try {
+      const candidate = createSessionLink({ url: externalUrlInput, title: externalTitleInput });
+      if (hasExternalUrl && externalUrlInput?.trim() && !candidate.externalUrl) return fail(400, "invalid_external_link");
+    } catch { return fail(400, "invalid_external_link"); }
+
+    return this.processLock.run(async () => {
+      const available = (session: Session | undefined) => Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now() && !this.executionStateFor(user).stopped);
+      const initial = this.sessions.get(sessionId);
+      if (!available(initial)) return fail(404, "session_unavailable");
+      if (initial!.version !== input.expectedVersion) return fail(409, "version_conflict", { currentVersion: initial!.version });
+      let workingDirectory: string | undefined;
+      if (hasWorkingDirectory) {
+        if (typeof input.workingDirectory !== "string") return fail(400, "invalid_working_directory");
+        const supplied = input.workingDirectory.trim();
+        if (!supplied || supplied.length > 4096 || !path.isAbsolute(supplied)) return fail(400, "invalid_working_directory");
+        workingDirectory = await this.resolveSessionWorkingDirectory(supplied);
+        if (!workingDirectory) return fail(400, "invalid_working_directory");
+      }
+      let purpose: string | undefined;
+      if (hasPurpose) {
+        if (typeof input.purpose !== "string") return fail(400, "invalid_purpose");
+        purpose = input.purpose.trim();
+        if (!purpose || purpose.length > 200) return fail(400, "invalid_purpose");
+      }
+      const committed = await this.executionStateLock.run(async () => {
+        const session = this.sessions.get(sessionId);
+        if (!available(session)) return { result: fail(404, "session_unavailable") };
+        if (session!.version !== input.expectedVersion) return { result: fail(409, "version_conflict", { currentVersion: session!.version }) };
+        const target = session!;
+        const linkUpdate = updateSessionLink(target, { ...(hasExternalUrl ? { url: externalUrlInput } : {}), ...(hasExternalTitle ? { title: externalTitleInput } : {}) });
+        const changedFields: string[] = [];
+        if (workingDirectory !== undefined && workingDirectory !== target.workingDirectory) changedFields.push("workingDirectory");
+        if (purpose !== undefined && purpose !== target.purpose) changedFields.push("purpose");
+        if (hasExternalUrl && linkUpdate.link.externalUrl !== target.externalUrl) changedFields.push("externalUrl");
+        if (hasExternalTitle && (linkUpdate.link.externalTitle !== target.externalTitle || linkUpdate.link.externalTitleSource !== target.externalTitleSource || linkUpdate.shouldFetch)) changedFields.push("externalTitle");
+        if (!changedFields.length) return { result: { ok: true as const, session_id: target.id, working_directory: target.workingDirectory, purpose: target.purpose, external_url: target.externalUrl, external_title: target.externalTitle, external_title_source: target.externalTitleSource, external_title_status: target.externalTitleStatus, version: target.version, changedFields } };
+        const previous = { workingDirectory: target.workingDirectory, purpose: target.purpose, externalUrl: target.externalUrl, externalTitle: target.externalTitle, externalTitleSource: target.externalTitleSource, externalTitleStatus: target.externalTitleStatus, linkRevision: target.linkRevision, version: target.version, touched: target.touched, expires: target.expires };
+        if (workingDirectory !== undefined) target.workingDirectory = workingDirectory;
+        if (purpose !== undefined) target.purpose = purpose;
+        Object.assign(target, linkUpdate.link);
+        target.version++;
+        target.touched = Date.now();
+        target.expires = target.touched + SESSION_TTL;
+        return { target, previous, changedFields, shouldFetch: linkUpdate.shouldFetch, result: { ok: true as const, session_id: target.id, working_directory: target.workingDirectory, purpose: target.purpose, external_url: target.externalUrl, external_title: target.externalTitle, external_title_source: target.externalTitleSource, external_title_status: target.externalTitleStatus, version: target.version, changedFields } };
+      });
+      if (!committed.target || !committed.previous) return committed.result;
+      try {
+        await this.audit("session.metadata.updated", { user, sessionId: committed.target.id, previousVersion: committed.previous.version, version: committed.target.version, changedFields: committed.changedFields });
+      } catch {
+        await this.executionStateLock.run(async () => {
+          // A terminal lifecycle transition (close, expiry, or emergency stop) owns the final state and must not be undone by this rollback.
+          if (this.sessions.get(sessionId) !== committed.target || !available(committed.target) || committed.target.version !== committed.previous.version + 1) return;
+          committed.target.workingDirectory = committed.previous.workingDirectory;
+          committed.target.purpose = committed.previous.purpose;
+          if (committed.target.linkRevision !== committed.previous.linkRevision) Object.assign(committed.target, { externalUrl: committed.previous.externalUrl, externalTitle: committed.previous.externalTitle, externalTitleSource: committed.previous.externalTitleSource, externalTitleStatus: committed.previous.externalTitleStatus, linkRevision: committed.previous.linkRevision });
+          committed.target.version = committed.previous.version;
+          committed.target.touched = committed.previous.touched;
+          committed.target.expires = committed.previous.expires;
+        });
+        return fail(503, "update_unavailable");
+      }
+      if (committed.shouldFetch) this.startSessionLinkTitleFetch(committed.target);
+      return committed.result;
+    });
+  }
+  userOwnsAuditSession(user: string, sessionId: string): boolean {
+    if (this.userOwnsActiveSession(user, sessionId)) return true;
+    if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
+    const operationId = sessionId.startsWith("request:") ? sessionId.slice("request:".length) : "";
+    return Boolean(operationId && this.auditEntries.some((entry) => entry.event.user === user && entry.event.sessionId === undefined && entry.event.operationId === operationId));
+  }
+  auditEntriesForConsole(): Array<Record<string, unknown> & { event: string; at: string }> { return this.auditEntries.map((entry) => entry.event); }
+  subscribeAudit(listener: (event: Record<string, unknown> & { event: string; at: string }) => void): () => void { this.auditListeners.add(listener); return () => this.auditListeners.delete(listener); }
+  subscribeSessionLink(listener: (user: string, sessionId: string, linkRevision: number) => void): () => void { this.sessionLinkListeners.add(listener); return () => this.sessionLinkListeners.delete(listener); }
+  private notifySessionLinkUpdated(user: string, sessionId: string, linkRevision: number): void { for (const listener of this.sessionLinkListeners) { try { listener(user, sessionId, linkRevision); } catch { /* Notification delivery must not fail title retrieval. */ } } }
+  subscribeAuditConnection(close: () => void): () => void { this.auditConnectionClosers.add(close); return () => this.auditConnectionClosers.delete(close); }
   sign(body: object): string { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
   validRedirect(uri: string): boolean { try { return this.cfg.allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; } }
   authenticate(header?: string): string | undefined {
@@ -223,18 +530,272 @@ export class RemoteDesktopService {
     if (!encoded || !signature || !equal(createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url"), signature)) return undefined;
     try { const body = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>; const user = this.cfg.users[0]; return body.type === "access" && body.sub === user.email && body.iss === this.cfg.baseUrl && body.aud === `${this.cfg.baseUrl}/mcp` && body.scope === "mcp" && typeof body.exp === "number" && body.exp > Math.floor(Date.now() / 1000) ? user.email : undefined; } catch { return undefined; }
   }
+  private executionStatePath(): string { return path.join(this.cfg.dataDir, "user-execution-states.json"); }
+  private executionStopMarkerPath(): string { return path.join(this.cfg.dataDir, "user-execution-stop-pending.json"); }
+  private validateExecutionState(value: unknown): value is UserExecutionState {
+    if (!value || typeof value !== "object") return false;
+    const state = value as UserExecutionState;
+    return typeof state.principalId === "string" && state.principalId.length > 0 && state.principalId.length <= 512
+      && typeof state.stopped === "boolean" && Number.isSafeInteger(state.stopGeneration) && state.stopGeneration >= 0
+      && (state.stoppedAt === undefined || (typeof state.stoppedAt === "string" && !Number.isNaN(Date.parse(state.stoppedAt))))
+      && (state.stopId === undefined || (typeof state.stopId === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(state.stopId)));
+  }
+  private async loadExecutionStates(): Promise<void> {
+    const file = this.executionStatePath();
+    let raw: string;
+    try { raw = await readFile(file, "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { this.executionStateUnavailable = true; throw new Error("User execution state could not be read; remote execution remains stopped.", { cause: error }); }
+      raw = "[]";
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { this.executionStateUnavailable = true; throw new Error("User execution state is invalid; remote execution remains stopped."); }
+    if (!Array.isArray(parsed) || parsed.length > 10_000 || parsed.some((value) => !this.validateExecutionState(value)) || new Set(parsed.map((value) => (value as UserExecutionState).principalId)).size !== parsed.length) {
+      this.executionStateUnavailable = true;
+      throw new Error("User execution state is invalid; remote execution remains stopped.");
+    }
+    for (const state of parsed as UserExecutionState[]) this.executionStates.set(state.principalId, state);
+    const marker = await readFile(this.executionStopMarkerPath(), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (marker !== undefined) {
+      let pending: unknown;
+      try { pending = JSON.parse(marker); } catch { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery marker is invalid; remote execution remains stopped."); }
+      if (!this.validateExecutionState(pending) || !pending.stopped || !pending.stopId) { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery marker is invalid; remote execution remains stopped."); }
+      const recovered = pending as UserExecutionState;
+      const stored = this.executionStates.get(recovered.principalId);
+      try {
+        if (stored?.stopped !== true || stored.stopId !== recovered.stopId || stored.stopGeneration !== recovered.stopGeneration) { this.executionStates.set(recovered.principalId, recovered); await this.persistExecutionStates(); }
+        await rm(this.executionStopMarkerPath(), { force: true });
+      } catch { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery could not be persisted; remote execution remains stopped."); }
+    }
+  }
+  private async persistExecutionStates(): Promise<void> {
+    const file = this.executionStatePath();
+    const pending = `${file}.next`;
+    try {
+      await writeFile(pending, JSON.stringify([...this.executionStates.values()]), { mode: 0o600 });
+      const handle = await open(pending, "r+");
+      try { await handle.sync(); } finally { await handle.close(); }
+      await rename(pending, file);
+      await protectPrivateFile(file);
+    } catch (error) {
+      this.executionStateUnavailable = true;
+      await rm(pending, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+  private async writeExecutionStopMarker(state: UserExecutionState): Promise<void> {
+    if (!state.stopped || !state.stopId) throw new Error("A stopped execution state is required for recovery.");
+    const markerPath = this.executionStopMarkerPath();
+    await writeFile(markerPath, JSON.stringify(state), { mode: 0o600 });
+    const marker = await open(markerPath, "r+");
+    try { await marker.sync(); } finally { await marker.close(); }
+    await protectPrivateFile(markerPath);
+  }
+  private executionStateFor(user: string): UserExecutionState { return this.executionStates.get(user) ?? { principalId: user, stopped: false, stopGeneration: 0 }; }
+  userExecutionState(user: string): UserExecutionState {
+    const state = this.executionStateFor(user);
+    return { ...state, stopped: state.stopped || this.executionStateUnavailable || this.executionResumes.has(user) };
+  }
+  private requireExecutionAllowed(user: string): void {
+    const state = this.userExecutionState(user);
+    if (state.stopped) throw new UserStopRequested(state);
+  }
+  private requireCurrentOperation(): void {
+    const operation = this.operationContext.getStore();
+    if (!operation) return;
+    const state = this.userExecutionState(operation.user);
+    if (state.stopped || state.stopGeneration !== operation.stopGeneration) throw new UserStopRequested(state);
+  }
+  async stopUserExecution(user: string): Promise<UserExecutionState> { return this.executionStateLock.run(async () => {
+    const prior = this.executionStateFor(user);
+    const state: UserExecutionState = { principalId: user, stopped: true, stopGeneration: prior.stopGeneration + 1, stoppedAt: new Date().toISOString(), stopId: makeId() };
+    this.executionStates.set(user, state);
+    let persistenceFailure: Error | undefined;
+    try { await this.writeExecutionStopMarker(state); }
+    catch { this.executionStateUnavailable = true; persistenceFailure = new Error("Emergency stop recovery marker could not be persisted; remote execution remains stopped."); await this.audit("user.stop_marker_failed", { user }).catch(() => undefined); }
+    if (!persistenceFailure) try { await this.persistExecutionStates(); await rm(this.executionStopMarkerPath(), { force: true }); }
+    catch { persistenceFailure = new Error("Emergency stop state could not be persisted; remote execution remains stopped."); await this.audit("user.stop_persistence_failed", { user }).catch(() => undefined); }
+    for (const session of this.sessions.values()) if (session.user === user && session.state === "active") { session.state = "closed"; this.clearSessionLink(session); }
+    // Do not queue behind a long-running process_start/output operation. The
+    // bridge latches the owner and also catches a PID published after this call.
+    let bridgeAvailable = false;
+    const bridgeTerminatedPids = new Set<number>();
+    if (!this.cfg.processAdapter) {
+      try {
+        const reply = await this.dc.call("_rdmcp_stop_owner", { owner: user }, 2_000, { skipRootPreflight: true, allowStoppedOperation: true });
+        const bridgeResult = JSON.parse(reply) as { stopped?: unknown; terminated_pids?: unknown; failed_pids?: unknown };
+        if (bridgeResult.stopped !== true || !Array.isArray(bridgeResult.terminated_pids) || !bridgeResult.terminated_pids.every((pid) => Number.isInteger(pid) && pid > 0)) throw new Error("Owner stop result is invalid.");
+        bridgeAvailable = true;
+        for (const pid of bridgeResult.terminated_pids) bridgeTerminatedPids.add(pid);
+        if (Array.isArray(bridgeResult.failed_pids)) for (const pid of bridgeResult.failed_pids) if (Number.isInteger(pid) && pid > 0) await this.audit("process.owner_stop_failed", { user, pid, stopId: state.stopId }).catch(() => undefined);
+      }
+      catch { await this.audit("process.owner_stop_unconfirmed", { user, stopId: state.stopId }).catch(() => undefined); }
+    }
+    for (const item of this.processes.values()) if (item.user === user && (item.state === "running" || item.state === "terminating")) {
+      item.state = "terminating"; item.terminationRequested = true;
+      try {
+        if (this.cfg.processAdapter) await this.cfg.processAdapter.terminate(item.pid, 2_000);
+        // A PID can be reused after its old process exits.  Only the private
+        // owner bridge can prove that this PID still belongs to this user; a
+        // generic PID kill here could terminate another user's new process.
+        else if (!bridgeAvailable || !bridgeTerminatedPids.has(item.pid)) {
+          item.terminationUnconfirmed = true;
+          await this.audit("process.stop_unconfirmed", { user, processId: item.id, pid: item.pid, stopId: state.stopId, reason: "owner_not_confirmed" }).catch(() => undefined);
+          continue;
+        }
+        await this.audit("process.stop_requested", { user, processId: item.id, pid: item.pid, stopId: state.stopId }).catch(() => undefined);
+      } catch {
+        item.terminationUnconfirmed = true;
+        await this.audit("process.stop_unconfirmed", { user, processId: item.id, pid: item.pid, stopId: state.stopId }).catch(() => undefined);
+      }
+    }
+    await this.audit("user.stop_requested", { user, stopId: state.stopId, stopGeneration: state.stopGeneration }).catch(() => undefined);
+    await this.transferLock.run(async () => {
+      for (const item of this.transfers.values()) if (item.sessionId && this.sessions.get(item.sessionId)?.user === user && item.state === "active") {
+        item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item);
+        await this.audit("transfer.cancelled_by_user_stop", { user, transferId: item.id, stopId: state.stopId }).catch(() => undefined);
+      }
+    });
+    if (persistenceFailure) throw persistenceFailure;
+    return { ...state };
+  }); }
+  async resumeUserExecution(user: string): Promise<UserExecutionState> { return this.executionStateLock.run(async () => {
+    if (this.executionStateUnavailable) throw new Error("Remote execution state is unavailable and cannot be resumed.");
+    const prior = this.executionStateFor(user);
+    if (!prior.stopped || !prior.stopId) throw new Error("Remote execution is not stopped.");
+    const state: UserExecutionState = { principalId: user, stopped: false, stopGeneration: prior.stopGeneration + 1 };
+    // Persist the prospective state before exposing it. A failed resume must
+    // leave the in-memory latch closed as well as the durable one.
+    this.executionResumes.add(user);
+    try {
+      try {
+        // Keep a durable stopped record until both the new state and the backend
+        // latch have changed.  In particular, persistExecutionStates can fail
+        // after rename (for example while restoring the private ACL), leaving a
+        // false state on disk even though this resume must fail closed.
+        await this.writeExecutionStopMarker(prior);
+        this.executionStates.set(user, state);
+        await this.persistExecutionStates();
+      } catch (error) {
+        this.executionStates.set(user, prior);
+        throw error;
+      }
+      try {
+        if (!this.cfg.processAdapter) await this.dc.call("_rdmcp_resume_owner", { owner: user }, 2_000, { skipRootPreflight: true, allowStoppedOperation: true });
+      } catch (error) {
+        // The backend latch must reopen together with the durable user state.
+        // If it cannot, restore a durable stopped state rather than exposing a
+        // resume that still rejects (or could later partially reopen) processes.
+        this.executionStates.set(user, prior);
+        try { await this.persistExecutionStates(); } catch { this.executionStateUnavailable = true; }
+        throw error;
+      }
+      try { await rm(this.executionStopMarkerPath(), { force: true }); }
+      catch { this.executionStateUnavailable = true; throw new Error("Emergency stop recovery marker could not be cleared; remote execution remains stopped."); }
+      await this.audit("user.execution_resumed", { user, stopGeneration: state.stopGeneration });
+      return { ...state };
+    } finally { this.executionResumes.delete(user); }
+  }); }
   private async sweepExpiredLocked(now = Date.now()): Promise<void> {
     for (const session of this.sessions.values()) {
       if (session.state === "active" && session.expires <= now) {
         session.state = "expired";
-        for (const transfer of this.transfers.values()) if (transfer.sessionId === session.id && transfer.state === "active") await this.fail(transfer, "session_expired");
+        this.clearSessionLink(session);
+        let auditFailed = false;
+        let auditFailure: unknown;
+        try { await this.audit("session.expired", { user: session.user, sessionId: session.id }); }
+        catch (error) { auditFailed = true; auditFailure = error; }
+        for (const transfer of this.transfers.values()) if (transfer.sessionId === session.id && transfer.state === "active") {
+          try { await this.fail(transfer, "session_expired"); }
+          catch (error) { if (!auditFailed) { auditFailed = true; auditFailure = error; } }
+        }
+        if (auditFailed) throw auditFailure;
       }
     }
     for (const transfer of this.transfers.values()) if (transfer.state === "active" && now - transfer.touched > TRANSFER_TTL) await this.fail(transfer, "expired");
     for (const [id, session] of this.sessions) if (session.state !== "active" && now - session.expires > SESSION_TTL) this.sessions.delete(id);
   }
   async sweepExpired(): Promise<void> { await this.transferLock.run(() => this.sweepExpiredLocked()); }
-  session(user: string, sessionId: string): Session { const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; return value; }
+  private todoSnapshot(session: Session) {
+    const todo = session.todo;
+    return { session_id: session.id, version: todo.version, items: todo.items.map((item) => ({ ...item })), total: todo.items.length, completed: todo.items.filter((item) => item.status === "completed").length, last_updated_at: todo.lastUpdatedAt, enforcement_enabled: todo.enabled };
+  }
+  async todoGet(user: string, sessionId: string) { return this.todoLock.run(async () => this.todoSnapshot(this.session(user, sessionId))); }
+  async todoUpdate(user: string, sessionId: string, expectedVersion: number, inputChanges: unknown) {
+    const parsed = todoChangesSchema.safeParse(inputChanges);
+    if (!parsed.success) throw new Error("Invalid Todo changes.");
+    return this.todoLock.run(async () => {
+      const session = this.session(user, sessionId); const todo = session.todo;
+      if (todo.version !== expectedVersion) return { ...this.todoSnapshot(session), conflict: true, error: "TODO_VERSION_CONFLICT", message: "作業一覧が別の場所で更新されています。最新状態を読み直してください。" };
+      const now = Date.now(); const mono = performance.now(); let items = todo.items.map((item) => ({ ...item }));
+      for (const change of parsed.data) {
+        if (change.op === "add") { if (items.length >= 200) throw new Error("Todo item limit reached."); items.push({ id: makeId(), text: change.text, status: change.status ?? "not_started", order: items.length, createdBy: user, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() }); }
+        else { const index = items.findIndex((item) => item.id === change.id); if (index < 0) throw new Error("Todo item is unavailable."); const item = items[index]!; if (change.op === "delete") items.splice(index, 1); else if (change.op === "edit") { item.text = change.text; item.updatedAt = new Date(now).toISOString(); } else if (change.op === "status") { item.status = change.status; item.updatedAt = new Date(now).toISOString(); } else { const [moved] = items.splice(index, 1); items.splice(Math.min(change.order, items.length), 0, moved!); } }
+      }
+      items = items.map((item, order) => ({ ...item, order }));
+      todo.items = items; todo.version += 1; todo.lastTodoUpdatedMono = mono; todo.lastUpdatedAt = new Date(now).toISOString(); todo.clockAnomaly = false; todo.lastGateMono = mono; todo.lastGateWall = now;
+      let auditWarning = false; try { await this.audit("todo.updated", { user, sessionId: session.id, version: todo.version, itemCount: items.length }); } catch { auditWarning = true; }
+      return { ...this.todoSnapshot(session), ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
+    });
+  }
+  async todoSetEnforcement(user: string, sessionId: string, enabled: boolean) {
+    return this.todoLock.run(async () => {
+      const session = this.session(user, sessionId);
+      const before = session.todo.enabled;
+      let auditWarning = false;
+      if (before !== enabled) {
+        let mono: number | undefined;
+        let wall: number | undefined;
+        if (enabled) {
+          mono = performance.now();
+          if (!Number.isFinite(mono)) throw new Error("Monotonic clock is unavailable.");
+          wall = Date.now();
+        }
+        session.todo.enabled = enabled;
+        session.todo.clockAnomaly = false;
+        if (enabled) {
+          session.todo.enabledAtMono = mono!;
+          session.todo.lastGateMono = mono!;
+          session.todo.lastGateWall = wall!;
+        } else {
+          delete session.todo.lastGateMono;
+          delete session.todo.lastGateWall;
+        }
+        try { await this.audit("todo.enforcement_changed", { user, sessionId: session.id, enabled, previous: before }); } catch { auditWarning = true; }
+      }
+      return { session_id: sessionId, enabled: session.todo.enabled, ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
+    });
+  }
+  private todoException(toolName: string, user: string, sessionId: unknown, record: Record<string, unknown>): boolean {
+    if (["session_open", "session_close", "todo_get", "todo_update", "todo_enforcement_set", "file_transfer_cancel"].includes(toolName)) return true;
+    if (!["process_status", "process_output", "process_kill"].includes(toolName) || typeof sessionId !== "string" || typeof record.process_id !== "string") return false;
+    const process = this.processes.get(record.process_id);
+    return Boolean(process && process.user === user && process.sessionId === sessionId);
+  }
+  private async todoGate(session: Session): Promise<{ stale: boolean; reason?: string; lastUpdatedAt: string | null }> {
+    return this.todoLock.run(async () => {
+      const todo = session.todo;
+      if (!todo.enabled) return { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
+      let mono: number;
+      try { mono = performance.now(); if (!Number.isFinite(mono)) throw new Error(); }
+      catch { todo.clockAnomaly = true; return { stale: true, reason: "clock_unavailable", lastUpdatedAt: todo.lastUpdatedAt }; }
+      const wall = Date.now();
+      if (todo.lastGateMono !== undefined && todo.lastGateWall !== undefined) {
+        const elapsedMono = mono - todo.lastGateMono; const elapsedWall = wall - todo.lastGateWall;
+        if (elapsedMono < 0 || elapsedWall < 0 || Math.abs(elapsedWall - elapsedMono) > 60_000) todo.clockAnomaly = true;
+      }
+      todo.lastGateMono = mono; todo.lastGateWall = wall;
+      if (todo.clockAnomaly) return { stale: true, reason: "clock_anomaly", lastUpdatedAt: todo.lastUpdatedAt };
+      if (!todo.enabled) return { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
+      if (todo.version > 0 && (typeof todo.lastTodoUpdatedMono !== "number" || !Number.isFinite(todo.lastTodoUpdatedMono) || todo.lastTodoUpdatedMono < 0 || todo.lastTodoUpdatedMono > mono)) {
+        todo.clockAnomaly = true;
+        return { stale: true, reason: "updated_timestamp_invalid", lastUpdatedAt: todo.lastUpdatedAt };
+      }
+      const base = Math.max(todo.lastTodoUpdatedMono ?? todo.enabledAtMono, todo.enabledAtMono);
+      return mono - base >= TODO_GRACE_MS ? { stale: true, reason: "todo_stale", lastUpdatedAt: todo.lastUpdatedAt } : { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
+    });
+  }
+  session(user: string, sessionId: string): Session { this.requireCurrentOperation(); const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; const operation = this.operationContext.getStore(); if (operation?.user === user) operation.sessionAccessAt = new Date(value.touched).toISOString(); return value; }
   node(nodeId?: string): string { if (nodeId && nodeId !== this.cfg.nodeId) throw new Error("Unknown or unsupported node."); return this.cfg.nodeId; }
   private root(id: string): Root { const root = this.cfg.roots.find((item) => item.id === id); if (!root) throw new Error("Unknown file root."); return root; }
   private configPath(): string { return path.join(this.cfg.dataDir, "desktop-commander-home", ".claude-server-commander", "config.json"); }
@@ -280,7 +841,14 @@ export class RemoteDesktopService {
     const pending = `${manifest}.next`;
     const records = [...this.protectedConfigIdentities.values()];
     await writeFile(pending, JSON.stringify(records), { mode: 0o600 });
-    await rename(pending, manifest);
+    for (let attempt = 0; ; attempt += 1) {
+      try { await rename(pending, manifest); return; }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if ((code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") || attempt >= 19) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(100, 10 * 2 ** Math.min(attempt, 3))));
+      }
+    }
   }
   private async rememberProtectedConfigIdentity(allowMissing = false): Promise<void> { await this.configIdentityLock.run(() => this.rememberProtectedConfigIdentityLocked(allowMissing)); }
   private async rememberProtectedConfigIdentityLocked(allowMissing: boolean): Promise<void> {
@@ -413,6 +981,7 @@ export class RemoteDesktopService {
     await visit(root.path);
   }
   private async safePath(rootId: string, relative: string, absent = false): Promise<string> {
+    this.requireCurrentOperation();
     const root = this.root(rootId);
     if (!relative || path.isAbsolute(relative) || relative.includes("\0")) throw new Error("A relative path is required.");
     const candidate = path.resolve(root.path, relative);
@@ -442,6 +1011,30 @@ export class RemoteDesktopService {
     await this.untrackOwnedUpload(item.temp);
   }
   private async fail(item: Transfer, reason: string): Promise<void> { item.state = reason === "expired" || reason === "session_expired" ? "expired" : "failed"; await this.cleanup(item); this.rememberTerminal(item); await this.audit("transfer.failed", { transferId: item.id, direction: item.direction, reason }); }
+  private async completeDownload(item: Transfer): Promise<void> {
+    if (item.direction !== "download" || item.offset !== item.size) throw new Error("Download is incomplete.");
+    item.state = "complete";
+    await this.cleanup(item);
+    this.rememberTerminal(item);
+    await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 });
+  }
+  private async completeUpload(item: Transfer): Promise<{ resolved_path: string; root_id: string; path_base: "root"; size: number; sha256: string }> {
+    if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete.");
+    const pathInfo = await this.identityForPath(item.temp).catch(() => undefined);
+    if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); }
+    await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined;
+    const bytes = await readFile(item.temp);
+    if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); }
+    item.committedPreview = this.previewBytes(bytes.subarray(0, Math.min(bytes.length, 4096)), bytes.length > 4096);
+    await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true);
+    this.requireCurrentOperation();
+    try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } }
+    catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); }
+    await this.untrackOwnedUpload(item.temp);
+    item.state = "complete"; this.rememberTerminal(item);
+    await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 });
+    return { resolved_path: await realpath(item.target), root_id: item.rootId, path_base: "root", size: item.size, sha256: item.sha256 };
+  }
   private async privateSnapshot(source: string, destination: string) { await copyFile(source, destination); await protectPrivateFile(destination); const bytes = await readFile(destination); return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") }; }
   private async verifyNoReplaceCapability(directory: string): Promise<void> {
     const token = makeId();
@@ -458,7 +1051,9 @@ export class RemoteDesktopService {
     }
   }
   private async search(root: Root, pattern: string, searchType: "files" | "content"): Promise<string> {
+    this.requireCurrentOperation();
     await this.guardSearchRoot(root);
+    this.requireCurrentOperation();
     const started = await this.dc.call("start_search", { path: root.path, pattern, searchType, maxResults: 500, timeout_ms: 5_000, literalSearch: true });
     const session = started.match(/session:\s*([^\s]+)/i)?.[1];
     if (!session) throw new Error("Desktop Commander did not return a search session.");
@@ -469,6 +1064,7 @@ export class RemoteDesktopService {
     let incomplete = false;
     try {
       while (page < 5 && Date.now() < deadline) {
+        this.requireCurrentOperation();
         const output = await this.dc.call("get_more_search_results", { sessionId: session, offset, length: 100 });
         pages.push(output);
         const complete = /Status:\s*COMPLETED/i.test(output);
@@ -495,11 +1091,288 @@ export class RemoteDesktopService {
       if (Date.now() >= deadline) incomplete = true;
       if (incomplete) pages.push("Search result collection reached the local service limit; results may be incomplete.");
       return pages.join("\n");
-    } finally { await this.dc.call("stop_search", { sessionId: session }).catch(() => undefined); }
+    } finally { await this.dc.call("stop_search", { sessionId: session }, undefined, { allowStoppedOperation: true }).catch(() => undefined); }
   }
-  private tool<T extends Record<string, z.ZodTypeAny>>(user: string, tool: string, fn: (args: z.infer<z.ZodObject<T>>) => Promise<unknown>) { return async (args: z.infer<z.ZodObject<T>>) => { try { return result(await fn(args)); } catch (error) { const message = error instanceof Error ? error.message : "Operation failed."; const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error"; await this.audit("operation.rejected", { user, tool, reason, errorName: error instanceof Error ? error.name : typeof error, errorCode: auditErrorCode(error), detail: auditDiagnosticDetail(message) }); const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot)/.test(message) ? message : "Operation failed."; return failure(publicMessage); } }; }
+  private redactAuditText(value: string): { value: string; truncated: boolean } {
+    const secrets = [this.cfg.tokenSecret, this.cfg.publicAuth?.googleClientSecret ?? "", ...this.cfg.users.map((configured) => configured.passwordHash)].filter(Boolean);
+    const redacted = secrets.reduce((current, secret) => current.split(secret).join("[redacted]"), value)
+      .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+      .replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]");
+    return { value: redacted.slice(0, 4000), truncated: value.length > 4000 || redacted.length > 4000 };
+  }
+
+  private operationDetailEntry(label: string, value: unknown, format: "text" | "diff" = "text", truncated = false): OperationDetailEntry {
+    const protectedValue = this.redactAuditText(String(value ?? ""));
+    return { label, value: protectedValue.value, format, ...(truncated || protectedValue.truncated ? { truncated: true } : {}) };
+  }
+
+  private previewBytes(bytes: Buffer, truncated = false): OperationDetailEntry {
+    let textBytes = bytes;
+    if (truncated && bytes.length > 0) {
+      let sequenceStart = bytes.length - 1;
+      while (sequenceStart >= 0 && (bytes[sequenceStart]! & 0xc0) === 0x80) sequenceStart -= 1;
+      if (sequenceStart >= 0) {
+        const lead = bytes[sequenceStart]!;
+        const expectedLength = lead <= 0x7f ? 1
+          : lead >= 0xc2 && lead <= 0xdf ? 2
+          : lead >= 0xe0 && lead <= 0xef ? 3
+          : lead >= 0xf0 && lead <= 0xf4 ? 4
+          : 0;
+        const availableLength = bytes.length - sequenceStart;
+        if (expectedLength > availableLength && expectedLength > 1) textBytes = bytes.subarray(0, sequenceStart);
+      }
+    }
+    const text = textBytes.toString("utf8");
+    const hasControlCharacters = [...text].some((character) => { const code = character.charCodeAt(0); return code === 127 || code < 32 && ![9, 10, 13].includes(code); });
+    const validText = Buffer.from(text, "utf8").equals(textBytes) && !hasControlCharacters;
+    if (validText) return this.operationDetailEntry("内容見本", text, "text", truncated || textBytes.length < bytes.length);
+    const sample = bytes.subarray(0, 64).toString("hex").replace(/(..)(?=.)/g, "$1 ");
+    return this.operationDetailEntry("内容見本", `hex: ${sample}`, "text", truncated || bytes.length > 64);
+  }
+
+  private async previewFile(filePath: string, size?: number): Promise<OperationDetailEntry | undefined> {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(filePath, "r");
+      const limit = Math.min(size ?? 4096, 4096);
+      const bytes = Buffer.alloc(limit);
+      const read = limit ? await handle.read(bytes, 0, limit, 0) : { bytesRead: 0 };
+      return this.previewBytes(bytes.subarray(0, read.bytesRead), typeof size === "number" && size > read.bytesRead);
+    } catch {
+      return undefined;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  private transferTarget(item: Transfer | undefined): string | undefined {
+    if (!item) return undefined;
+    const root = this.cfg.roots.find((candidate) => candidate.id === item.rootId);
+    if (!root) return undefined;
+    const relative = path.relative(root.path, item.target).replaceAll(path.sep, "/");
+    return `${item.rootId}/${relative}`;
+  }
+
+  private rejectedArgumentProjection(tool: string, raw: Record<string, unknown>): Record<string, unknown> {
+    const projected: Record<string, unknown> = {};
+    const text = (name: string, limit: number) => {
+      const value = raw[name];
+      if (typeof value === "string") projected[name] = value.slice(0, limit);
+    };
+    const number = (name: string) => { if (typeof raw[name] === "number") projected[name] = raw[name]; };
+    const boolean = (name: string) => { if (typeof raw[name] === "boolean") projected[name] = raw[name]; };
+    const session = () => { text("session_id", 128); text("node_id", 128); };
+    const file = () => { session(); text("root_id", 500); text("relative_path", 500); };
+    const transfer = () => { session(); text("transfer_id", 128); };
+
+    text("comment", 500);
+    switch (tool) {
+      case "session_open": text("working_directory", 4096); text("purpose", 200); break;
+      case "session_close": case "node_list": session(); break;
+      case "file_search": case "content_search": session(); text("root_id", 500); text("query", 120); break;
+      case "file_read": file(); number("offset"); number("length"); break;
+      case "file_patch": file(); text("old_string", 4000); text("new_string", 4000); number("expected_replacements"); break;
+      case "file_transfer_download_begin": file(); break;
+      case "file_transfer_download_chunk": transfer(); number("offset"); break;
+      case "file_transfer_upload_begin": file(); number("size"); text("sha256", 64); boolean("overwrite"); break;
+      case "file_transfer_upload_chunk": transfer(); number("offset"); text("data", 4096); break;
+      case "file_transfer_upload_commit": case "file_transfer_status": case "file_transfer_cancel": transfer(); break;
+      case "process_start": session(); text("command", 4000); number("timeout_ms"); break;
+      case "process_output": case "process_status": case "process_kill": session(); text("process_id", 128); break;
+    }
+    return projected;
+  }
+
+  private async operationDetail(tool: string, args: Record<string, unknown>, body?: unknown, error?: string): Promise<OperationDetail | undefined> {
+    const output = isRecord(body) ? body : {};
+    const entry = (label: string, value: unknown, format: "text" | "diff" = "text") => this.operationDetailEntry(label, value, format);
+    const rootId = typeof args.root_id === "string" ? args.root_id : undefined;
+    const relativePath = typeof args.relative_path === "string" ? args.relative_path : undefined;
+    const directTarget = rootId && relativePath ? `${rootId}/${relativePath.replaceAll("\\", "/")}` : undefined;
+    const transferId = typeof args.transfer_id === "string" ? args.transfer_id : typeof output.transfer_id === "string" ? output.transfer_id : undefined;
+    const transfer = transferId ? this.transfers.get(transferId) : undefined;
+    const target = directTarget ?? this.transferTarget(transfer);
+    const finish = (summary: string, entries: OperationDetailEntry[]) => {
+      if (error) entries.push(entry("エラー", error));
+      return { version: 1 as const, summary, entries };
+    };
+    const transferEntries = (): OperationDetailEntry[] => {
+      const entries: OperationDetailEntry[] = [];
+      if (target) entries.push(entry("対象", target));
+      if (transfer?.direction) entries.push(entry("方向", transfer.direction));
+      if (transferId) entries.push(entry("転送 ID", transferId));
+      if (transfer) {
+        entries.push(entry("サイズ", transfer.size));
+        entries.push(entry("ハッシュ", transfer.sha256));
+      }
+      return entries;
+    };
+
+    if (tool === "file_search" || tool === "content_search") {
+      const entries = [entry("検索条件", `root_id=${rootId ?? "—"}\nquery=${String(args.query ?? "—")}`)];
+      if (typeof output.output === "string") entries.push(entry("検索結果", output.output));
+      return finish(tool === "file_search" ? "ファイル検索" : "内容検索", entries);
+    }
+    if (tool === "file_read") {
+      const entries = [
+        entry("対象", directTarget ?? "—"),
+        entry("読取範囲", `offset=${args.offset ?? "省略"} length=${args.length ?? "省略"}`),
+      ];
+      if (typeof output.output === "string") entries.push(entry("本文", output.output));
+      return finish("ファイル読取", entries);
+    }
+    if (tool === "file_patch") {
+      const oldText = String(args.old_string ?? "");
+      const newText = String(args.new_string ?? "");
+      const removed = oldText.split("\n").map((line) => `-${line}`).join("\n");
+      const added = newText.split("\n").map((line) => `+${line}`).join("\n");
+      const entries = [
+        entry("対象", directTarget ?? "—"),
+        entry("期待置換数", args.expected_replacements ?? 1),
+        entry("差分", `--- before\n+++ after\n${removed}\n${added}`, "diff"),
+      ];
+      if (typeof output.output === "string") entries.push(entry("結果", output.output));
+      return finish("ファイル部分変更", entries);
+    }
+    if (tool === "file_transfer_download_begin" || tool === "file_transfer_upload_begin") {
+      const entries = transferEntries();
+      if (!entries.some((candidate) => candidate.label === "対象") && directTarget) entries.unshift(entry("対象", directTarget));
+      const direction = tool.includes("_download_") ? "download" : "upload";
+      if (!entries.some((candidate) => candidate.label === "方向")) entries.push(entry("方向", direction));
+      if (!entries.some((candidate) => candidate.label === "サイズ") && args.size !== undefined) entries.push(entry("サイズ", args.size));
+      if (!entries.some((candidate) => candidate.label === "ハッシュ") && args.sha256 !== undefined) entries.push(entry("ハッシュ", args.sha256));
+      if (tool === "file_transfer_download_begin" && transfer?.snapshot) {
+        const preview = await this.previewFile(transfer.snapshot, transfer.size);
+        if (preview) entries.push(preview);
+      }
+      return finish(direction === "download" ? "ダウンロード開始" : "アップロード開始", entries);
+    }
+    if (tool === "file_transfer_download_chunk" || tool === "file_transfer_upload_chunk") {
+      const entries = transferEntries();
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const nextOffset = typeof output.next_offset === "number" ? output.next_offset : transfer?.offset;
+      if (offset !== undefined || nextOffset !== undefined) entries.push(entry("位置", `offset=${offset ?? "—"} next_offset=${nextOffset ?? "—"}`));
+      if (offset !== undefined && typeof nextOffset === "number") entries.push(entry("処理バイト数", Math.max(0, nextOffset - offset)));
+      if (output.complete !== undefined) entries.push(entry("完了", output.complete));
+      const encoded = tool === "file_transfer_download_chunk" ? output.data : args.data;
+      if (typeof encoded === "string" && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && encoded.length % 4 === 0) {
+        const bytes = Buffer.from(encoded, "base64");
+        if (bytes.length) entries.push(this.previewBytes(bytes));
+      }
+      return finish(tool === "file_transfer_download_chunk" ? "ダウンロードデータ" : "アップロードデータ", entries);
+    }
+    if (tool === "file_transfer_upload_commit") {
+      const entries = transferEntries();
+      if (transfer?.committedPreview && typeof output.resolved_path === "string") entries.push(transfer.committedPreview);
+      return finish("アップロード確定", entries);
+    }
+    if (tool === "file_transfer_status" || tool === "file_transfer_cancel") {
+      const entries = transferEntries();
+      if (output.state !== undefined) entries.push(entry("状態", output.state));
+      else if (transfer?.state) entries.push(entry("状態", transfer.state));
+      if (output.next_offset !== undefined) entries.push(entry("位置", output.next_offset));
+      else if (transfer?.offset !== undefined) entries.push(entry("位置", transfer.offset));
+      return finish(tool === "file_transfer_status" ? "転送状態" : "転送取消し", entries);
+    }
+    return undefined;
+  }
+
+  private tool<T extends Record<string, z.ZodTypeAny>>(user: string, fn: (args: z.infer<z.ZodObject<T>>, operationId: string) => Promise<unknown>) {
+    let toolName = "unknown";
+    const handler = async (args: z.infer<z.ZodObject<T>>) => {
+    const operationId = makeId();
+    const receivedAt = new Date().toISOString();
+    const record = args as Record<string, unknown>;
+    const comment = typeof record.comment === "string" ? record.comment.trim() : "";
+    const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
+    const entryState = this.userExecutionState(user);
+    const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
+      : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
+      : typeof record.transfer_id === "string" ? `transfer:${record.transfer_id.slice(0, 128)}`
+      : typeof record.command === "string" ? "command execution"
+      : "—";
+    let started = false;
+    let gated = false;
+    let auditWarning = false;
+    let receivedAuditFailed = false;
+    const safeException = this.todoException(toolName, user, record.session_id, record);
+    const entryGeneration = entryState.stopGeneration;
+    const executionOperation: ExecutionOperation = { user, operationId, stopGeneration: entryGeneration };
+    const sessionAccess = () => executionOperation.sessionAccessAt ? { sessionAccessAt: executionOperation.sessionAccessAt } : {};
+    try {
+      try { await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt }); }
+      catch { auditWarning = true; receivedAuditFailed = true; }
+      if (entryState.stopped) throw new UserStopRequested(entryState);
+      const gateSession = typeof record.session_id === "string" ? this.sessions.get(record.session_id) : undefined;
+      const processReadException = ["process_status", "process_output"].includes(toolName) && safeException;
+      if ((!safeException || processReadException) && gateSession?.user === user && gateSession.state === "active" && gateSession.expires > Date.now()) {
+        if (receivedAuditFailed && gateSession.todo.enabled && !processReadException) return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } }));
+        const decision = await this.todoGate(gateSession);
+        if (decision.stale) {
+          if (processReadException) executionOperation.todoStale = true;
+          if (decision.reason === "clock_anomaly" || decision.reason === "clock_unavailable" || decision.reason === "updated_timestamp_invalid") await this.audit("todo.clock_anomaly", { user, sessionId: gateSession.id, version: gateSession.todo.version, reason: decision.reason }).catch(() => undefined);
+          if (!processReadException) {
+            await this.audit("todo.gate_denied", { user, sessionId: gateSession.id, version: gateSession.todo.version, operation: toolName, reason: decision.reason }).catch(() => undefined);
+            return failure(JSON.stringify({ error: { code: "TODO_STALE", reason: decision.reason, last_updated_at: decision.lastUpdatedAt, action: "作業一覧を開いて更新してから操作を再実行してください。" } }));
+          }
+        }
+        if (!decision.stale && gateSession.todo.enabled && !processReadException) {
+          try { await this.audit("todo.gate_allowed", { user, sessionId: gateSession.id, version: gateSession.todo.version, operation: toolName }); }
+          catch { return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } })); }
+          gated = true;
+        }
+      }
+      started = true;
+      const startAt = new Date().toISOString();
+      try { await this.audit("operation.started", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, startAt }); }
+      catch { if (safeException) auditWarning = true; else if (gated) return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } })); else throw new Error("Audit unavailable."); }
+      const body = await this.operationContext.run(executionOperation, () => { this.requireCurrentOperation(); return fn(args, operationId); });
+      const detail = await this.operationDetail(toolName, record, body).catch(() => undefined);
+      // A stop can arrive while an unavoidable in-flight I/O operation is
+      // completing. Do not present that operation as permission to continue.
+      this.requireCurrentOperation();
+      const openedConnection = isRecord(body) && typeof body.connection_id === "string" ? body.connection_id : isRecord(body) && typeof body.session_id === "string" ? body.session_id : undefined;
+      const terminalConnection = openedConnection ?? connectionId;
+      try { await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...(detail ? { detail } : {}), ...sessionAccess() }); }
+      catch { auditWarning = true; }
+      if (auditWarning && isRecord(body)) {
+        const appliedByTool = (toolName === "session_open" && typeof body.session_id === "string")
+          || (toolName === "session_close" && body.closed === true)
+          || (toolName === "todo_update" && typeof body.version === "number" && body.conflict !== true)
+          || (toolName === "todo_enforcement_set" && typeof body.enabled === "boolean")
+          || (toolName === "file_transfer_cancel" && body.cancelled === true)
+          || (toolName === "process_kill" && body.state === "terminating" && body.rejected !== true);
+        const appliedResult = body.applied !== undefined ? {}
+          : toolName === "process_kill" && body.termination_unconfirmed === true ? { applied: "unknown" as const }
+          : toolName === "process_kill" && body.rejected === true ? { applied: false }
+          : gated || appliedByTool ? { applied: true } : {};
+        return result({ ...body, audit_warning: true, ...appliedResult });
+      }
+      return result(body);
+    } catch (error) {
+      if (error instanceof UserStopRequested) {
+        const status = started ? "cancelled" : "rejected";
+        const detail = await this.operationDetail(toolName, record, undefined, "USER_STOP_REQUESTED").catch(() => undefined);
+        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", errorName: "UserStopRequested", errorCode: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
+        return stoppedFailure(error.state);
+      }
+      const message = error instanceof Error ? error.message : "Operation failed.";
+      const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
+      const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory)/.test(message) ? message : "Operation failed.";
+      const detail = await this.operationDetail(toolName, record, undefined, publicMessage).catch(() => undefined);
+      const errorCode = auditErrorCode(error);
+      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, errorName: auditErrorName(error), ...(errorCode !== undefined ? { errorCode } : {}), ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
+      if (gated && started) return failure(JSON.stringify({ error: { code: "TODO_OPERATION_OUTCOME_UNKNOWN", applied: "unknown", message: publicMessage } }));
+      return failure(publicMessage);
+    }
+    };
+    Object.defineProperty(handler, "rdmcpSetToolName", { value: (name: string) => { toolName = name; } });
+    return handler;
+  }
   server(user: string): McpServer {
-    const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" });
+    const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" }, {
+      instructions: "All tools require an authenticated caller and a brief comment explaining what the call is intended to accomplish. Open a session with session_open and pass its session_id to file, transfer, and process operations that require it; session IDs belong to the authenticated caller, and operations are rejected while that caller's Emergency Stop is active. File and transfer tools use root_id as their path base: every relative_path is relative to that configured root, never to the session working_directory. node_list returns each root's absolute path. Search tools use root_id and query. process_start instead runs commands in the session working_directory. Prefer the dedicated root-scoped file tools for file operations. process_start runs commands needed for the current user-authorized task with the MCP server OS user's existing permissions.",
+    });
     type RequestHandler = (...args: unknown[]) => unknown;
     const underlying = server.server as unknown as { setRequestHandler: (schema: unknown, handler: RequestHandler) => unknown };
     const setRequestHandler = underlying.setRequestHandler.bind(underlying);
@@ -507,64 +1380,134 @@ export class RemoteDesktopService {
       const listed = await handler(...args) as { tools?: Array<Record<string, unknown>> };
       if (!Array.isArray(listed.tools)) return listed;
       return { ...listed, tools: listed.tools.map((tool) => ({ ...tool, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })) };
-    } : handler);
-    const intercept = server as unknown as { registerTool: (name: string, config: { _meta?: Record<string, unknown> }, handler: unknown) => unknown };
+    } : async (...args: unknown[]) => {
+      const receivedAt = new Date().toISOString();
+      const response = await handler(...args);
+      const request = isRecord(args[0]) ? args[0] : {};
+      const params = isRecord(request.params) ? request.params : {};
+      const rawRecord = isRecord(params.arguments) ? params.arguments : {};
+      const errorText = isRecord(response) && response.isError === true && Array.isArray(response.content)
+        ? response.content.map((item) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? item.text : undefined)
+          .find((value) => value?.includes("Input validation error:"))
+        : undefined;
+      if (!errorText) return response;
+      const operationId = makeId();
+      const toolName = typeof params.name === "string" ? params.name : "unknown";
+      const record = this.rejectedArgumentProjection(toolName, rawRecord);
+      const comment = typeof record.comment === "string" ? record.comment.trim() : "";
+      const connectionId = typeof record.session_id === "string" && this.userOwnsActiveSession(user, record.session_id) ? record.session_id : `request:${operationId}`;
+      const target = typeof record.relative_path === "string" ? record.relative_path.slice(0, 500)
+        : typeof record.process_id === "string" ? `process:${record.process_id.slice(0, 128)}`
+        : typeof record.transfer_id === "string" ? `transfer:${record.transfer_id.slice(0, 128)}`
+        : typeof record.command === "string" ? "command execution"
+        : "—";
+      const detail = await this.operationDetail(toolName, record, undefined, errorText).catch(() => undefined);
+      await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt }).catch(() => undefined);
+      await this.audit("operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "rejected", reason: "input_validation", errorName: "InputValidationError", errorCode: "INPUT_VALIDATION", ...(detail ? { detail } : {}) }).catch(() => undefined);
+      return response;
+    });
+    const intercept = server as unknown as { registerTool: (name: string, config: { description?: string; inputSchema?: Record<string, z.ZodTypeAny>; _meta?: Record<string, unknown> }, handler: unknown) => unknown };
     const originalRegisterTool = intercept.registerTool.bind(server);
-    intercept.registerTool = (name, config, handler) => originalRegisterTool(name, { ...config, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
+    intercept.registerTool = (name, config, handler) => {
+      const tagged = handler as { rdmcpSetToolName?: (tool: string) => void };
+      tagged.rdmcpSetToolName?.(name);
+      return originalRegisterTool(name, { ...config, description: `${config.description ?? ""} A non-empty comment explaining what this call is intended to accomplish is required and is recorded with the operation.`, inputSchema: { ...config.inputSchema, comment: z.string().trim().min(1).max(500).describe("Briefly explain what this call is intended to accomplish.") }, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
+    };
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
-    server.registerTool("session_open", { description: "Open a local operation session.", inputSchema: {} }, this.tool(user, "session_open", async () => { await this.sweepExpired(); const now = Date.now(); const session: Session = { id: makeId(), user, created: now, touched: now, expires: now + SESSION_TTL, state: "active" }; this.sessions.set(session.id, session); await this.audit("session.open", { user, sessionId: session.id }); return { session_id: session.id, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state }; }));
-    server.registerTool("session_list", { description: "List the caller's active sessions.", inputSchema: {} }, this.tool(user, "session_list", async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
-    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, "session_close", async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
-    server.registerTool("node_list", { description: "List the single supported local node and permitted file-root identifiers.", inputSchema: { session_id: sessionId } }, this.tool(user, "node_list", async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, root_ids: this.cfg.roots.map((root) => root.id), connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
-    server.registerTool("file_search", { description: "Search permitted file names through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, "file_search", async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
-    server.registerTool("content_search", { description: "Search permitted file content through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, "content_search", async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "content"); await this.audit("file.content_search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
-    const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500) };
-    server.registerTool("file_read", { description: "Read a permitted text file through Desktop Commander.", inputSchema: { ...fileInput, offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().max(1000).optional() } }, this.tool(user, "file_read", async ({ session_id, node_id, root_id, relative_path, offset, length }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("read_file", { path: await this.safePath(root_id, relative_path), offset, length }); await this.audit("file.read", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
-    server.registerTool("file_patch", { description: "Apply an exact text replacement through Desktop Commander.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, "file_patch", async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const output = await this.dc.call("edit_block", { file_path: await this.safePath(root_id, relative_path), old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
-    server.registerTool("file_transfer_download_begin", { description: "Create an immutable private snapshot for chunk download.", inputSchema: fileInput }, this.tool(user, "file_transfer_download_begin", async ({ session_id, node_id, root_id, relative_path }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); return { transfer_id: item.id, filename: path.basename(source), size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
-    server.registerTool("file_transfer_download_chunk", { description: "Read the next immutable chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, "file_transfer_download_chunk", async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); let handle: FileHandle | undefined; try { handle = await open(item.snapshot, "r"); const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed."); if (complete) { item.state = "complete"; await this.cleanup(item); this.rememberTerminal(item); } return { data: data.toString("base64"), next_offset: item.offset, complete }; } catch (error) { await this.fail(item, "snapshot_read_failed"); throw error; } finally { await handle?.close().catch(() => undefined); } })));
-    server.registerTool("file_transfer_upload_begin", { description: "Start a serialized chunk upload.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean() } }, this.tool(user, "file_transfer_upload_begin", async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); return { transfer_id: item.id, chunk_bytes: this.cfg.chunkBytes }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
-    server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, "file_transfer_upload_chunk", async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
-    server.registerTool("file_transfer_upload_commit", { description: "Verify and atomically commit an upload.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, "file_transfer_upload_commit", async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || !item.temp || !item.tempHandle || !item.tempIdentity || item.offset !== item.size) throw new Error("Upload is incomplete."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } await item.tempHandle.sync(); await item.tempHandle.close(); item.tempHandle = undefined; const bytes = await readFile(item.temp); if (bytes.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256) { await this.fail(item, "upload_hash_mismatch"); throw new Error("Upload integrity check failed."); } await this.safePath(item.rootId, path.relative(this.root(item.rootId).path, item.target), true); try { if (item.overwrite) await rename(item.temp, item.target); else { await this.linkNoReplace(item.temp, item.target); await unlink(item.temp); } } catch { await this.fail(item, "destination_conflict"); throw new Error("Destination exists or atomic no-replace commit is unavailable."); } await this.untrackOwnedUpload(item.temp); item.state = "complete"; this.rememberTerminal(item); await this.audit("transfer.complete", { transferId: item.id, direction: item.direction, sessionId: item.sessionId, size: item.size, sha256: item.sha256 }); return { size: item.size, sha256: item.sha256 }; })));
-    server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, "file_transfer_status", async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
+    server.registerTool("session_open", { description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Set the required absolute working_directory and brief purpose. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Optionally provide a public HTTP(S) url and display title. When title is blank or omitted and the URL is eligible, the server sends an unauthenticated public request to retrieve the page title; it sends no cookies or local credentials. Private or login-required pages are not supported, so enter a title for those links. Do not put secrets in a URL. Retrieval is bounded and failure does not prevent opening the session; a provided title prevents retrieval. Opening is rejected while the caller's Emergency Stop is active.", inputSchema: { working_directory: z.string().trim().min(1).max(4096), purpose: z.string().trim().min(1).max(200), url: z.string().optional(), title: z.string().optional() } }, this.tool(user, async ({ working_directory, purpose, url, title }) => { await this.sweepExpired(); this.requireCurrentOperation(); let workingDirectory: string; try { if (!path.isAbsolute(working_directory)) throw new Error(); workingDirectory = await realpath(working_directory); if (!(await lstat(workingDirectory)).isDirectory()) throw new Error(); } catch { throw new Error("Working directory must be an existing absolute directory."); } const externalLink = createSessionLink({ url, title }); this.requireCurrentOperation(); const now = Date.now(); const mono = performance.now(); const session: Session = { id: makeId(), user, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active", version: 1, todo: { items: [], version: 0, lastTodoUpdatedMono: null, lastUpdatedAt: null, enabled: true, enabledAtMono: mono, lastGateMono: mono, lastGateWall: now }, ...externalLink }; this.sessions.set(session.id, session); let auditWarning = false; try { await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, workingDirectory, purpose: session.purpose, stopGeneration: this.userExecutionState(user).stopGeneration }); } catch { auditWarning = true; } this.startSessionLinkTitleFetch(session); return { session_id: session.id, connection_id: session.id, working_directory: session.workingDirectory, purpose: session.purpose, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state, ...(session.externalUrl ? { external_url: session.externalUrl } : {}), ...(session.externalTitle ? { external_title: session.externalTitle } : {}), ...(session.externalTitleSource ? { external_title_source: session.externalTitleSource } : {}), external_title_status: session.externalTitleStatus, ...(auditWarning ? { audit_warning: true, applied: true } : {}) }; }));
+    server.registerTool("session_list", { description: "List the caller's active sessions with their working directory, purpose, and optional external link display metadata.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state, ...(entry.externalUrl || entry.externalTitle ? { ...(entry.externalUrl ? { external_url: entry.externalUrl } : {}), ...(entry.externalTitle ? { external_title: entry.externalTitle } : {}), external_title_source: entry.externalTitleSource, external_title_status: entry.externalTitleStatus } : {}) })) }; }));
+    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.processLock.run(() => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.clearSessionLink(session); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } let auditWarning = false; try { await this.audit("session.close", { user, sessionId: session_id }); } catch { auditWarning = true; } return { closed: true, ...(auditWarning ? { audit_warning: true, applied: true } : {}) }; }))));
+    server.registerTool("todo_get", { description: "Read the shared Todo list for a session owned by the authenticated caller.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.todoGet(user, session_id)));
+    server.registerTool("todo_update", { description: "Add, edit, reorder, complete, or delete Todo items using an expected version.", inputSchema: { session_id: sessionId, expected_version: z.number().int().nonnegative(), changes: todoChangesSchema } }, this.tool(user, async ({ session_id, expected_version, changes }) => this.todoUpdate(user, session_id, expected_version, changes)));
+    server.registerTool("todo_enforcement_set", { description: "Enable or disable the session Todo freshness gate.", inputSchema: { session_id: sessionId, enabled: z.boolean() } }, this.tool(user, async ({ session_id, enabled }) => this.todoSetEnforcement(user, session_id, enabled)));
+    server.registerTool("node_list", { description: "List the one supported local node and its configured file roots. Requires an active session_id belonging to the authenticated caller. roots contains each root_id and its canonical absolute_path; root_ids is retained for compatibility. File and transfer relative_path values are relative to the returned root, while process_start uses the session working_directory. node_id selects the local node for file and process operations.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, root_ids: this.cfg.roots.map((root) => root.id), roots: this.cfg.roots.map((root) => ({ root_id: root.id, absolute_path: root.path })), path_base: "root", connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));
+    server.registerTool("file_search", { description: "Search file names through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches names only and does not search file contents. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "files"); await this.audit("file.search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
+    server.registerTool("content_search", { description: "Search file contents through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches contents and does not search file names. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await this.search(this.root(root_id), query, "content"); await this.audit("file.content_search", { user, sessionId: session_id, nodeId: node, rootId: root_id }); return { output }; }));
+    const fileInput = { session_id: sessionId, node_id: nodeId, root_id: z.string(), relative_path: z.string().min(1).max(500).describe("Path relative to root_id, never the session working_directory.") };
+    server.registerTool("file_read", { description: "Read text from a configured file root using root_id and a root-relative relative_path. Requires the caller's active session_id and permits path checks to reject protected service files and escapes from that root. Optional offset is nonnegative; length is 1–1000.", inputSchema: { ...fileInput, offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().max(1000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, offset, length }) => { this.session(user, session_id); const node = this.node(node_id); const filePath = await this.safePath(root_id, relative_path); this.requireCurrentOperation(); const output = await this.dc.call("read_file", { path: filePath, offset, length }); await this.audit("file.read", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
+    server.registerTool("file_patch", { description: "Replace matching text in a configured file root using root_id and a root-relative relative_path. Requires the caller's active session_id; old_string must match and expected_replacements (1–100, default 1) controls the expected match count. This is a text replacement, not a general file upload.", inputSchema: { ...fileInput, old_string: z.string().min(1).max(1_000_000), new_string: z.string().max(1_000_000), expected_replacements: z.number().int().positive().max(100).default(1) } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, old_string, new_string, expected_replacements }) => { this.session(user, session_id); const node = this.node(node_id); const filePath = await this.safePath(root_id, relative_path); this.requireCurrentOperation(); const output = await this.dc.call("edit_block", { file_path: filePath, old_string, new_string, expected_replacements }); await this.audit("file.patch", { user, sessionId: session_id, nodeId: node, rootId: root_id, relativePath: relative_path }); return { output }; }));
+    server.registerTool("file_transfer_download_begin", { description: "Begin a download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Creates a private snapshot copy and returns the source resolved_path, root_id, path_base=root, size, SHA-256, and chunk size. Set inline=true to return and complete the whole file in this call when it fits within one chunk; larger files remain active for file_transfer_download_chunk.", inputSchema: { ...fileInput, inline: z.boolean().optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, inline }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const source = await this.safePath(root_id, relative_path); const info = await lstat(source); if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_BYTES) throw new Error("Only regular files within the transfer limit are allowed."); const directory = path.join(this.cfg.dataDir, "transfers"); this.requireCurrentOperation(); await mkdir(directory, { recursive: true, mode: 0o700 }); const snapshot = path.join(directory, `${makeId()}.snapshot`); try { this.requireCurrentOperation(); const metadata = await this.privateSnapshot(source, snapshot); const item: Transfer = { id: makeId(), direction: "download", sessionId: session_id, nodeId: node, rootId: root_id, target: source, snapshot, ...metadata, offset: 0, touched: Date.now(), state: "active", sent: createHash("sha256") }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size: item.size, sha256: item.sha256 }); const base = { transfer_id: item.id, filename: path.basename(source), resolved_path: await realpath(source), root_id, path_base: "root" as const, size: item.size, sha256: item.sha256, chunk_bytes: this.cfg.chunkBytes }; if (!inline || item.size > this.cfg.chunkBytes) return { ...base, complete: false }; const data = await readFile(snapshot); item.sent?.update(data); item.offset = data.length; if (item.sent?.digest("hex") !== item.sha256) { await this.fail(item, "snapshot_read_failed"); throw new Error("Snapshot integrity check failed."); } await this.completeDownload(item); return { ...base, data: data.toString("base64"), next_offset: item.offset, complete: true }; } catch (error) { await rm(snapshot, { force: true }).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_download_chunk", { description: "Read the next chunk from the snapshot copy. The completed download is checked against its SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "download" || item.offset !== offset || !item.snapshot) throw new Error("Chunk offset or direction is invalid."); let handle: FileHandle | undefined; try { handle = await open(item.snapshot, "r"); const length = Math.min(this.cfg.chunkBytes, item.size - item.offset); const bytes = Buffer.alloc(length); const read = await handle.read(bytes, 0, length, item.offset); if (read.bytesRead !== length) throw new Error("Snapshot read failed."); const data = bytes.subarray(0, read.bytesRead); item.sent?.update(data); item.offset += read.bytesRead; const complete = item.offset === item.size; if (complete && item.sent?.digest("hex") !== item.sha256) throw new Error("Snapshot integrity check failed."); if (complete) await this.completeDownload(item); return { data: data.toString("base64"), next_offset: item.offset, complete }; } catch (error) { await this.fail(item, "snapshot_read_failed"); throw error; } finally { await handle?.close().catch(() => undefined); } })));
+    server.registerTool("file_transfer_upload_begin", { description: "Begin an upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller's active session_id. Declare the total size (0–25 MiB), SHA-256, and overwrite policy. When the whole file fits within one chunk, pass its base64 data in data to verify and atomically commit it in this single call; omit data for the existing chunked upload flow.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean(), data: z.string().max(700_000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); this.session(user, session_id); const node = this.node(node_id); let inlineBytes: Buffer | undefined; if (data !== undefined) { if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Inline upload must be valid base64."); inlineBytes = Buffer.from(data, "base64"); if (inlineBytes.length > this.cfg.chunkBytes) throw new Error("Inline upload exceeds the configured chunk size."); if (inlineBytes.length !== size || createHash("sha256").update(inlineBytes).digest("hex") !== sha256) throw new Error("Inline upload size or SHA-256 does not match the declaration."); } if ([...this.transfers.values()].filter((item) => item.state === "active").length >= MAX_TRANSFERS) throw new Error("Transfer limit reached."); const target = await this.safePath(root_id, relative_path, true); const resolvedTarget = path.join(await realpath(path.dirname(target)), path.basename(target)); this.requireCurrentOperation(); if (!overwrite) await this.verifyNoReplaceCapability(path.dirname(target)); const temp = path.join(path.dirname(target), `.__rdmcp_${makeId()}.upload`); let handle: FileHandle | undefined; try { this.requireCurrentOperation(); handle = await open(temp, "wx", 0o600); const identity = this.identityFromStats(await handle.stat({ bigint: true })); await this.trackOwnedUpload(root_id, temp, identity); const item: Transfer = { id: makeId(), direction: "upload", sessionId: session_id, nodeId: node, rootId: root_id, target, temp, tempHandle: handle, tempIdentity: identity, size, sha256, offset: 0, touched: Date.now(), state: "active", overwrite }; this.transfers.set(item.id, item); await this.audit("transfer.begin", { transferId: item.id, direction: item.direction, sessionId: session_id, nodeId: node, size, sha256 }); const base = { transfer_id: item.id, resolved_path: resolvedTarget, root_id, path_base: "root" as const, chunk_bytes: this.cfg.chunkBytes }; if (inlineBytes === undefined) return { ...base, complete: false }; this.requireCurrentOperation(); if (inlineBytes.length) await handle.write(inlineBytes, 0, inlineBytes.length, 0); item.offset = inlineBytes.length; const completed = await this.completeUpload(item); return { ...base, ...completed, complete: true }; } catch (error) { await handle?.close().catch(() => undefined); await rm(temp, { force: true }).catch(() => undefined); await this.untrackOwnedUpload(temp).catch(() => undefined); throw error; } })));
+    server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); if (item.direction !== "upload" || item.offset !== offset || !item.temp || !item.tempHandle || !item.tempIdentity) throw new Error("Chunk offset or direction is invalid."); const pathInfo = await this.identityForPath(item.temp).catch(() => undefined); if (!pathInfo || pathInfo.dev !== item.tempIdentity.dev || pathInfo.ino !== item.tempIdentity.ino) { await this.fail(item, "temp_path_replaced"); throw new Error("Upload temporary file identity changed."); } if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4) throw new Error("Chunk must be valid base64."); const bytes = Buffer.from(data, "base64"); if (!bytes.length || bytes.length > this.cfg.chunkBytes || item.offset + bytes.length > item.size) throw new Error("Chunk exceeds declared upload size."); this.requireCurrentOperation(); await item.tempHandle.write(bytes, 0, bytes.length, item.offset); item.offset += bytes.length; return { next_offset: item.offset }; })));
+    server.registerTool("file_transfer_upload_commit", { description: "Finish the upload identified by transfer_id for the caller's active session_id. Requires all declared bytes; verifies the exact size and SHA-256 before moving the temporary file into the root-relative destination. The destination replacement is atomic when overwrite=true; when false, commit atomically fails if a destination already exists. Returns the committed resolved_path, root_id, path_base=root, size, and SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const item = this.transfer(user, session_id, transfer_id); return this.completeUpload(item); })));
+    server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
       await this.sweepExpiredLocked();
       this.session(user, session_id);
       const item = this.transfers.get(transfer_id);
       if (!item || item.sessionId !== session_id) throw new Error("Transfer is unavailable.");
       return { state: item.state, next_offset: item.offset, transferred_bytes: item.offset };
     })));
-    server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, "file_transfer_cancel", async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
+    server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => this.transferLock.run(async () => {
       await this.sweepExpiredLocked();
       const item = this.transfer(user, session_id, transfer_id);
       item.state = "cancelled";
       await this.cleanup(item);
       this.rememberTerminal(item);
-      await this.audit("transfer.cancel", { transferId: item.id, sessionId });
-      return { cancelled: true };
+      let auditWarning = false;
+      try { await this.audit("transfer.cancel", { transferId: item.id, sessionId }); } catch { auditWarning = true; }
+      return { cancelled: true, ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
     })));
     const processKey = (item: Pick<Process, "generation" | "pid">) => `${this.cfg.nodeId}:${item.generation}:${item.pid}`;
     const stopWatching = (processId: string) => { const watcher = this.processWatchers.get(processId); if (watcher) clearInterval(watcher); this.processWatchers.delete(processId); };
     const markStale = (item: Process) => { if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); item.state = "stale"; stopWatching(item.id); };
     const requireCurrent = (item: Process) => { let generation: string; try { generation = this.dc.currentGeneration(); } catch { markStale(item); throw new Error("Process id is stale or finished."); } if (item.generation !== generation || this.currentProcessOwners.get(processKey(item)) !== item.id) { markStale(item); throw new Error("Process id is stale or finished."); } return item; };
-    const redactCommand = (command: string) => [this.cfg.tokenSecret, ...this.cfg.users.map((configured) => configured.passwordHash)].filter(Boolean).reduce((value, secret) => value.split(secret).join("[redacted]"), command).replace(/\bBearer\s+\S+/gi, "Bearer [redacted]").replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]").slice(0, 4000);
-    const startProcess = (command: string, timeout: number) => this.cfg.processAdapter?.start(command, timeout) ?? this.dc.call("start_process", { command, timeout_ms: timeout });
+    const redactCommand = (command: string) => [this.cfg.tokenSecret, this.cfg.publicAuth?.googleClientSecret ?? "", ...this.cfg.users.map((configured) => configured.passwordHash)].filter(Boolean).reduce((value, secret) => value.split(secret).join("[redacted]"), command).replace(/\bBearer\s+\S+/gi, "Bearer [redacted]").replace(/((?:--)?(?:token|password|secret|credential|api[_-]?key|authorization)\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]").slice(0, 4000);
+    const startProcess = (command: string, timeout: number, owner: string, operationId: string, workingDirectory: string) => this.cfg.processAdapter?.start(command, timeout, workingDirectory) ?? this.dc.call("start_process", { command, timeout_ms: timeout, __rdmcp_owner: owner, __rdmcp_operation: operationId, __rdmcp_cwd: workingDirectory });
     const readProcess = (item: Process) => this.cfg.processAdapter?.read(item.pid, item.cursor, 1_000) ?? this.dc.call("read_process_output", { pid: item.pid, offset: item.cursor, length: 1000, timeout_ms: 100 }, 1_000);
     const terminateProcess = (item: Process) => this.cfg.processAdapter?.terminate(item.pid, 2_000) ?? this.dc.call("force_terminate", { pid: item.pid }, 2_000);
     const listProcessSessions = () => this.cfg.processAdapter?.sessions() ?? this.dc.call("list_sessions", {}, 1_000);
     // A finished state is observable by callers.  Persist its audit record before
     // publishing that state so cleanup cannot remove the private audit file while
     // an in-flight watcher is still appending to it.
-    const auditExit = async (item: Process) => { if (item.exitAudited) return; await this.audit("process.exit", { processId: item.id, result: item.terminationRequested ? "exit_after_termination_request" : "natural", exitCode: item.exitCode ?? null }); item.exitAudited = true; };
+    const auditExit = async (item: Process) => { if (item.exitAudited) return; await this.audit("process.exit", { sessionId: item.sessionId, processId: item.id, output: redactCommand(item.output), outputTruncated: item.output.length > 4000, result: item.terminationRequested ? "exit_after_termination_request" : "natural", exitCode: item.exitCode ?? null }); item.exitAudited = true; };
     const finishWhenRootIsGone = async (item: Process) => { if (item.state === "finished") return; requireCurrent(item); await auditExit(item); item.state = "finished"; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); };
     const activeInDesktopCommander = async (item: Process): Promise<boolean> => { requireCurrent(item); const output = await listProcessSessions(); return new RegExp(`PID:\\s*${item.pid}(?:\\D|$)`, "i").test(output); };
-    const observe = async (item: Process) => { const pages: string[] = []; let drained = false; item.outputDrained = false; for (let page = 0; page < 100; page += 1) { requireCurrent(item); const output = await readProcess(item); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); if (completion) { item.completionPending = true; item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]); } if (!remaining || Number(remaining[1]) === 0) { drained = true; break; } } item.outputDrained = drained; item.observationFailures = 0; item.nextObservationAt = undefined; item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); if (drained && item.completionPending) { await auditExit(item); item.state = "finished"; item.completionPending = false; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); } return pages.join("\n"); };
-    const watchProcess = (processId: string) => { if (this.processWatchers.has(processId)) return; let checking = false; const watcher = setInterval(() => { if (checking) return; checking = true; void this.processLock.run(async () => { const item = this.processes.get(processId); if (!item || item.state === "finished" || item.state === "stale") { stopWatching(processId); return; } if (item.nextObservationAt && item.nextObservationAt > Date.now()) return; try { const active = await activeInDesktopCommander(item); if (item.state === "terminating" && active) return; await observe(item); if (!active && item.outputDrained) await finishWhenRootIsGone(item); } catch { if (this.processes.get(processId)?.state === "stale") { stopWatching(processId); return; } item.observationFailures = (item.observationFailures ?? 0) + 1; item.nextObservationAt = Date.now() + Math.min(5_000, 250 * 2 ** Math.min(item.observationFailures, 4)); if (item.observationFailures === 1) await this.audit("process.observe_failed", { processId }); return; } if (this.processes.get(processId)?.state === "finished") stopWatching(processId); }).finally(() => { checking = false; }); }, 250); watcher.unref(); this.processWatchers.set(processId, watcher); };
-    server.registerTool("process_start", { description: "Start an arbitrary command as the same OS user through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, "process_start", async ({ session_id, node_id, command, timeout_ms }) => this.processLock.run(async () => { await this.sweepExpired(); this.session(user, session_id); const node = this.node(node_id); const output = await startProcess(command, timeout_ms); const match = output.match(/PID\s+(-?\d+)/i); if (!match) throw new Error("Desktop Commander did not return a process id."); const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); const item: Process = { id: makeId(), sessionId: session_id, user, generation: this.dc.currentGeneration(), pid: Number(match[1]), state: initialCompletion ? "finished" : "running", output, cursor: 0, exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]) }; const priorId = this.currentProcessOwners.get(processKey(item)); if (priorId) { const prior = this.processes.get(priorId); if (prior) markStale(prior); } this.processes.set(item.id, item); if (item.state === "running") this.currentProcessOwners.set(processKey(item), item.id); try { await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id, pid: item.pid, command: redactCommand(command) }); } finally { if (item.state === "running") watchProcess(item.id); } if (item.state === "finished") await auditExit(item); return { process_id: item.id, output }; })));
-    const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.state === "stale") throw new Error("Process id is stale or finished."); if (item.state !== "finished") requireCurrent(item); return item; };
-    const current = (sid: string, pid: string) => { const item = getProcess(sid, pid); if (item.state !== "running") throw new Error("Process id is stale or finished."); return item; };
-    server.registerTool("process_output", { description: "Read combined process output through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, "process_output", async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
-    server.registerTool("process_status", { description: "Get process status through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, "process_status", async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished") return { state: item.state, exit_code: item.exitCode, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
-    server.registerTool("process_kill", { description: "Terminate a current process through Desktop Commander.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, "process_kill", async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = current(session_id, process_id); let outcome: "acknowledged" | "rejected" | "timed_out"; try { const output = await terminateProcess(item); outcome = /Successfully initiated termination of session/i.test(output) ? "acknowledged" : "rejected"; } catch (error) { outcome = typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === -32001 ? "timed_out" : "rejected"; } if (outcome === "rejected") { await this.audit("process.kill_rejected", { processId: item.id }); watchProcess(item.id); return { state: item.state, rejected: true }; } item.state = "terminating"; item.terminationRequested = true; if (outcome === "timed_out") { item.terminationUnconfirmed = true; await this.audit("process.termination_unconfirmed", { processId: item.id }); watchProcess(item.id); return { state: item.state, termination_unconfirmed: true }; } await this.audit("process.kill_requested", { processId: item.id }); watchProcess(item.id); return { state: item.state }; })));
+    const observe = async (item: Process) => { const pages: string[] = []; let drained = false; item.outputDrained = false; for (let page = 0; page < 100; page += 1) { requireCurrent(item); const output = await readProcess(item); pages.push(output); const read = /Reading (\d+) (?:new )?lines(?: from line (\d+))?/i.exec(output); const remaining = /, (\d+) remaining\)/i.exec(output); if (read) item.cursor = Number(read[2] ?? item.cursor) + Number(read[1]); const completion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); if (completion) { item.completionPending = true; item.exitCode = completion[1] === undefined ? undefined : Number(completion[1]); } if (!remaining || Number(remaining[1]) === 0) { drained = true; break; } } item.outputDrained = drained; item.observationFailures = 0; item.nextObservationAt = undefined; item.output = `${item.output}\n${pages.join("\n")}`.slice(-MAX_PROCESS_OUTPUT_CHARS); const observed = pages.join("\n"); if (observed && pages.some((page) => !/^Reading 0 (?:new )?lines(?: from line \d+)? \(total: \d+ lines(?:, 0 remaining)?\)\s*$/i.test(page.trim()))) await this.audit("process.output", { sessionId: item.sessionId, processId: item.id, output: redactCommand(observed), outputTruncated: observed.length > 4000 }); if (drained && item.completionPending) { await auditExit(item); item.state = "finished"; item.completionPending = false; item.terminationUnconfirmed = false; if (this.currentProcessOwners.get(processKey(item)) === item.id) this.currentProcessOwners.delete(processKey(item)); } return observed; };
+    const watchProcess = (processId: string) => {
+      if (this.closing || this.processWatchers.has(processId)) return;
+      let checking = false;
+      const watcher = setInterval(() => {
+        if (this.closing || checking) return;
+        checking = true;
+        const run = this.processLock.run(async () => {
+          const item = this.processes.get(processId);
+          if (!item || item.state === "finished" || item.state === "stale") { stopWatching(processId); return; }
+          if (item.nextObservationAt && item.nextObservationAt > Date.now()) return;
+          try {
+            const active = await activeInDesktopCommander(item);
+            if (item.state === "terminating" && active) return;
+            await observe(item);
+            if (!active && item.outputDrained) await finishWhenRootIsGone(item);
+          } catch {
+            if (this.processes.get(processId)?.state === "stale") { stopWatching(processId); return; }
+            item.observationFailures = (item.observationFailures ?? 0) + 1;
+            item.nextObservationAt = Date.now() + Math.min(5_000, 250 * 2 ** Math.min(item.observationFailures, 4));
+            if (item.observationFailures === 1) await this.audit("process.observe_failed", { processId });
+            return;
+          }
+          if (this.processes.get(processId)?.state === "finished") stopWatching(processId);
+        }).catch((error: unknown) => {
+          if (!this.processWatcherFailed) {
+            this.processWatcherFailed = true;
+            this.processWatcherFailure = error;
+          }
+        }).finally(() => {
+          checking = false;
+          this.processWatcherRuns.delete(run);
+        });
+        this.processWatcherRuns.add(run);
+        void run;
+      }, 250);
+      watcher.unref();
+      this.processWatchers.set(processId, watcher);
+    };
+    server.registerTool("process_start", { description: "Start a command for the current user-authorized task on the local node through Desktop Commander. Requires the caller's active session_id. The command starts in that session's working_directory. Prefer the dedicated root-scoped file tools for file operations. The command runs with the MCP server OS user's existing permissions. timeout_ms is 100–60000 (default 10000); returns a process_id and initial output. Use process_status, process_output, or process_kill with this same session_id.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async (args, operationId) => this.processLock.run(async () => { const { session_id, node_id, command, timeout_ms } = args; const comment = String((args as Record<string, unknown>).comment); await this.sweepExpired(); const session = this.session(user, session_id); const node = this.node(node_id); const workingDirectorySnapshot = session.workingDirectory; let output: string; try { output = await startProcess(command, timeout_ms, user, operationId, workingDirectorySnapshot); } catch { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), comment, result: "実行を開始できませんでした。" }); throw new Error("Process start failed."); } const match = output.match(/PID\s+(-?\d+)/i); if (!match) { await this.audit("process.start_failed", { user, sessionId: session_id, command: redactCommand(command), comment, output: redactCommand(output), outputTruncated: output.length > 4000, result: "Process ID unavailable." }); throw new Error("Desktop Commander did not return a process id."); } try { this.requireCurrentOperation(); } catch (error) { if (this.cfg.processAdapter) await this.cfg.processAdapter.terminate(Number(match[1]), 2_000).catch(() => undefined); await this.audit(this.cfg.processAdapter ? "process.stop_requested_after_start" : "process.stop_unconfirmed_after_start", { user, sessionId: session_id, pid: Number(match[1]) }); throw error; } const initialCompletion = /Process completed with exit code\s+(?:(-?\d+)|null|undefined)/i.exec(output); const item: Process = { id: makeId(), sessionId: session_id, user, generation: this.dc.currentGeneration(), pid: Number(match[1]), workingDirectorySnapshot, state: initialCompletion ? "finished" : "running", output, cursor: 0, exitCode: initialCompletion?.[1] === undefined ? undefined : Number(initialCompletion[1]) }; const priorId = this.currentProcessOwners.get(processKey(item)); if (priorId) { const prior = this.processes.get(priorId); if (prior) markStale(prior); } this.processes.set(item.id, item); if (item.state === "running") this.currentProcessOwners.set(processKey(item), item.id); try { await this.audit("process.start", { user, sessionId: session_id, nodeId: node, processId: item.id, pid: item.pid, workingDirectorySnapshot, command: redactCommand(command), comment, output: redactCommand(output), outputTruncated: output.length > 4000 }); } finally { if (item.state === "running") watchProcess(item.id); } if (item.state === "finished") await auditExit(item); return { process_id: item.id, output }; })));
+    const getProcess = (sid: string, pid: string) => { this.session(user, sid); const item = this.processes.get(pid); if (!item || item.user !== user || item.sessionId !== sid || item.state === "stale") throw new Error("Process id is stale or finished."); if (item.state !== "finished") requireCurrent(item); return item; };
+    const current = (sid: string, pid: string) => { const item = getProcess(sid, pid); if (item.state !== "running" && item.state !== "terminating") throw new Error("Process id is stale or finished."); return item; };
+    server.registerTool("process_output", { description: "Read the combined output for process_id started in the supplied active session_id. Requires the same session_id used for process_start; returns current state, available exit code, and combined output (stdout and stderr are not separated). Output for finished processes is returned from saved state.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished" || this.operationContext.getStore()?.todoStale) return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
+    server.registerTool("process_status", { description: "Refresh and return the state for process_id started in the supplied active session_id, including an available exit code and output. Requires the same session_id used for process_start; process IDs are scoped to their owner and session.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = getProcess(session_id, process_id); if (item.state === "finished" || this.operationContext.getStore()?.todoStale) return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; if (item.state === "terminating" && await activeInDesktopCommander(item)) return { state: item.state, termination_unconfirmed: item.terminationUnconfirmed || undefined, output: item.output }; const output = await observe(item); return { state: item.state, exit_code: item.exitCode, termination_unconfirmed: item.terminationUnconfirmed || undefined, output }; })));
+    server.registerTool("process_kill", { description: "Request termination of a running or terminating process_id started in the supplied active session_id. Requires the same session_id used for process_start. This targets the tracked process; Windows managed descendants may also be stopped. Requests are serialized and repeated terminating requests are throttled to one every two seconds. If rejected=true, the termination request was not accepted. Otherwise state=terminating records a request, not a confirmed exit. Check process_status for the resulting state and termination_unconfirmed flag.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => this.processLock.run(async () => { this.node(node_id); const item = current(session_id, process_id); const attemptAt = performance.now(); if (item.state === "terminating" && (item.lastTerminationAttemptMono === undefined || attemptAt - item.lastTerminationAttemptMono < 2_000)) throw new Error("Process termination request is throttled."); item.lastTerminationAttemptMono = attemptAt; let outcome: "acknowledged" | "rejected" | "timed_out"; try { const output = await terminateProcess(item); outcome = /Successfully initiated termination of session/i.test(output) ? "acknowledged" : "rejected"; } catch (error) { outcome = typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === -32001 ? "timed_out" : "rejected"; } let auditWarning = false; if (outcome === "rejected") { try { await this.audit("process.kill_rejected", { processId: item.id }); } catch { auditWarning = true; } watchProcess(item.id); return { state: item.state, rejected: true, ...(auditWarning ? { audit_warning: true, applied: false } : {}) }; } item.state = "terminating"; item.terminationRequested = true; if (outcome === "timed_out") { item.terminationUnconfirmed = true; try { await this.audit("process.termination_unconfirmed", { processId: item.id }); } catch { auditWarning = true; } watchProcess(item.id); return { state: item.state, termination_unconfirmed: true, ...(auditWarning ? { audit_warning: true, applied: "unknown" as const } : {}) }; } try { await this.audit("process.kill_requested", { processId: item.id }); } catch { auditWarning = true; } watchProcess(item.id); return { state: item.state, ...(auditWarning ? { audit_warning: true, applied: true } : {}) }; })));
     return server;
   }
 }
@@ -589,7 +1532,19 @@ const publicAuthorizeRequest = (service: RemoteDesktopService, req: Request) => 
   return { clientId, redirectUri, resource, state, challenge };
 };
 export function createApp(service: RemoteDesktopService): Express {
-  const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => { let timer: NodeJS.Timeout | undefined = setTimeout(() => req.destroy(), 15_000); const clearDeadline = () => { if (timer) { clearTimeout(timer); timer = undefined; } }; req.once("end", clearDeadline); req.once("aborted", clearDeadline); res.once("close", clearDeadline); if (["/authorize", "/authorize/confirm", "/authorize/consent", "/token", "/google/callback"].includes(req.path) && Number(req.header("content-length") ?? 0) > 16 * 1024) { clearDeadline(); return res.status(413).type("text").send("Request is too large."); } next(); }); app.use(express.urlencoded({ extended: false, limit: "16kb" })); app.use(["/token", "/authorize/confirm", "/authorize/consent"], express.json({ limit: "16kb" })); app.use(express.json({ limit: "1mb" }));
+  const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => {
+    // The audit EventSource is an authenticated, body-less GET that deliberately
+    // keeps its response open. Only that exact body-less form avoids the generic
+    // request-body deadline; malformed event-stream requests retain it.
+    const bodylessEvents = req.method === "GET" && req.path === "/api/events" && (req.header("content-length") === undefined || req.header("content-length") === "0") && req.header("transfer-encoding") === undefined;
+    let timer: NodeJS.Timeout | undefined = bodylessEvents ? undefined : setTimeout(() => req.destroy(), 15_000);
+    const clearDeadline = () => { if (timer) { clearTimeout(timer); timer = undefined; } };
+    req.once("end", clearDeadline); req.once("aborted", clearDeadline); res.once("close", clearDeadline);
+    if (["/authorize", "/authorize/confirm", "/authorize/consent", "/token", "/google/callback"].includes(req.path) && Number(req.header("content-length") ?? 0) > 16 * 1024) { clearDeadline(); return res.status(413).type("text").send("Request is too large."); }
+    next();
+  }); app.use(express.urlencoded({ extended: false, limit: "16kb" })); app.use(["/token", "/authorize/confirm", "/authorize/consent"], express.json({ limit: "16kb" })); app.use(express.json({ limit: "1mb" }));
+  mountAdmin(app, service);
+  mountUserConsole(app, service);
   app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: service.publicAuth ? "google" : "local-development" }));
   app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json({ resource: `${service.cfg.baseUrl}/mcp`, authorization_servers: [service.cfg.baseUrl], scopes_supported: ["mcp"] }));
   app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_response_iss_parameter_supported: Boolean(service.publicAuth), authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, ...(service.publicAuth ? { client_id_metadata_document_supported: true } : { registration_endpoint: `${service.cfg.baseUrl}/register` }), response_types_supported: ["code"], grant_types_supported: service.publicAuth ? ["authorization_code", "refresh_token"] : ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp"] }));

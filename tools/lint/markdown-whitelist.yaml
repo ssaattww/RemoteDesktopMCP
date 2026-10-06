@@ -280,3 +280,24 @@ entries:
     description: OAuth の権限範囲。
   - term: リリース
     description: 公開版の提供単位。
+  - term: HTML
+    description: 文書構造を表すマークアップ形式の略称。
+  - term: diff
+    description: 変更前後の差分表記を示す一般的な技術用語。
+  - term: hex
+    description: バイト列の16進表記を示す一般的な技術用語。
+  - term: TypeScript
+    description: 本実装で使用するプログラミング言語。
+  - term: Node
+    description: CIで使うJavaScript実行環境。
+  - term: npm
+    description: JavaScript依存関係を管理する標準コマンド。
+  - term: Ubuntu
+    aliases: [ubuntu]
+    description: Linux系の実行環境名。
+  - term: UTC
+    description: 日時を比較する協定世界時。
+  - term: github
+    description: 対象リポジトリのホスト名と管理場所。
+  - term: lint
+    description: 静的な規約や構文の検査を表す一般的な開発用語。

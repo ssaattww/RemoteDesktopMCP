@@ -6,9 +6,9 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { hashPassword } from "../src/hash-password.js";
 import { RemoteDesktopService, configFromEnv, createApp, type RuntimeConfig } from "../src/index.js";
 import { protectPrivateDirectory } from "../src/private-storage.js";
+import { FIXTURE_PASSWORD_HASH } from "./fixture.js";
 
 async function fixture(): Promise<{ service: RemoteDesktopService; root: string; cleanup: () => Promise<void> }> {
   const workspace = path.resolve(process.cwd());
@@ -22,7 +22,7 @@ async function fixture(): Promise<{ service: RemoteDesktopService; root: string;
   const root = path.join(base, "files"); const data = path.join(base, "data");
   await mkdir(root); await mkdir(data);
   await protectPrivateDirectory(data);
-  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
+  const cfg: RuntimeConfig = { baseUrl: "http://127.0.0.1", tokenSecret: "x".repeat(32), users: [{ email: "owner@example.test", passwordHash: FIXTURE_PASSWORD_HASH }], roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024, nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath, dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins: new Set(["https://chatgpt.com"]) };
   const service = new RemoteDesktopService(cfg);
   try { await service.initialize(); }
   catch (error) { await service.close().catch(() => undefined); await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined); throw error; }
@@ -33,7 +33,7 @@ async function mcp(service: RemoteDesktopService, user = "owner@example.test") {
   const client = new Client({ name: "test", version: "1" }); const server = service.server(user);
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   const call = async (name: string, args: Record<string, unknown>) => {
-    const response = await client.callTool({ name, arguments: args });
+    const response = await client.callTool({ name, arguments: { comment: "Automated test execution", ...args } });
     assert.ok("content" in response); const block = response.content.find((item) => item.type === "text");
     if (response.isError) throw new Error(block?.text ?? "tool failed");
     return JSON.parse(block?.text ?? "{}") as Record<string, unknown>;
@@ -49,7 +49,7 @@ test("configuration fails before Desktop Commander for protected root overlap", 
   try {
     await mkdir(data); await protectPrivateDirectory(data);
     const env = { BASE_URL: "http://127.0.0.1", TOKEN_SECRET: "x".repeat(32), AUTHORIZED_USERS_JSON: JSON.stringify([{ email: "u", passwordHash: "scrypt$x$y" }]), FILE_ROOTS_JSON: JSON.stringify([{ id: "r", path: data }]), DATA_DIR: data };
-    const cfg = configFromEnv(env); const service = new RemoteDesktopService(cfg);
+    const cfg = configFromEnv(env); assert.equal(cfg.chunkBytes, 512 * 1024); const service = new RemoteDesktopService(cfg);
     await assert.rejects(service.initialize(), /must not overlap/);
   } finally { await rm(base, { recursive: true, force: true, maxRetries: 3 }); }
 });
@@ -70,7 +70,7 @@ test("OAuth authorization code is PKCE-bound and one use", async () => {
     const httpClient = new Client({ name: "http-test", version: "1" });
     const httpTransport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokenBody.access_token}` } } });
     await httpClient.connect(httpTransport);
-    const httpSession = await httpClient.callTool({ name: "session_open", arguments: {} });
+    const httpSession = await httpClient.callTool({ name: "session_open", arguments: { working_directory: f.root, purpose: "HTTP session regression", comment: "Verify an authenticated HTTP session can open" } });
     assert.ok("content" in httpSession && !httpSession.isError);
     await httpClient.close();
     const reused = await fetch(`${url}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: "https://chatgpt.com/callback" }) }); assert.equal(reused.status, 400);
@@ -82,7 +82,7 @@ test("transfer snapshot remains immutable and no-replace preserves a racing dest
   try {
     const source = path.join(f.root, "source.bin"); const original = Buffer.from("original content");
     await writeFile(source, original); const originalStat = await stat(source);
-    const api = await mcp(f.service); const opened = await api.call("session_open", {}); const session = opened.session_id as string;
+    const api = await mcp(f.service); const opened = await api.call("session_open", { working_directory: f.root, purpose: "Transfer regression" }); const session = opened.session_id as string;
     const other = await mcp(f.service, "other@example.test");
     await assert.rejects(other.call("node_list", { session_id: session }));
     await other.close();

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, open, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { protectAndVerifyKind } from "./private-storage-protection.js";
 
 type PrivateKind = "file" | "directory";
 
@@ -71,7 +72,12 @@ try {
     if ([string]::IsNullOrWhiteSpace($request.file)) { throw 'invalid audit file' }
     $auditFile = Get-Item -LiteralPath $request.file -Force
     if (-not $item.PSIsContainer -or $auditFile.PSIsContainer) { throw 'invalid audit path type' }
-    Assert-PrivateAcl $item
+    $unsafe = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $acl = Get-Acl -LiteralPath $item.FullName
+    if ($allowed -notcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { throw 'untrusted audit directory owner' }
+    foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+      if ($allowed -notcontains $rule.IdentityReference.Value -and $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $unsafe) -ne 0) { throw 'untrusted audit directory write access' }
+    }
     Assert-PrivateAcl $auditFile
     [Console]::Out.Write('{"ok":true}')
     exit 0
@@ -124,8 +130,14 @@ async function assertPrivate(target: string, expected: PrivateKind): Promise<voi
 
 async function protectPrivate(target: string, expected: PrivateKind): Promise<void> {
   if (await kind(target) !== expected) throw new Error("Private storage path type is invalid.");
-  if (process.platform === "win32") await windowsAcl(target, "protect");
-  else await chmod(target, expected === "directory" ? 0o700 : 0o600);
+  if (process.platform === "win32") {
+    // The protect operation verifies the resulting owner and complete ACL in
+    // the same PowerShell process after Set-Acl. Keep the independent path-kind
+    // check without spawning another PowerShell process for the ACL assertion.
+    await protectAndVerifyKind(target, expected, (candidate) => windowsAcl(candidate, "protect"), kind);
+    return;
+  }
+  await chmod(target, expected === "directory" ? 0o700 : 0o600);
   await assertPrivate(target, expected);
 }
 
@@ -144,8 +156,19 @@ export async function assertPrivateAuditStorage(directory: string, file: string)
     await windowsAcl(directory, "assert-audit", file);
     return;
   }
-  await assertPrivateDirectory(directory);
+  await assertSafePrivateParent(directory);
   await assertPrivateFile(file);
+}
+
+/** DATA_DIR may inherit ordinary read access; secret files retain private ACLs. */
+export async function ensureSafeDataDirectory(directory: string): Promise<void> {
+  try { await assertSafePrivateParent(directory); return; }
+  catch (error) {
+    if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error;
+  }
+  await assertSafePrivateParent(path.dirname(directory));
+  await mkdir(directory, { mode: 0o700 });
+  await assertSafePrivateParent(directory);
 }
 
 /** The parent may be readable by ordinary users, but they must not be able to
@@ -195,7 +218,7 @@ export async function createPrivateFile(file: string, contents: string | Uint8Ar
 }
 
 export async function createPrivateTemporaryFile(directory: string, label = "state"): Promise<string> {
-  await assertPrivateDirectory(directory);
+  await assertSafePrivateParent(directory);
   const safeLabel = label.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40) || "state";
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const file = path.join(directory, `.${safeLabel}-${randomBytes(18).toString("hex")}.tmp`);
