@@ -58,6 +58,7 @@ test("remote public process ids map to executor process ids without using local 
   const registry = new NodeRegistry(added.config);
   registry.setLocalCapabilities({ operations: ["file", "process", "transfer"], roots: [], path_base: "root" });
   let nextPid = 910;
+  let completedPid: number | undefined;
   const terminated: number[] = [];
   const executorFixture = await fixture({
     nodeId: remoteId,
@@ -70,7 +71,9 @@ test("remote public process ids map to executor process ids without using local 
         nextPid += 1;
         return `PID ${nextPid}`;
       },
-      read: async () => "Reading 0 new lines (total: 0 lines, 0 remaining)",
+      read: async (pid) => pid === completedPid
+        ? "Process completed with exit code 0\nReading 1 new lines (total: 1 lines, 0 remaining)"
+        : "Reading 0 new lines (total: 0 lines, 0 remaining)",
       terminate: async (pid) => { terminated.push(pid); return "Successfully initiated termination of session"; },
       sessions: async () => `PID: ${nextPid}`,
     },
@@ -79,14 +82,15 @@ test("remote public process ids map to executor process ids without using local 
   const address = await server.start();
   const executorBase = createInitialClusterConfig("executor", "Remote A");
   const executorConfig = setCoordinator({ ...executorBase, local: { ...executorBase.local, node_id: remoteId } }, "127.0.0.1", address.port, added.psk);
-  const client = new ExecutorNodeClient({
+  const createClient = (generation = executorGeneration) => new ExecutorNodeClient({
     config: executorConfig,
-    capabilities: { executor_generation: executorGeneration, desktop_commander_generation: commanderGeneration, operations: ["file", "process", "transfer"], roots: [{ root_id: "files", absolute_path: executorFixture.root }], path_base: "root" },
+    capabilities: { executor_generation: generation, desktop_commander_generation: commanderGeneration, operations: ["file", "process", "transfer"], roots: [{ root_id: "files", absolute_path: executorFixture.root }], path_base: "root" },
     onRequest: (payload) => executorFixture.service.executeNodeRequest(payload),
     onCoordinatorEpoch: async (epoch) => executorFixture.service.activateNodeCoordinatorEpoch(epoch),
     isOperationAuthorized: (operation) => executorFixture.service.isNodeOperationAuthorized(operation.request, operation.operation_id.coordinator_epoch),
     onUserState: (state) => executorFixture.service.applyNodeUserState(state),
   });
+  let client = createClient();
   let coordinatorFixture: Awaited<ReturnType<typeof fixture>> | undefined;
   let api: Awaited<ReturnType<typeof mcp>> | undefined;
   try {
@@ -107,22 +111,75 @@ test("remote public process ids map to executor process ids without using local 
     assert.equal(output.state, "running");
     const otherSession = await api.call("session_open", { node_id: remoteId, working_directory: executorFixture.root, purpose: "Mapping scope check" });
     await assert.rejects(api.call("process_status", { session_id: otherSession.session_id, node_id: remoteId, process_id: publicId }), /Operation failed/i);
+
+    const mappingStore = (coordinatorFixture.service as unknown as { remoteProcessMappings: import("../src/remote-process-mapping.js").RemoteProcessMappingStore }).remoteProcessMappings;
+    const originalMapping = mappingStore.lookupPublic(publicId, "owner@example.test", opened.session_id, remoteId);
+    assert.ok(originalMapping);
+    const originalConnectionId = originalMapping.connectionId;
+    await client.close();
+    client = createClient();
+    await client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry);
+    assert.notEqual(registry.activeConnection(remoteId)?.connection_id, originalConnectionId);
+    assert.equal(mappingStore.lookupPublic(publicId, "owner@example.test", opened.session_id, remoteId)?.connectionId, originalConnectionId, "state synchronization ACK alone must not rebind a process mapping");
+    const reboundStatus = await api.call("process_status", { session_id: opened.session_id, node_id: remoteId, process_id: publicId });
+    assert.equal(reboundStatus.state, "running");
+    assert.equal(mappingStore.lookupPublic(publicId, "owner@example.test", opened.session_id, remoteId)?.connectionId, registry.activeConnection(remoteId)?.connection_id);
+
     const killed = await api.call("process_kill", { session_id: opened.session_id, node_id: remoteId, process_id: publicId });
     assert.equal(killed.state, "terminating");
     assert.deepEqual(terminated, [911]);
-    const replacementConnectionId = Buffer.alloc(32, 7).toString("base64url");
-    registry.beginSynchronizing(remoteId, {
-      connection_id: replacementConnectionId,
-      executor_generation: Buffer.alloc(16, 8).toString("base64url"),
-      desktop_commander_generation: commanderGeneration,
-      operations: ["file", "process", "transfer"],
-      roots: [{ root_id: "files", absolute_path: executorFixture.root }],
-      path_base: "root",
-    });
-    registry.activate(remoteId, replacementConnectionId);
-    await assert.rejects(api.call("process_status", { session_id: opened.session_id, node_id: remoteId, process_id: publicId }), /Operation failed/i);
-    registry.disconnect(remoteId, replacementConnectionId);
-    await assert.rejects(api.call("process_status", { session_id: opened.session_id, node_id: remoteId, process_id: publicId }), /Selected node is disconnected/i);
+
+    const retainedSession = await api.call("session_open", { node_id: remoteId, working_directory: executorFixture.root, purpose: "Closed process tracking" });
+    const retainedStart = await api.call("process_start", { session_id: retainedSession.session_id, node_id: remoteId, command: "synthetic-remote-process", timeout_ms: 1000 });
+    const retainedId = String(retainedStart.process_id);
+    const retainedBeforeClose = mappingStore.lookupPublic(retainedId, "owner@example.test", retainedSession.session_id, remoteId);
+    assert.ok(retainedBeforeClose);
+    assert.deepEqual(await api.call("session_close", { session_id: retainedSession.session_id }), { closed: true });
+    assert.equal(mappingStore.lookupPublic(retainedId, "owner@example.test", retainedSession.session_id, remoteId), undefined);
+    assert.equal(mappingStore.lookupTracking(retainedBeforeClose.trackingId)?.state, "active", "closing the public session must retain live process tracking");
+    await (coordinatorFixture.service as unknown as { trackRemoteProcesses: () => Promise<void> }).trackRemoteProcesses();
+    assert.equal(mappingStore.lookupTracking(retainedBeforeClose.trackingId)?.state, "active", "internal status tracking continues after public session close");
+    await assert.rejects(api.call("process_status", { session_id: retainedSession.session_id, node_id: remoteId, process_id: retainedId }), /Session is invalid, expired, or belongs to another user/i);
+
+    const terminalSession = await api.call("session_open", { node_id: remoteId, working_directory: executorFixture.root, purpose: "Terminal output retention" });
+    const terminalStart = await api.call("process_start", { session_id: terminalSession.session_id, node_id: remoteId, command: "synthetic-remote-process", timeout_ms: 1000 });
+    const terminalId = String(terminalStart.process_id);
+    completedPid = nextPid;
+    const terminalStatus = await api.call("process_status", { session_id: terminalSession.session_id, node_id: remoteId, process_id: terminalId });
+    assert.equal(terminalStatus.state, "finished");
+    const terminalMapping = mappingStore.lookupPublic(terminalId, "owner@example.test", terminalSession.session_id, remoteId);
+    assert.equal(terminalMapping?.state, "finished");
+    assert.equal(terminalMapping?.terminalOutput, terminalStatus.output);
+    await client.close();
+    const finalDisconnectDeadline = Date.now() + 2_000;
+    while (registry.activeConnection(remoteId)) {
+      if (Date.now() >= finalDisconnectDeadline) throw new Error("Timed out waiting for the remote node to disconnect.");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const cachedOutput = await api.call("process_output", { session_id: terminalSession.session_id, node_id: remoteId, process_id: terminalId });
+    assert.equal(cachedOutput.state, "finished");
+    assert.equal(cachedOutput.output, terminalStatus.output);
+    client = createClient();
+    await client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry);
+
+    const generationSession = await api.call("session_open", { node_id: remoteId, working_directory: executorFixture.root, purpose: "Generation mismatch" });
+    const generationStart = await api.call("process_start", { session_id: generationSession.session_id, node_id: remoteId, command: "synthetic-remote-process", timeout_ms: 1000 });
+    const generationProcessId = String(generationStart.process_id);
+    await client.close();
+    const otherGeneration = Buffer.alloc(16, 8).toString("base64url");
+    client = createClient(otherGeneration);
+    await client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry);
+    await assert.rejects(api.call("process_status", { session_id: generationSession.session_id, node_id: remoteId, process_id: generationProcessId }), /Operation failed/i);
+    await client.close();
+    const disconnectedDeadline = Date.now() + 2_000;
+    while (registry.activeConnection(remoteId)) {
+      if (Date.now() >= disconnectedDeadline) throw new Error("Timed out waiting for the remote node to disconnect.");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await assert.rejects(api.call("process_status", { session_id: generationSession.session_id, node_id: remoteId, process_id: generationProcessId }), /Selected node is disconnected/i);
   } finally {
     await api?.close();
     await coordinatorFixture?.cleanup();

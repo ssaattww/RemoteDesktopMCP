@@ -4,7 +4,9 @@ import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, real
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
+import { networkInterfaces } from "node:os";
 import { fileURLToPath } from "node:url";
+import type { Server as HttpServer } from "node:http";
 import express, { type Express, type Request, type Response } from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -15,7 +17,9 @@ import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
 import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateFile } from "./private-storage.js";
-import { type NodeListEntry, type NodeRegistry } from "./node-registry.js";
+import { NodeRegistry, type NodeCapabilities, type NodeListEntry } from "./node-registry.js";
+import { ClusterConfigStore } from "./node-config.js";
+import { CoordinatorNodeServer, ExecutorNodeClient } from "./node-transport.js";
 import {
   createNodeOperationRequest,
   nodeOperationContract,
@@ -27,6 +31,8 @@ import {
 
 import { mountAdmin } from "./admin.js";
 import { mountUserConsole } from "./user-console.js";
+import { RemoteProcessMappingStore, type RemoteProcessBinding, type RemoteProcessMapping } from "./remote-process-mapping.js";
+import { RemoteTransferMappingStore, type RemoteTransferBinding, type RemoteTransferMapping, type RemoteTransferState } from "./remote-transfer-mapping.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
@@ -42,7 +48,6 @@ type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type DownloadChunkReplay = { offset: number; data: string; nextOffset: number; complete: boolean };
 type Transfer = { id: string; direction: "download" | "upload"; principalId: string; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; downloadReplay?: DownloadChunkReplay; committedPreview?: OperationDetailEntry };
 type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
-type RemoteProcessMapping = { principalId: string; sessionId: string; nodeId: string; executorGeneration: string; connectionId: string; remoteProcessId: string };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
 type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; comment?: string; sessionAccessAt?: string };
 type OperationDetailEntry = { label: string; value: string; format: "text" | "diff"; truncated?: boolean };
@@ -60,7 +65,6 @@ const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_TRANSFERS = 20;
 const MAX_TERMINAL_TRANSFERS = 100;
 const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
-const MAX_REMOTE_PROCESS_MAPPINGS = 10_000;
 const MAX_AUDIT_EVENTS = 20_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
@@ -209,6 +213,7 @@ class DesktopCommander {
 }
 
 export class RemoteDesktopService {
+  private readonly executorGeneration = randomBytes(16).toString("base64url");
   readonly sessions = new Map<string, Session>();
   readonly transfers = new Map<string, Transfer>();
   readonly processes = new Map<string, Process>();
@@ -225,7 +230,11 @@ export class RemoteDesktopService {
   private readonly terminalTransfers: string[] = [];
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
-  private readonly remoteProcessMappings = new Map<string, RemoteProcessMapping>();
+  private readonly remoteProcessMappings = new RemoteProcessMappingStore();
+  private readonly remoteTransferMappings = new RemoteTransferMappingStore();
+  private remoteProcessSweepTimer?: NodeJS.Timeout;
+  private remoteProcessSweepRunning = false;
+  private remoteTransferSweepRunning = false;
   private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
   private readonly configIdentityLock = new Mutex();
   private readonly executionStates = new Map<string, UserExecutionState>();
@@ -270,8 +279,10 @@ export class RemoteDesktopService {
     await this.pruneProtectedConfigIdentities();
     this.expiryTimer = setInterval(() => { void this.sweepExpired(); }, 60_000);
     this.expiryTimer.unref();
+    this.remoteProcessSweepTimer = setInterval(() => { void this.trackRemoteProcesses(); void this.trackRemoteTransfers(); }, 30_000);
+    this.remoteProcessSweepTimer.unref();
   }
-  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); for (const close of this.auditConnectionClosers) close(); this.auditConnectionClosers.clear(); this.auditListeners.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
+  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); if (this.remoteProcessSweepTimer) clearInterval(this.remoteProcessSweepTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); for (const close of this.auditConnectionClosers) close(); this.auditConnectionClosers.clear(); this.auditListeners.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
   async audit(event: string, fields: Record<string, unknown>): Promise<void> { await this.auditLock.run(async () => { await this.refreshAuditIndexLocked(); const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); await this.refreshAuditIndexLocked(); } const entry = { at: new Date().toISOString(), event, ...fields }; const line = `${JSON.stringify(entry)}\n`; await appendFile(file, line); this.rememberAuditEntry(entry); const stats = await lstat(file, { bigint: true }); const identity = this.identityFromStats(stats); const expectedBytes = this.auditFileBytes + BigInt(Buffer.byteLength(line)); if (this.auditFileIdentity && this.auditFileIdentity.dev === identity.dev && this.auditFileIdentity.ino === identity.ino && stats.size === expectedBytes) this.auditFileBytes = stats.size;
     else await this.loadAuditIndex(true);
   }); }
@@ -445,6 +456,21 @@ export class RemoteDesktopService {
   userExecutionState(user: string): UserExecutionState {
     const state = this.executionStateFor(user);
     return { ...state, stopped: state.stopped || this.executionStateUnavailable || this.executionResumes.has(user) };
+  }
+  nodeUserStates(): Array<{ principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null }> {
+    return this.cfg.users.map(({ email }) => {
+      const state = this.userExecutionState(email);
+      return { principal_id: email, stopped: state.stopped, stop_generation: state.stopGeneration, stop_id: state.stopId ?? null };
+    });
+  }
+  nodeCapabilities(): NodeCapabilities & { executor_generation: string; desktop_commander_generation: string } {
+    return {
+      operations: ["file", "process", "transfer"],
+      roots: this.cfg.roots.map((root) => ({ root_id: root.id, absolute_path: path.resolve(root.path) })),
+      path_base: "root",
+      executor_generation: this.executorGeneration,
+      desktop_commander_generation: this.dc.currentGeneration(),
+    };
   }
   activateNodeCoordinatorEpoch(epoch: string): void {
     if (!/^[A-Za-z0-9_-]{43}$/.test(epoch) || Buffer.from(epoch, "base64url").length !== 32) throw new Error("Coordinator epoch is invalid.");
@@ -644,10 +670,14 @@ export class RemoteDesktopService {
     } finally { this.executionResumes.delete(user); }
   }); }
   private async sweepExpiredLocked(now = Date.now()): Promise<void> {
+    this.remoteProcessMappings.sweep(now);
+    this.remoteTransferMappings.sweep(now);
     for (const session of this.sessions.values()) {
       if (session.state === "active" && session.expires <= now) {
         await this.audit("session.expired", { user: session.user, sessionId: session.id });
         session.state = "expired";
+        this.remoteProcessMappings.expireSession(session.id);
+        this.remoteTransferMappings.expireSession(session.id);
         for (const transfer of this.transfers.values()) if (transfer.sessionId === session.id && transfer.state === "active") await this.fail(transfer, "session_expired");
       }
     }
@@ -655,6 +685,87 @@ export class RemoteDesktopService {
     for (const [id, session] of this.sessions) if (session.state !== "active" && now - session.expires > SESSION_TTL) this.sessions.delete(id);
   }
   async sweepExpired(): Promise<void> { await this.transferLock.run(() => this.sweepExpiredLocked()); }
+  private async trackRemoteProcesses(): Promise<void> {
+    if (this.remoteProcessSweepRunning || !this.cfg.nodeRegistry || !this.cfg.nodeRequest) return;
+    this.remoteProcessSweepRunning = true;
+    try {
+      for (const mapping of this.remoteProcessMappings.listTracking()) {
+        if (mapping.state === "finished" || mapping.state === "stale" || !mapping.remoteProcessId) continue;
+        const ownerState = this.userExecutionState(mapping.principalId);
+        if (ownerState.stopped) continue;
+        let binding: RemoteProcessBinding;
+        try { binding = this.remoteProcessBinding(mapping.nodeId); }
+        catch { this.remoteProcessMappings.markDetached(mapping.trackingId, mapping.version); continue; }
+        if (binding.executorGeneration !== mapping.executorGeneration) {
+          this.remoteProcessMappings.markStale(mapping.trackingId, mapping.version);
+          continue;
+        }
+        const target = this.nodeEntries().find((node) => node.node_id === mapping.nodeId && node.connected);
+        if (!target) { this.remoteProcessMappings.markDetached(mapping.trackingId, mapping.version); continue; }
+        try {
+          const response = await this.requestRemote(mapping.principalId, { id: mapping.sessionId }, target, "process_status", {
+            process_id: mapping.remoteProcessId,
+          });
+          const currentOwnerState = this.userExecutionState(mapping.principalId);
+          if (currentOwnerState.stopped || currentOwnerState.stopGeneration !== ownerState.stopGeneration) continue;
+          const current = this.remoteProcessBinding(mapping.nodeId);
+          if (current.connectionId !== binding.connectionId || current.executorGeneration !== binding.executorGeneration) continue;
+          if (!isRecord(response) || !["running", "terminating", "finished"].includes(String(response.state))) continue;
+          this.remoteProcessMappings.confirmStatus(
+            mapping.trackingId,
+            mapping.version,
+            current,
+            response.state as "running" | "terminating" | "finished",
+            Date.now(),
+            this.remoteProcessResultFields(response),
+          );
+        } catch {
+          this.remoteProcessMappings.markDetached(mapping.trackingId, mapping.version);
+        }
+      }
+    } finally { this.remoteProcessSweepRunning = false; }
+  }
+  private async trackRemoteTransfers(): Promise<void> {
+    if (this.remoteTransferSweepRunning || !this.cfg.nodeRegistry || !this.cfg.nodeRequest) return;
+    this.remoteTransferSweepRunning = true;
+    try {
+      for (const mapping of this.remoteTransferMappings.listTracking()) {
+        if (mapping.state === "complete" || mapping.state === "cancelled" || mapping.state === "failed"
+          || mapping.state === "expired" || mapping.state === "stale" || !mapping.remoteTransferId) continue;
+        const ownerState = this.userExecutionState(mapping.principalId);
+        if (ownerState.stopped) continue;
+        let binding: RemoteTransferBinding;
+        try { binding = this.remoteTransferBinding(mapping.nodeId); }
+        catch { this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version); continue; }
+        if (binding.executorGeneration !== mapping.executorGeneration) {
+          this.remoteTransferMappings.markStale(mapping.trackingId, mapping.version);
+          continue;
+        }
+        const target = this.nodeEntries().find((node) => node.node_id === mapping.nodeId && node.connected);
+        if (!target) { this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version); continue; }
+        try {
+          const response = await this.requestRemote(mapping.principalId, { id: mapping.sessionId }, target, "file_transfer_status", {
+            transfer_id: mapping.remoteTransferId,
+          });
+          const currentOwnerState = this.userExecutionState(mapping.principalId);
+          if (currentOwnerState.stopped || currentOwnerState.stopGeneration !== ownerState.stopGeneration) continue;
+          const current = this.remoteTransferBinding(mapping.nodeId);
+          if (current.connectionId !== binding.connectionId || current.executorGeneration !== binding.executorGeneration) continue;
+          if (!isRecord(response) || !["active", "complete", "cancelled", "failed", "expired"].includes(String(response.state))
+            || typeof response.next_offset !== "number") continue;
+          const updated = this.remoteTransferMappings.confirmStatus(
+            mapping.trackingId,
+            mapping.version,
+            current,
+            { state: response.state as RemoteTransferState & ("active" | "complete" | "cancelled" | "failed" | "expired"), nextOffset: response.next_offset },
+          );
+          if (!updated) this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version);
+        } catch {
+          this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version);
+        }
+      }
+    } finally { this.remoteTransferSweepRunning = false; }
+  }
   session(user: string, sessionId: string): Session { this.requireCurrentOperation(); const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; const operation = this.operationContext.getStore(); if (operation?.user === user) operation.sessionAccessAt = new Date(value.touched).toISOString(); return value; }
   private nodeEntries(): NodeListEntry[] {
     if (this.cfg.nodeRegistry) return this.cfg.nodeRegistry.list();
@@ -707,27 +818,177 @@ export class RemoteDesktopService {
     if (!target.connected) throw new Error("Selected node is disconnected.");
     return { session, target };
   }
-  private remoteProcessBinding(nodeId: string): { executorGeneration: string; connectionId: string } {
+  private processOperationTarget(
+    user: string,
+    sessionId: string,
+    nodeId: string | undefined,
+    publicId: string,
+  ): { session: Session; target: NodeListEntry; terminalResult?: Record<string, unknown> } {
+    const session = this.session(user, sessionId);
+    if (nodeId !== undefined && nodeId !== session.nodeId) throw new Error("Session node mismatch: SESSION_NODE_MISMATCH.");
+    const target = this.nodeEntries().find((node) => node.node_id === session.nodeId);
+    if (!target) throw new Error("Unknown or unsupported node.");
+    if (!target.connected && target.node_id !== this.cfg.nodeId) {
+      const mapping = this.remoteProcessMappings.lookupPublic(publicId, user, session.id, target.node_id);
+      const terminalResult = mapping && this.cachedRemoteProcessResult(mapping);
+      if (terminalResult) return { session, target, terminalResult };
+    }
+    if (!target.connected) throw new Error("Selected node is disconnected.");
+    return { session, target };
+  }
+  private remoteProcessBinding(nodeId: string): RemoteProcessBinding {
     const active = this.cfg.nodeRegistry?.activeConnection(nodeId);
     if (!active) throw new Error("Remote process node is disconnected.");
-    return { executorGeneration: active.executor_generation, connectionId: active.connection_id };
+    return { nodeId, executorGeneration: active.executor_generation, connectionId: active.connection_id };
   }
-  private remoteProcessForOperation(user: string, session: Session, nodeId: string, publicId: string): RemoteProcessMapping {
-    const mapping = this.remoteProcessMappings.get(publicId);
-    if (!mapping || mapping.principalId !== user || mapping.sessionId !== session.id || mapping.nodeId !== nodeId) {
+  private remoteTransferBinding(nodeId: string): RemoteTransferBinding {
+    const active = this.cfg.nodeRegistry?.activeConnection(nodeId);
+    if (!active) throw new Error("Remote transfer node is disconnected.");
+    return { nodeId, executorGeneration: active.executor_generation, connectionId: active.connection_id };
+  }
+  private transferOperationTarget(user: string, sessionId: string): { session: Session; target: NodeListEntry } {
+    const session = this.session(user, sessionId);
+    const target = this.nodeEntries().find((node) => node.node_id === session.nodeId);
+    if (!target) throw new Error("Unknown or unsupported node.");
+    return { session, target };
+  }
+  private async remoteTransferForOperation(user: string, session: Session, target: NodeListEntry, publicId: string): Promise<RemoteTransferMapping> {
+    const mapping = this.remoteTransferMappings.lookupPublic(publicId, user, session.id, target.node_id);
+    if (!mapping || !mapping.remoteTransferId) throw new Error("Remote transfer mapping is unavailable.");
+    if ((mapping.state === "complete" || mapping.state === "cancelled" || mapping.state === "failed" || mapping.state === "expired")
+      && !mapping.pendingUpload && !mapping.pendingDownload) return mapping;
+    let active: RemoteTransferBinding;
+    try { active = this.remoteTransferBinding(target.node_id); }
+    catch {
+      this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version);
+      throw new Error("Remote transfer mapping is detached while its node is disconnected.");
+    }
+    if (active.executorGeneration !== mapping.executorGeneration) {
+      this.remoteTransferMappings.markStale(mapping.trackingId, mapping.version);
+      throw new Error("Remote transfer mapping belongs to a different executor generation.");
+    }
+    if (active.connectionId === mapping.connectionId && !mapping.pendingUpload && !mapping.pendingDownload) return mapping;
+    const response = await this.dispatchNodeOperation(user, session, target, "file_transfer_status", { transfer_id: mapping.remoteTransferId });
+    this.requireCurrentOperation();
+    this.session(user, session.id);
+    const confirmedBinding = this.remoteTransferBinding(target.node_id);
+    if (confirmedBinding.connectionId !== active.connectionId || confirmedBinding.executorGeneration !== active.executorGeneration) {
+      throw new Error("Remote transfer binding changed while status confirmation was pending.");
+    }
+    if (!isRecord(response) || !["active", "complete", "cancelled", "failed", "expired"].includes(String(response.state))
+      || typeof response.next_offset !== "number") {
+      this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version);
+      throw new Error("Remote transfer status did not confirm the retained mapping.");
+    }
+    const state = response.state;
+    if (state !== "active" && state !== "complete" && state !== "cancelled" && state !== "failed" && state !== "expired") {
+      this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version);
+      throw new Error("Remote transfer status is unknown.");
+    }
+    const rebound = this.remoteTransferMappings.confirmStatus(mapping.trackingId, mapping.version, confirmedBinding, {
+      state,
+      nextOffset: response.next_offset,
+    });
+    if (!rebound) {
+      this.remoteTransferMappings.markDetached(mapping.trackingId, mapping.version);
+      throw new Error("Remote transfer mapping changed or status offset was not confirmed.");
+    }
+    return rebound;
+  }
+  private assertRemoteTransferBinding(mapping: RemoteTransferMapping): void {
+    const active = this.remoteTransferBinding(mapping.nodeId);
+    if (active.connectionId !== mapping.connectionId || active.executorGeneration !== mapping.executorGeneration) {
+      throw new Error("Remote transfer mapping changed while the operation was pending.");
+    }
+  }
+  private transferStatusSnapshot(mapping: RemoteTransferMapping): Record<string, unknown> {
+    return { state: mapping.state, next_offset: mapping.lastAckOffset, transferred_bytes: mapping.lastAckOffset };
+  }
+  private committedRemoteUpload(mapping: RemoteTransferMapping): Record<string, unknown> | undefined {
+    if (mapping.commitResponse) return { ...mapping.commitResponse };
+    const response = mapping.terminalBeginResponse;
+    if (mapping.state !== "complete" || mapping.direction !== "upload" || !response
+      || typeof response.resolved_path !== "string" || typeof response.root_id !== "string"
+      || mapping.size === undefined || mapping.sha256 === undefined) return undefined;
+    return { resolved_path: response.resolved_path, root_id: response.root_id, path_base: "root", size: mapping.size, sha256: mapping.sha256 };
+  }
+  private async remoteProcessForOperation(user: string, session: Session, target: NodeListEntry, publicId: string): Promise<RemoteProcessMapping> {
+    const mapping = this.remoteProcessMappings.lookupPublic(publicId, user, session.id, target.node_id);
+    if (!mapping || !mapping.remoteProcessId) {
       throw new Error("Remote process mapping is unavailable.");
     }
-    const active = this.remoteProcessBinding(nodeId);
-    if (active.executorGeneration !== mapping.executorGeneration || active.connectionId !== mapping.connectionId) {
-      throw new Error("Remote process mapping is stale after node reconnection.");
+    if (mapping.state === "finished" && mapping.terminalOutput !== undefined) return mapping;
+    let active: RemoteProcessBinding;
+    try { active = this.remoteProcessBinding(target.node_id); }
+    catch {
+      this.remoteProcessMappings.markDetached(mapping.trackingId, mapping.version);
+      throw new Error("Remote process mapping is detached while its node is disconnected.");
     }
-    return mapping;
+    if (active.executorGeneration !== mapping.executorGeneration) {
+      this.remoteProcessMappings.markStale(mapping.trackingId, mapping.version);
+      throw new Error("Remote process mapping belongs to a different executor generation.");
+    }
+    if (active.connectionId === mapping.connectionId) return mapping;
+    const response = await this.dispatchNodeOperation(user, session, target, "process_status", { process_id: mapping.remoteProcessId });
+    this.requireCurrentOperation();
+    this.session(user, session.id);
+    const confirmedBinding = this.remoteProcessBinding(target.node_id);
+    if (confirmedBinding.connectionId !== active.connectionId || confirmedBinding.executorGeneration !== active.executorGeneration) {
+      throw new Error("Remote process binding changed while reconnection status was pending.");
+    }
+    if (!isRecord(response) || !["running", "terminating", "finished"].includes(String(response.state))) {
+      this.remoteProcessMappings.markDetached(mapping.trackingId, mapping.version);
+      throw new Error("Remote process status did not confirm the retained process ID.");
+    }
+    const rebound = this.remoteProcessMappings.confirmStatus(
+      mapping.trackingId,
+      mapping.version,
+      confirmedBinding,
+      response.state as "running" | "terminating" | "finished",
+      Date.now(),
+      this.remoteProcessResultFields(response),
+    );
+    if (!rebound) throw new Error("Remote process mapping changed while reconnection status was pending.");
+    return rebound;
   }
   private assertRemoteProcessBinding(mapping: RemoteProcessMapping): void {
     const active = this.remoteProcessBinding(mapping.nodeId);
     if (active.executorGeneration !== mapping.executorGeneration || active.connectionId !== mapping.connectionId) {
       throw new Error("Remote process mapping changed during the operation.");
     }
+  }
+  private observeRemoteProcessStatus(mapping: RemoteProcessMapping, response: unknown): void {
+    this.requireCurrentOperation();
+    if (!isRecord(response) || !["running", "terminating", "finished"].includes(String(response.state))) return;
+    const binding = this.remoteProcessBinding(mapping.nodeId);
+    if (binding.connectionId !== mapping.connectionId || binding.executorGeneration !== mapping.executorGeneration) {
+      throw new Error("Remote process binding changed while the operation was pending.");
+    }
+    const updated = this.remoteProcessMappings.confirmStatus(
+      mapping.trackingId,
+      mapping.version,
+      binding,
+      response.state as "running" | "terminating" | "finished",
+      Date.now(),
+      this.remoteProcessResultFields(response),
+    );
+    if (!updated) throw new Error("Remote process mapping changed while the operation was pending.");
+  }
+  private remoteProcessResultFields(response: Record<string, unknown>): { exitCode?: number; terminationUnconfirmed?: boolean; output?: string } {
+    return {
+      ...(typeof response.exit_code === "number" ? { exitCode: response.exit_code } : {}),
+      ...(typeof response.termination_unconfirmed === "boolean" ? { terminationUnconfirmed: response.termination_unconfirmed } : {}),
+      ...(typeof response.output === "string" ? { output: response.output } : {}),
+    };
+  }
+  private cachedRemoteProcessResult(mapping: RemoteProcessMapping): Record<string, unknown> | undefined {
+    if (mapping.state !== "finished" || mapping.terminalOutput === undefined) return undefined;
+    return {
+      state: "finished",
+      ...(mapping.terminalExitCode === undefined ? {} : { exit_code: mapping.terminalExitCode }),
+      ...(mapping.terminalTerminationUnconfirmed === undefined ? {} : { termination_unconfirmed: mapping.terminalTerminationUnconfirmed }),
+      output: mapping.terminalOutput,
+    };
   }
   private async requestRemoteWithoutSession(
     user: string,
@@ -747,7 +1008,7 @@ export class RemoteDesktopService {
   }
   private async requestRemote(
     user: string,
-    session: Session,
+    session: Pick<Session, "id">,
     target: NodeListEntry,
     operation: NodeOperationName,
     args: Record<string, unknown>,
@@ -2022,7 +2283,7 @@ export class RemoteDesktopService {
       return { session_id: session.id, connection_id: session.id, node_id: session.nodeId, working_directory: session.workingDirectory, purpose: session.purpose, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state };
     }));
     server.registerTool("session_list", { description: "List the caller's active sessions with their selected node, working directory, and purpose.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, node_id: entry.nodeId, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
-    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
+    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.remoteProcessMappings.expireSession(session.id); this.remoteTransferMappings.expireSession(session.id); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
     server.registerTool("node_list", { description: "List registered operation nodes, including disconnected remote nodes. It is available before session_open. An optional session_id is validated for compatibility but does not filter the node list. roots contains each root_id and its canonical absolute_path; root_ids is retained for compatibility. File and transfer relative_path values are relative to the returned root, while process_start uses the selected session working_directory.", inputSchema: { session_id: sessionId.optional() } }, this.tool(user, async ({ session_id }) => { if (session_id) this.session(user, session_id); return { nodes: this.nodeEntries() }; }));
     server.registerTool("file_search", { description: "Search file names through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches names only and does not search file contents. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => {
       await this.sweepExpired();
@@ -2056,40 +2317,238 @@ export class RemoteDesktopService {
     }));
     server.registerTool("file_transfer_download_begin", { description: "Begin a download of a regular file up to 25 MiB from root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller active session_id and selected node_id. Creates a private snapshot copy and returns source path, root_id, size, and SHA-256. Set inline=true to return and complete the whole file in this call when it fits within one chunk; larger files remain active for file_transfer_download_chunk.", inputSchema: { ...fileInput, inline: z.boolean().optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, inline }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote download public transfer mapping is not implemented yet.");
-      return this.dispatchNodeOperation(user, session, target, "file_transfer_download_begin", { root_id, relative_path, ...(inline === undefined ? {} : { inline }) });
+      if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "file_transfer_download_begin", { root_id, relative_path, ...(inline === undefined ? {} : { inline }) });
+      const binding = this.remoteTransferBinding(target.node_id);
+      const reservation = this.remoteTransferMappings.reserveStart(target.node_id);
+      let reservationOpen = true;
+      try {
+        const started = await this.dispatchNodeOperation(user, session, target, "file_transfer_download_begin", { root_id, relative_path, ...(inline === undefined ? {} : { inline }) }) as Record<string, unknown>;
+        if (typeof started.transfer_id !== "string" || started.transfer_id.length < 16) {
+          this.remoteTransferMappings.bindUnknown(reservation, { principalId: user, sessionId: session.id, direction: "download", ...binding });
+          reservationOpen = false;
+          throw new Error("Remote download result is unconfirmed; tracking is retained.");
+        }
+        const mapping = this.remoteTransferMappings.bindStarted(reservation, {
+          principalId: user, sessionId: session.id, ...binding,
+          remoteTransferId: started.transfer_id, publicId: makeId(), direction: "download",
+          lastAckOffset: typeof started.next_offset === "number" ? started.next_offset : 0,
+          size: typeof started.size === "number" ? started.size : undefined,
+          sha256: typeof started.sha256 === "string" ? started.sha256 : undefined,
+          terminalBeginResponse: started,
+        });
+        reservationOpen = false;
+        try { this.requireCurrentOperation(); }
+        catch (error) { this.remoteTransferMappings.hidePublic(mapping.trackingId); throw error; }
+        const current = this.sessions.get(session.id);
+        if (current !== session || current?.user !== user || current.nodeId !== target.node_id || current.state !== "active" || current.expires <= Date.now()) {
+          this.remoteTransferMappings.expireSession(session.id);
+          throw new Error("Session or authorization changed while remote download was starting.");
+        }
+        try {
+          const active = this.remoteTransferBinding(target.node_id);
+          if (active.connectionId !== binding.connectionId || active.executorGeneration !== binding.executorGeneration) throw new Error("Remote transfer mapping changed during begin.");
+        } catch (error) { this.remoteTransferMappings.hidePublic(mapping.trackingId); throw error; }
+        return { ...started, transfer_id: mapping.publicId };
+      } catch (error) {
+        if (reservationOpen) {
+          if ((error instanceof Error && error.message.includes("NODE_OUTCOME_UNKNOWN")) || error instanceof z.ZodError) {
+            this.remoteTransferMappings.bindUnknown(reservation, { principalId: user, sessionId: session.id, direction: "download", ...binding });
+          } else this.remoteTransferMappings.releaseStart(reservation);
+        }
+        throw error;
+      }
     }));
     server.registerTool("file_transfer_download_chunk", { description: "Read the next chunk from the snapshot copy. A retry of the most recently returned offset replays the same chunk without advancing transfer state. The completed download is checked against its SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative() } }, this.tool(user, async ({ session_id, transfer_id, offset }) => {
-      this.session(user, session_id);
-      return this.executeLocalNodeOperation(user, session_id, "file_transfer_download_chunk", { transfer_id, offset });
+      const { session, target } = this.transferOperationTarget(user, session_id);
+      if (target.node_id === this.cfg.nodeId) return this.executeLocalNodeOperation(user, session.id, "file_transfer_download_chunk", { transfer_id, offset });
+      const known = this.remoteTransferMappings.lookupPublic(transfer_id, user, session.id, target.node_id);
+      if (!known || known.direction !== "download") throw new Error("Remote download mapping is unavailable.");
+      const replay = this.remoteTransferMappings.downloadReplay(known.trackingId, offset);
+      if (replay) return replay;
+      const mapping = await this.remoteTransferForOperation(user, session, target, transfer_id);
+      if (mapping.direction !== "download") throw new Error("Remote transfer direction does not match a download operation.");
+      const recoveredReplay = this.remoteTransferMappings.downloadReplay(mapping.trackingId, offset);
+      if (recoveredReplay) return recoveredReplay;
+      if (mapping.state !== "active" && mapping.pendingDownload?.offset !== offset) throw new Error("Remote download is not active at the requested offset.");
+      const pending = this.remoteTransferMappings.beginDownloadChunk(mapping.trackingId, mapping.version, offset);
+      if (!pending) throw new Error("Remote download mapping changed before the chunk was requested.");
+      const response = await this.dispatchNodeOperation(user, session, target, "file_transfer_download_chunk", { transfer_id: mapping.remoteTransferId, offset });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
+      this.assertRemoteTransferBinding(mapping);
+      if (!isRecord(response) || typeof response.data !== "string" || typeof response.next_offset !== "number" || typeof response.complete !== "boolean") {
+        throw new Error("Remote download chunk response is invalid.");
+      }
+      const acknowledged = this.remoteTransferMappings.acknowledgeDownloadChunk(mapping.trackingId, pending.version, offset, {
+        data: response.data,
+        next_offset: response.next_offset,
+        complete: response.complete,
+      });
+      if (!acknowledged) {
+        const concurrentReplay = this.remoteTransferMappings.downloadReplay(mapping.trackingId, offset);
+        if (concurrentReplay && JSON.stringify(concurrentReplay) === JSON.stringify(response)) return response;
+        throw new Error("Remote download mapping changed while the chunk was pending.");
+      }
+      return response;
     }));
     server.registerTool("file_transfer_upload_begin", { description: "Begin an upload to root_id/relative_path in a configured file root. relative_path is relative to root_id, not the session working_directory. Requires the caller active session_id and selected node_id. Declare total size, SHA-256, and overwrite policy. For files that fit within one chunk, pass base64 data to verify and atomically commit them in a single call; omit data for the existing chunked flow.", inputSchema: { ...fileInput, size: z.number().int().nonnegative().max(MAX_BYTES), sha256: z.string().regex(/^[a-f0-9]{64}$/), overwrite: z.boolean(), data: z.string().max(700_000).optional() } }, this.tool(user, async ({ session_id, node_id, root_id, relative_path, size, sha256, overwrite, data }) => {
       const { session, target } = this.operationTarget(user, session_id, node_id);
-      if (target.node_id !== this.cfg.nodeId) throw new Error("Remote upload public transfer mapping is not implemented yet.");
-      return this.dispatchNodeOperation(user, session, target, "file_transfer_upload_begin", {
+      const args = {
         root_id,
         relative_path,
         size,
         sha256,
         overwrite,
         ...(data === undefined ? {} : { data }),
-      });
+      };
+      if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "file_transfer_upload_begin", args);
+      const binding = this.remoteTransferBinding(target.node_id);
+      const reservation = this.remoteTransferMappings.reserveStart(target.node_id);
+      let reservationOpen = true;
+      try {
+        const started = await this.dispatchNodeOperation(user, session, target, "file_transfer_upload_begin", args) as Record<string, unknown>;
+        if (typeof started.transfer_id !== "string" || started.transfer_id.length < 16) {
+          this.remoteTransferMappings.bindUnknown(reservation, { principalId: user, sessionId: session.id, direction: "upload", ...binding });
+          reservationOpen = false;
+          throw new Error("Remote upload result is unconfirmed; tracking is retained.");
+        }
+        const mapping = this.remoteTransferMappings.bindStarted(reservation, {
+          principalId: user, sessionId: session.id, ...binding,
+          remoteTransferId: started.transfer_id, publicId: makeId(), direction: "upload",
+          lastAckOffset: data === undefined ? 0 : size,
+          size,
+          sha256,
+          terminalBeginResponse: started,
+        });
+        reservationOpen = false;
+        try { this.requireCurrentOperation(); }
+        catch (error) { this.remoteTransferMappings.hidePublic(mapping.trackingId); throw error; }
+        const current = this.sessions.get(session.id);
+        if (current !== session || current?.user !== user || current.nodeId !== target.node_id || current.state !== "active" || current.expires <= Date.now()) {
+          this.remoteTransferMappings.expireSession(session.id);
+          throw new Error("Session or authorization changed while remote upload was starting.");
+        }
+        try {
+          const active = this.remoteTransferBinding(target.node_id);
+          if (active.connectionId !== binding.connectionId || active.executorGeneration !== binding.executorGeneration) throw new Error("Remote transfer mapping changed during begin.");
+        } catch (error) { this.remoteTransferMappings.hidePublic(mapping.trackingId); throw error; }
+        return { ...started, transfer_id: mapping.publicId };
+      } catch (error) {
+        if (reservationOpen) {
+          if ((error instanceof Error && error.message.includes("NODE_OUTCOME_UNKNOWN")) || error instanceof z.ZodError) {
+            this.remoteTransferMappings.bindUnknown(reservation, { principalId: user, sessionId: session.id, direction: "upload", ...binding });
+          } else this.remoteTransferMappings.releaseStart(reservation);
+        }
+        throw error;
+      }
     }));
     server.registerTool("file_transfer_upload_chunk", { description: "Write the next upload chunk.", inputSchema: { session_id: sessionId, transfer_id: transferId, offset: z.number().int().nonnegative(), data: z.string().max(700_000) } }, this.tool(user, async ({ session_id, transfer_id, offset, data }) => {
-      this.session(user, session_id);
-      return this.executeLocalNodeOperation(user, session_id, "file_transfer_upload_chunk", { transfer_id, offset, data });
+      const { session, target } = this.transferOperationTarget(user, session_id);
+      if (target.node_id === this.cfg.nodeId) return this.executeLocalNodeOperation(user, session.id, "file_transfer_upload_chunk", { transfer_id, offset, data });
+      const known = this.remoteTransferMappings.lookupPublic(transfer_id, user, session.id, target.node_id);
+      if (!known || known.direction !== "upload") throw new Error("Remote upload mapping is unavailable.");
+      const replay = this.remoteTransferMappings.uploadReplay(known.trackingId, offset, data);
+      if (replay) return { next_offset: replay.nextOffset };
+      const mapping = await this.remoteTransferForOperation(user, session, target, transfer_id);
+      if (mapping.direction !== "upload") throw new Error("Remote transfer direction does not match an upload operation.");
+      const replayAfterStatus = this.remoteTransferMappings.uploadReplay(mapping.trackingId, offset, data);
+      if (replayAfterStatus) return { next_offset: replayAfterStatus.nextOffset };
+      if (mapping.state !== "active") throw new Error("Remote upload is not active.");
+      const digest = createHash("sha256").update(data).digest("hex");
+      const pending = this.remoteTransferMappings.beginUploadChunk(mapping.trackingId, mapping.version, offset, data);
+      if (!pending) throw new Error("Remote upload mapping changed before the chunk was sent.");
+      const response = await this.dispatchNodeOperation(user, session, target, "file_transfer_upload_chunk", {
+        transfer_id: mapping.remoteTransferId,
+        offset,
+        data,
+      });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
+      this.assertRemoteTransferBinding(mapping);
+      if (!isRecord(response) || typeof response.next_offset !== "number") throw new Error("Remote upload chunk response is invalid.");
+      const acknowledged = this.remoteTransferMappings.acknowledgeUploadChunk(
+        mapping.trackingId,
+        pending.version,
+        offset,
+        digest,
+        response.next_offset,
+      );
+      if (!acknowledged) throw new Error("Remote upload mapping changed while the chunk was pending.");
+      return response;
     }));
     server.registerTool("file_transfer_upload_commit", { description: "Finish the upload identified by transfer_id for the caller's active session_id. Requires all declared bytes; verifies the exact size and SHA-256 before moving the temporary file into the root-relative destination. The destination replacement is atomic when overwrite=true; when false, commit atomically fails if a destination already exists. Returns the committed resolved_path, root_id, path_base=root, size, and SHA-256.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => {
-      this.session(user, session_id);
-      return this.executeLocalNodeOperation(user, session_id, "file_transfer_upload_commit", { transfer_id });
+      const { session, target } = this.transferOperationTarget(user, session_id);
+      if (target.node_id === this.cfg.nodeId) return this.executeLocalNodeOperation(user, session.id, "file_transfer_upload_commit", { transfer_id });
+      const known = this.remoteTransferMappings.lookupPublic(transfer_id, user, session.id, target.node_id);
+      if (!known || known.direction !== "upload") throw new Error("Remote upload mapping is unavailable.");
+      const completed = this.committedRemoteUpload(known);
+      if (completed) return completed;
+      const mapping = await this.remoteTransferForOperation(user, session, target, transfer_id);
+      if (mapping.state === "complete") {
+        const confirmed = this.committedRemoteUpload(mapping);
+        if (confirmed) return confirmed;
+        throw new Error("Remote upload completed, but its commit result is unavailable.");
+      }
+      if (mapping.state !== "active") throw new Error("Remote upload is not active.");
+      const response = await this.dispatchNodeOperation(user, session, target, "file_transfer_upload_commit", { transfer_id: mapping.remoteTransferId });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
+      this.assertRemoteTransferBinding(mapping);
+      if (!isRecord(response) || typeof response.resolved_path !== "string" || typeof response.root_id !== "string"
+        || response.path_base !== "root" || typeof response.size !== "number" || typeof response.sha256 !== "string") {
+        throw new Error("Remote upload commit response is invalid.");
+      }
+      const committed = this.remoteTransferMappings.recordCommit(mapping.trackingId, mapping.version, response);
+      if (!committed) throw new Error("Remote upload mapping changed while commit was pending.");
+      return response;
     }));
     server.registerTool("file_transfer_status", { description: "Return transfer state and next offset.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => {
-      this.session(user, session_id);
-      return this.executeLocalNodeOperation(user, session_id, "file_transfer_status", { transfer_id });
+      const { session, target } = this.transferOperationTarget(user, session_id);
+      if (target.node_id === this.cfg.nodeId) return this.executeLocalNodeOperation(user, session.id, "file_transfer_status", { transfer_id });
+      const known = this.remoteTransferMappings.lookupPublic(transfer_id, user, session.id, target.node_id);
+      if (!known) throw new Error("Remote transfer mapping is unavailable.");
+      if (known.state === "complete" || known.state === "cancelled" || known.state === "failed" || known.state === "expired") {
+        return this.transferStatusSnapshot(known);
+      }
+      const mapping = await this.remoteTransferForOperation(user, session, target, transfer_id);
+      if (mapping.state === "complete" || mapping.state === "cancelled" || mapping.state === "failed" || mapping.state === "expired") {
+        return this.transferStatusSnapshot(mapping);
+      }
+      if (mapping.state !== "active") throw new Error("Remote transfer status is unavailable.");
+      const response = await this.dispatchNodeOperation(user, session, target, "file_transfer_status", { transfer_id: mapping.remoteTransferId });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
+      this.assertRemoteTransferBinding(mapping);
+      if (!isRecord(response) || typeof response.next_offset !== "number"
+        || !["active", "complete", "cancelled", "failed", "expired"].includes(String(response.state))) {
+        throw new Error("Remote transfer status response is invalid.");
+      }
+      const state = response.state;
+      if (state !== "active" && state !== "complete" && state !== "cancelled" && state !== "failed" && state !== "expired") throw new Error("Remote transfer status is unknown.");
+      const confirmed = this.remoteTransferMappings.confirmStatus(mapping.trackingId, mapping.version, this.remoteTransferBinding(target.node_id), {
+        state,
+        nextOffset: response.next_offset,
+      });
+      if (!confirmed) throw new Error("Remote transfer mapping changed while status was pending.");
+      return response;
     }));
     server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => {
-      this.session(user, session_id);
-      return this.executeLocalNodeOperation(user, session_id, "file_transfer_cancel", { transfer_id });
+      const { session, target } = this.transferOperationTarget(user, session_id);
+      if (target.node_id === this.cfg.nodeId) return this.executeLocalNodeOperation(user, session.id, "file_transfer_cancel", { transfer_id });
+      const known = this.remoteTransferMappings.lookupPublic(transfer_id, user, session.id, target.node_id);
+      if (!known) throw new Error("Remote transfer mapping is unavailable.");
+      if (known.state === "cancelled") return { cancelled: true };
+      const mapping = await this.remoteTransferForOperation(user, session, target, transfer_id);
+      if (mapping.state === "cancelled") return { cancelled: true };
+      if (mapping.state !== "active") throw new Error("Remote transfer cannot be cancelled in its current state.");
+      const response = await this.dispatchNodeOperation(user, session, target, "file_transfer_cancel", { transfer_id: mapping.remoteTransferId });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
+      this.assertRemoteTransferBinding(mapping);
+      if (!isRecord(response) || response.cancelled !== true) throw new Error("Remote transfer cancellation response is invalid.");
+      const cancelled = this.remoteTransferMappings.markTerminal(mapping.trackingId, mapping.version, "cancelled");
+      if (!cancelled) throw new Error("Remote transfer mapping changed while cancellation was pending.");
+      return response;
     }));
     server.registerTool("process_start", { description: "Start a command for the current user-authorized task on the local node through Desktop Commander. Requires the caller's active session_id. The command starts in that session's working_directory. Prefer the dedicated root-scoped file tools for file operations. The command runs with the MCP server OS user's existing permissions. timeout_ms is 100–60000 (default 10000); returns a process_id and initial output. Use process_status, process_output, or process_kill with this same session_id.", inputSchema: { session_id: sessionId, node_id: nodeId, command: z.string().min(1).max(4000), timeout_ms: z.number().int().min(100).max(60_000).default(10_000) } }, this.tool(user, async ({ session_id, node_id, command, timeout_ms }) => {
       await this.sweepExpired();
@@ -2099,42 +2558,85 @@ export class RemoteDesktopService {
         timeout_ms,
         working_directory: session.workingDirectory,
       });
-      if (this.remoteProcessMappings.size >= MAX_REMOTE_PROCESS_MAPPINGS) throw new Error("Remote process mapping limit reached.");
       const binding = this.remoteProcessBinding(target.node_id);
-      const started = await this.dispatchNodeOperation(user, session, target, "process_start", {
-        command,
-        timeout_ms,
-        working_directory: session.workingDirectory,
-      }) as { process_id: string; output: string };
-      if (!started || typeof started.process_id !== "string" || started.process_id.length < 16 || typeof started.output !== "string") throw new Error("Remote process start response is invalid.");
-      const mapping = { principalId: user, sessionId: session.id, nodeId: target.node_id, ...binding, remoteProcessId: started.process_id };
-      this.assertRemoteProcessBinding(mapping);
-      const publicId = makeId();
-      this.remoteProcessMappings.set(publicId, mapping);
-      return { process_id: publicId, output: started.output };
+      const reservation = this.remoteProcessMappings.reserveStart(target.node_id);
+      let reservationOpen = true;
+      try {
+        const started = await this.dispatchNodeOperation(user, session, target, "process_start", {
+          command,
+          timeout_ms,
+          working_directory: session.workingDirectory,
+        }) as { process_id: string; output: string };
+        if (!started || typeof started.process_id !== "string" || started.process_id.length < 16 || typeof started.output !== "string") {
+          this.remoteProcessMappings.bindUnknown(reservation, { principalId: user, sessionId: session.id, ...binding });
+          reservationOpen = false;
+          throw new Error("Remote process start response is invalid; tracking is retained as unconfirmed.");
+        }
+        const mapping = this.remoteProcessMappings.bindStarted(reservation, {
+          principalId: user, sessionId: session.id, ...binding,
+          remoteProcessId: started.process_id, publicId: makeId(),
+        });
+        reservationOpen = false;
+        try { this.requireCurrentOperation(); }
+        catch (error) { this.remoteProcessMappings.hidePublic(mapping.trackingId); throw error; }
+        const currentSession = this.sessions.get(session.id);
+        if (!currentSession || currentSession !== session || currentSession.user !== user || currentSession.nodeId !== target.node_id
+          || currentSession.state !== "active" || currentSession.expires <= Date.now()) {
+          this.remoteProcessMappings.expireSession(session.id);
+          throw new Error("Session or authorization changed while remote process start was pending.");
+        }
+        try { this.assertRemoteProcessBinding(mapping); }
+        catch (error) { this.remoteProcessMappings.hidePublic(mapping.trackingId); throw error; }
+        return { process_id: mapping.publicId, output: started.output };
+      } catch (error) {
+        const code = error instanceof Error ? error.message : String(error);
+        if (reservationOpen && (code.includes("NODE_OUTCOME_UNKNOWN") || error instanceof z.ZodError)) {
+          this.remoteProcessMappings.bindUnknown(reservation, { principalId: user, sessionId: session.id, ...binding });
+        } else if (reservationOpen) {
+          this.remoteProcessMappings.releaseStart(reservation);
+        }
+        throw error;
+      }
     }));
     server.registerTool("process_output", { description: "Read the combined output for process_id started in the supplied active session_id. Requires the same session_id used for process_start; returns current state, available exit code, and combined output (stdout and stderr are not separated). Output for finished processes is returned from saved state.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
-      const { session, target } = this.operationTarget(user, session_id, node_id);
+      const { session, target, terminalResult: offlineTerminalResult } = this.processOperationTarget(user, session_id, node_id, process_id);
+      if (offlineTerminalResult) return offlineTerminalResult;
       if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "process_output", { process_id });
-      const mapping = this.remoteProcessForOperation(user, session, target.node_id, process_id);
+      const mapping = await this.remoteProcessForOperation(user, session, target, process_id);
+      const terminalResult = this.cachedRemoteProcessResult(mapping);
+      if (terminalResult) return terminalResult;
       const response = await this.dispatchNodeOperation(user, session, target, "process_output", { process_id: mapping.remoteProcessId });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
       this.assertRemoteProcessBinding(mapping);
+      this.observeRemoteProcessStatus(mapping, response);
       return response;
     }));
     server.registerTool("process_status", { description: "Refresh and return the state for process_id started in the supplied active session_id, including an available exit code and output. Requires the same session_id used for process_start; process IDs are scoped to their owner and session.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
-      const { session, target } = this.operationTarget(user, session_id, node_id);
+      const { session, target, terminalResult: offlineTerminalResult } = this.processOperationTarget(user, session_id, node_id, process_id);
+      if (offlineTerminalResult) return offlineTerminalResult;
       if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "process_status", { process_id });
-      const mapping = this.remoteProcessForOperation(user, session, target.node_id, process_id);
+      const mapping = await this.remoteProcessForOperation(user, session, target, process_id);
+      const terminalResult = this.cachedRemoteProcessResult(mapping);
+      if (terminalResult) return terminalResult;
       const response = await this.dispatchNodeOperation(user, session, target, "process_status", { process_id: mapping.remoteProcessId });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
       this.assertRemoteProcessBinding(mapping);
+      this.observeRemoteProcessStatus(mapping, response);
       return response;
     }));
     server.registerTool("process_kill", { description: "Request termination of a running process_id started in the supplied active session_id. Requires the same session_id used for process_start. This targets the tracked process; Windows managed descendants may also be stopped. If rejected=true, the termination request was not accepted. Otherwise state=terminating records a request, not a confirmed exit. Check process_status for the resulting state and termination_unconfirmed flag.", inputSchema: { session_id: sessionId, node_id: nodeId, process_id: z.string() } }, this.tool(user, async ({ session_id, node_id, process_id }) => {
-      const { session, target } = this.operationTarget(user, session_id, node_id);
+      const { session, target, terminalResult: offlineTerminalResult } = this.processOperationTarget(user, session_id, node_id, process_id);
+      if (offlineTerminalResult) throw new Error("Remote process is already confirmed finished.");
       if (target.node_id === this.cfg.nodeId) return this.dispatchNodeOperation(user, session, target, "process_kill", { process_id });
-      const mapping = this.remoteProcessForOperation(user, session, target.node_id, process_id);
+      const mapping = await this.remoteProcessForOperation(user, session, target, process_id);
+      if (mapping.state === "finished") throw new Error("Remote process is already confirmed finished.");
       const response = await this.dispatchNodeOperation(user, session, target, "process_kill", { process_id: mapping.remoteProcessId });
+      this.requireCurrentOperation();
+      this.session(user, session.id);
       this.assertRemoteProcessBinding(mapping);
+      this.remoteProcessMappings.markKillRequested(mapping.trackingId, mapping.version);
       return response;
     }));
     return server;
@@ -2264,5 +2766,141 @@ export function createApp(service: RemoteDesktopService): Express {
   app.use((error: unknown, _req: Request, res: Response, next: unknown) => { void next; void service.audit("http.failed", { route: "authentication" }).catch(() => undefined); if (!res.headersSent) { const status = typeof error === "object" && error !== null && "status" in error && (error as { status?: unknown }).status === 413 ? 413 : 500; res.status(status).type("text").send(status === 413 ? "Request is too large." : "Request could not be completed."); } });
   return app;
 }
-export async function startFromEnvironment(): Promise<void> { const service = new RemoteDesktopService(configFromEnv()); await service.initialize(); createApp(service).listen(service.cfg.port, "127.0.0.1", () => console.log(`Remote Desktop MCP listening on ${service.publicAuth ? service.cfg.baseUrl : `http://127.0.0.1:${service.cfg.port}`}/mcp (${service.publicAuth ? "google" : "local-development"})`)); }
+
+export function discoverTailscaleIPv4(interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()): string {
+  const addresses = [...new Set(Object.values(interfaces).flatMap((items) => (items ?? [])
+    .filter((item) => item.family === "IPv4" && !item.internal)
+    .map((item) => item.address)
+    .filter((address) => {
+      const parts = address.split(".").map(Number);
+      return parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+        && parts[0] === 100 && parts[1]! >= 64 && parts[1]! <= 127;
+    })))];
+  if (addresses.length !== 1) throw new Error("Exactly one Tailscale IPv4 address must be available for the coordinator listener.");
+  return addresses[0]!;
+}
+
+type EnvironmentStartOptions = {
+  env?: NodeJS.ProcessEnv;
+  resolveTailscaleIPv4?: () => string;
+};
+
+export type EnvironmentRuntime = {
+  service: RemoteDesktopService;
+  httpServer: HttpServer;
+  httpUrl: string;
+  nodeRegistry?: NodeRegistry;
+  close(): Promise<void>;
+};
+
+function superviseExecutor(client: ExecutorNodeClient): () => Promise<void> {
+  let stopping = false;
+  const run = async (): Promise<void> => {
+    while (!stopping) {
+      try {
+        await client.connect();
+        await client.waitClosed(2_147_483_647);
+      } catch {
+        await client.close().catch(() => undefined);
+      }
+      if (!stopping) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+    }
+  };
+  const running = run();
+  return async () => {
+    stopping = true;
+    await client.close().catch(() => undefined);
+    await running;
+  };
+}
+
+export async function startFromEnvironment(options: EnvironmentStartOptions = {}): Promise<EnvironmentRuntime> {
+  const env = options.env ?? process.env;
+  const baseConfig = configFromEnv(env);
+  const clusterConfig = await new ClusterConfigStore(baseConfig.dataDir).load();
+  const nodeRegistry = clusterConfig ? new NodeRegistry(clusterConfig) : undefined;
+  const config: RuntimeConfig = clusterConfig
+    ? { ...baseConfig, nodeId: clusterConfig.local.node_id, nodeLabel: clusterConfig.local.label, nodeRegistry }
+    : baseConfig;
+  if (clusterConfig?.roles.includes("executor")) {
+    nodeRegistry!.setLocalCapabilities({
+      operations: ["file", "process", "transfer"],
+      roots: config.roots.map((root) => ({ root_id: root.id, absolute_path: path.resolve(root.path) })),
+      path_base: "root",
+    });
+  }
+
+  let service: RemoteDesktopService | undefined;
+  let nodeServer: CoordinatorNodeServer | undefined;
+  let stopExecutor: (() => Promise<void>) | undefined;
+  let httpServer: HttpServer | undefined;
+  try {
+    if (clusterConfig?.roles.includes("coordinator")) {
+      if (!nodeRegistry) throw new Error("Coordinator node registry is unavailable.");
+      const bindHost = (options.resolveTailscaleIPv4 ?? discoverTailscaleIPv4)();
+      nodeServer = new CoordinatorNodeServer({
+        host: bindHost,
+        expectedBindHost: bindHost,
+        port: clusterConfig.transport!.port,
+        config: clusterConfig,
+        registry: nodeRegistry,
+        userStates: () => service?.nodeUserStates() ?? [],
+      });
+      config.nodeRequest = (nodeId, payload) => nodeServer!.request(nodeId, payload);
+      config.nodeStateSync = (state) => nodeServer!.syncUserState(state);
+    }
+
+    service = new RemoteDesktopService(config);
+    await service.initialize();
+    if (nodeServer) await nodeServer.start();
+
+    if (clusterConfig?.roles.length === 1 && clusterConfig.roles[0] === "executor") {
+      const capabilities = service.nodeCapabilities();
+      const executor = new ExecutorNodeClient({
+        config: clusterConfig,
+        capabilities,
+        onRequest: (payload) => service!.executeNodeRequest(payload),
+        isOperationAuthorized: (operation) => service!.isNodeOperationAuthorized(operation.request, operation.operation_id.coordinator_epoch),
+        onCoordinatorEpoch: async (epoch) => service!.activateNodeCoordinatorEpoch(epoch),
+        onUserState: (state) => service!.applyNodeUserState(state),
+      });
+      stopExecutor = superviseExecutor(executor);
+    }
+
+    httpServer = createApp(service).listen(config.port, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => { httpServer?.off("listening", onListening); reject(error); };
+      const onListening = () => { httpServer?.off("error", onError); resolve(); };
+      httpServer!.once("error", onError);
+      httpServer!.once("listening", onListening);
+    });
+    const address = httpServer.address();
+    if (!address || typeof address === "string") throw new Error("MCP HTTP listener did not expose a TCP address.");
+
+    const runtimeService = service;
+    const runtimeHttpServer = httpServer;
+    const runtimeNodeServer = nodeServer;
+    const runtimeStopExecutor = stopExecutor;
+    const httpUrl = `http://127.0.0.1:${address.port}/mcp`;
+    console.log(`Remote Desktop MCP listening on ${service.publicAuth ? service.cfg.baseUrl : httpUrl} (${service.publicAuth ? "google" : "local-development"})`);
+    return {
+      service: runtimeService,
+      httpServer: runtimeHttpServer,
+      httpUrl,
+      ...(nodeRegistry ? { nodeRegistry } : {}),
+      close: async () => {
+        await new Promise<void>((resolve, reject) => runtimeHttpServer.close((error) => error ? reject(error) : resolve()));
+        await runtimeStopExecutor?.();
+        await runtimeNodeServer?.close();
+        await runtimeService.close();
+      },
+    };
+  } catch (error) {
+    if (httpServer?.listening) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
+    await stopExecutor?.();
+    await nodeServer?.close().catch(() => undefined);
+    await service?.close().catch(() => undefined);
+    throw error;
+  }
+}
 if (process.argv[1] === fileURLToPath(import.meta.url)) await startFromEnvironment();
