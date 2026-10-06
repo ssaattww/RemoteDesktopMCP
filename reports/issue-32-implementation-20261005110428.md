@@ -52,3 +52,12 @@ R75-COV-01 / R75-DOC-01 対応後の `npm run check`、`npm run lint`（Markdown
 - 同headの[CI run 37300792243](https://github.com/ssaattww/RemoteDesktopMCP/actions/runs/37300792243)ではUbuntuゲート、Windows割当、Windows shard 1、2、4〜8がpassしました。Windows shard 3は `Test` stepでfailしました。同jobのinstall、型検査、buildはpassです。
 - GitHubで同jobのログ取得 (`gh api repos/ssaattww/RemoteDesktopMCP/actions/jobs/111732877498/logs`) と診断artifact取得 (`gh run download 37300792243 --name windows-diagnostics-shard-3-e1f785d4ee223193b5158ef153547b230639619f --dir /tmp/rdmcp-issue32-windows-shard3-diagnostics`) を試みましたが、どちらも `Forbidden` でした。アクセス制限を迂回しないため、失敗したテスト名と原因は未特定です。コード回帰か環境要因か判断できないため、PRはDraftのままです。
 - main取り込み時は、Issue #28 の並行変更が `src/index.ts` に触れている点を考慮して差分とCIを再確認してください。#28、#72、#74、Issue #24系列の既存作業を変更していません。
+
+## Node.js 24 CI更新（2026-10-06）
+
+- `.github/workflows/lint.yml` のUbuntu job、Windows割当job、Windows shard job、および `.github/workflows/test-runtime-measurement.yml` のNode.jsを、すべて固定版 `24.20.0` に更新しました。package engine、依存、lockfileは変更していません。
+- head `c0e883c1683df533d5d2d51f4673f43441bf41d1` の [CI run 37444575561](https://github.com/ssaattww/RemoteDesktopMCP/actions/runs/37444575561) はUbuntu、Windows shard 1、2、4〜8が成功し、shard 3は `Test` stepで失敗しました。失敗テスト名と原因はjob metadataから確認できません。Node.js 22または24を原因とは判断していません。
+- Windows全test fileを各3回測る [measurement run 37444633369](https://github.com/ssaattww/RemoteDesktopMCP/actions/runs/37444633369) は成功し、同head向けartifactのuploadも成功しました。artifact名は `test-runtime-measurement-37444633369-1-c0e883c1683df533d5d2d51f4673f43441bf41d1`、GitHub metadata上のサイズは51,983 bytesです。
+- 上記の新規artifactを一度取得しましたが、`gh run download 37444633369 --name test-runtime-measurement-37444633369-1-c0e883c1683df533d5d2d51f4673f43441bf41d1 --dir /tmp/rdmcp-issue32-node24-measurements` はblob取得時に `Forbidden` で拒否されました。以前拒否されたshardログ/artifactも、この新規measurement artifactも再取得していません。署名付きURLのqueryは記録に含めていません。
+- artifactの内容を読めないため、測定記録のNode/npm版、30ファイル各3回の記録、candidate fingerprintを独立検証できず、manifestは更新しませんでした。現行manifestはWindows Node.js `v22.23.3` / npm `10.9.9` のままです。Node 24環境とはfingerprintが不一致となるため、schedulerは古い計測値を使わずbaseline割当へfallbackします。Node 24用measurementはartifactの検証が阻まれた状態です。
+- PR #75はopen / Draftのままです。shard 3の失敗原因、measurement artifactの内容、Code Mode経由E2Eはいずれも未確認です。
