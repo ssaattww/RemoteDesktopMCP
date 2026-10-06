@@ -23,6 +23,7 @@ export type RemoteProcessMapping = RemoteProcessBinding & {
   terminalOutput?: string;
   terminalExitCode?: number;
   terminalTerminationUnconfirmed?: boolean;
+  terminationUnconfirmed?: boolean;
   publicAvailable: boolean;
 };
 
@@ -211,6 +212,7 @@ export class RemoteProcessMappingStore {
       if (terminalResult?.exitCode !== undefined) mapping.terminalExitCode = terminalResult.exitCode;
       if (terminalResult?.terminationUnconfirmed !== undefined) mapping.terminalTerminationUnconfirmed = terminalResult.terminationUnconfirmed;
     } else {
+      mapping.terminationUnconfirmed = terminalResult?.terminationUnconfirmed ?? false;
       mapping.state = "active";
       mapping.terminalAt = undefined;
       mapping.terminalOutput = undefined;
@@ -220,10 +222,21 @@ export class RemoteProcessMappingStore {
     return copy(mapping);
   }
 
-  markKillRequested(trackingId: string, expectedVersion: number, now = Date.now()): RemoteProcessMapping | undefined {
+  markKillRequested(trackingId: string, expectedVersion: number, now = Date.now(), terminationUnconfirmed = false): RemoteProcessMapping | undefined {
     const mapping = this.mappings.get(trackingId);
     if (!mapping || mapping.version !== expectedVersion || mapping.state === "finished" || mapping.state === "stale") return undefined;
     mapping.observedState = "terminating";
+    mapping.terminationUnconfirmed = terminationUnconfirmed;
+    mapping.touchedAt = now;
+    mapping.version += 1;
+    return copy(mapping);
+  }
+
+  markTerminationUnconfirmed(trackingId: string, expectedVersion: number, now = Date.now()): RemoteProcessMapping | undefined {
+    const mapping = this.mappings.get(trackingId);
+    if (!mapping || mapping.version !== expectedVersion || mapping.state === "finished" || mapping.state === "stale") return undefined;
+    mapping.observedState = "terminating";
+    mapping.terminationUnconfirmed = true;
     mapping.touchedAt = now;
     mapping.version += 1;
     return copy(mapping);

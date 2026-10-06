@@ -47,6 +47,7 @@ type UserState = {
 };
 type SynchronizedUserState = UserState & { coordinator_epoch: string };
 type UserStateAck = { principal_id: string; stop_generation: number; coordinator_epoch: string; state_applied: true; requested_process_ids: string[]; failed_process_ids: string[] };
+type NodeUserStateAck = UserStateAck & { node_id: string };
 type UserStateResult = { requested_process_ids: string[]; failed_process_ids: string[] };
 
 type ExecutorCapabilities = NodeCapabilities & {
@@ -699,7 +700,7 @@ export class CoordinatorNodeServer {
     });
   }
 
-  async syncUserState(state: UserState): Promise<UserStateAck[]> {
+  async syncUserState(state: UserState): Promise<NodeUserStateAck[]> {
     const synchronizedState = { ...state, coordinator_epoch: PROCESS_OPERATION_ISSUER.coordinatorEpoch };
     const active = [...this.connections.values()].filter((connection) => {
       const current = this.options.registry.activeConnection(connection.nodeId);
@@ -730,7 +731,7 @@ export class CoordinatorNodeServer {
         });
       }));
       connection.stateSyncTail = current.then(() => undefined, () => undefined);
-      return current;
+      return current.then((ack) => ({ ...ack, node_id: connection.nodeId }));
     }));
   }
 

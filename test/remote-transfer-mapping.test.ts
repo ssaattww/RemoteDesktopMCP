@@ -86,10 +86,26 @@ test("download status after a lost chunk ACK rebinds and retrieves the executor'
   const replacement = { ...binding, connectionId: Buffer.alloc(32, 8).toString("base64url") };
   const rebound = store.confirmStatus(pending.trackingId, pending.version, replacement, { state: "active", nextOffset: 5 });
   assert.equal(rebound?.pendingDownload?.offset, 0);
-  assert.equal(rebound?.lastAckOffset, 5);
+  assert.equal(rebound?.lastAckOffset, 0, "status alone must not claim a download chunk the caller has not recovered");
   const remoteReplay = { data: Buffer.from("bytes").toString("base64"), next_offset: 5, complete: false };
   const recovered = store.acknowledgeDownloadChunk(mapping.trackingId, rebound!.version, 0, remoteReplay);
   assert.equal(recovered?.pendingDownload, undefined);
   assert.equal(recovered?.lastAckOffset, 5);
   assert.deepEqual(store.downloadReplay(mapping.trackingId, 0), remoteReplay);
+});
+
+test("terminal download status keeps a pending chunk offset until its bytes are recovered", () => {
+  const store = new RemoteTransferMappingStore({ activeLimit: 2, totalLimit: 3 });
+  const mapping = start(store, 1, "download");
+  const pending = store.beginDownloadChunk(mapping.trackingId, mapping.version, 0)!;
+  const replacement = { ...binding, connectionId: Buffer.alloc(32, 8).toString("base64url") };
+  const finished = store.confirmStatus(pending.trackingId, pending.version, replacement, { state: "complete", nextOffset: 5 });
+  assert.equal(finished?.state, "complete");
+  assert.equal(finished?.lastAckOffset, 0);
+  assert.equal(finished?.pendingDownload?.offset, 0);
+  const replay = { data: Buffer.from("final").toString("base64"), next_offset: 5, complete: true };
+  const recovered = store.acknowledgeDownloadChunk(mapping.trackingId, finished!.version, 0, replay);
+  assert.equal(recovered?.state, "complete");
+  assert.equal(recovered?.lastAckOffset, 5);
+  assert.equal(recovered?.pendingDownload, undefined);
 });

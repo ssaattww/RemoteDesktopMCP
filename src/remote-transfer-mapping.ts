@@ -223,13 +223,15 @@ export class RemoteTransferMappingStore {
         recoveredUpload = { offset: pendingUpload.offset, digest: pendingUpload.digest, nextOffset: status.nextOffset };
       } else if (status.nextOffset !== item.lastAckOffset) return undefined;
     } else if (pendingDownload) {
-      if (status.nextOffset < pendingDownload.offset) return undefined;
+      if (status.nextOffset < pendingDownload.offset || status.nextOffset < item.lastAckOffset) return undefined;
     } else if (status.nextOffset !== item.lastAckOffset) return undefined;
     if (recoveredUpload) item.lastUploadReplay = recoveredUpload;
     if (pendingUpload) item.pendingUpload = undefined;
     if (pendingDownload && status.nextOffset === pendingDownload.offset) item.pendingDownload = undefined;
     item.connectionId = binding.connectionId;
-    item.lastAckOffset = status.nextOffset;
+    // A status offset only proves the executor advanced. The caller still needs
+    // the pending download chunk bytes before its public offset can advance.
+    if (!pendingDownload) item.lastAckOffset = status.nextOffset;
     item.touchedAt = now;
     item.version += 1;
     item.state = status.state;

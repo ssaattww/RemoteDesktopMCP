@@ -69,7 +69,7 @@ const MAX_AUDIT_EVENTS = 20_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: NodeOperationRequest) => Promise<unknown>; nodeStateSync?: (state: { principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null }) => Promise<Array<{ state_applied: true; failed_process_ids: string[] }>> };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: NodeOperationRequest) => Promise<unknown>; nodeStateSync?: (state: { principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null }) => Promise<Array<{ node_id?: string; state_applied: true; requested_process_ids?: string[]; failed_process_ids: string[] }>> };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -619,14 +619,35 @@ export class RemoteDesktopService {
         await this.audit("transfer.cancelled_by_user_stop", { user, transferId: item.id, stopId: state.stopId }).catch(() => undefined);
       }
     });
+    let remoteStopAcks: Array<{ node_id?: string; state_applied: true; requested_process_ids?: string[]; failed_process_ids: string[] }> = [];
     if (this.cfg.nodeStateSync) {
       try {
         const acknowledgements = await this.cfg.nodeStateSync({ principal_id: user, stopped: true, stop_generation: state.stopGeneration, stop_id: state.stopId ?? null });
+        remoteStopAcks = acknowledgements;
         if (!acknowledgements.length || acknowledgements.some((ack) => ack.state_applied !== true || ack.failed_process_ids.length > 0)) {
           await this.audit("user.stop_remote_sync_unconfirmed", { user, stopId: state.stopId, stopGeneration: state.stopGeneration, acknowledgedNodes: acknowledgements.length }).catch(() => undefined);
         }
       } catch {
         await this.audit("user.stop_remote_sync_unconfirmed", { user, stopId: state.stopId, stopGeneration: state.stopGeneration }).catch(() => undefined);
+      }
+    }
+    for (const mapping of this.remoteProcessMappings.listTracking()) {
+      if (mapping.principalId !== user || !mapping.publicId || mapping.state === "finished" || mapping.state === "stale") continue;
+      const ack = remoteStopAcks.find((candidate) => candidate.node_id === mapping.nodeId && candidate.state_applied === true);
+      const requested = mapping.remoteProcessId !== undefined && ack?.requested_process_ids?.includes(mapping.remoteProcessId) === true;
+      const failed = mapping.remoteProcessId !== undefined && ack?.failed_process_ids.includes(mapping.remoteProcessId) === true;
+      if (requested) {
+        this.remoteProcessMappings.markKillRequested(mapping.trackingId, mapping.version);
+        await this.audit("process.stop_requested", { user, processId: mapping.publicId, nodeId: mapping.nodeId, stopId: state.stopId, source: "owner_stop" }).catch(() => undefined);
+      } else {
+        this.remoteProcessMappings.markTerminationUnconfirmed(mapping.trackingId, mapping.version);
+        await this.audit("process.owner_stop_unconfirmed", {
+          user,
+          processId: mapping.publicId,
+          nodeId: mapping.nodeId,
+          stopId: state.stopId,
+          reason: failed ? "executor_reported_failure" : ack ? "process_outcome_not_reported" : "node_sync_unavailable",
+        }).catch(() => undefined);
       }
     }
     if (persistenceFailure) throw persistenceFailure;
@@ -2530,7 +2551,7 @@ export class RemoteDesktopService {
         nextOffset: response.next_offset,
       });
       if (!confirmed) throw new Error("Remote transfer mapping changed while status was pending.");
-      return response;
+      return { ...response, next_offset: confirmed.lastAckOffset, transferred_bytes: confirmed.lastAckOffset };
     }));
     server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => {
       const { session, target } = this.transferOperationTarget(user, session_id);
@@ -2636,7 +2657,13 @@ export class RemoteDesktopService {
       this.requireCurrentOperation();
       this.session(user, session.id);
       this.assertRemoteProcessBinding(mapping);
-      this.remoteProcessMappings.markKillRequested(mapping.trackingId, mapping.version);
+      if (isRecord(response) && response.rejected === true) return response;
+      this.remoteProcessMappings.markKillRequested(
+        mapping.trackingId,
+        mapping.version,
+        Date.now(),
+        isRecord(response) && response.termination_unconfirmed === true,
+      );
       return response;
     }));
     return server;
