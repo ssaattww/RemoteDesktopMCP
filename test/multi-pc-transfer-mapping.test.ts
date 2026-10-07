@@ -51,6 +51,14 @@ async function waitForRemoteActive(registry: NodeRegistry): Promise<void> {
   }
 }
 
+async function waitForRemoteDisconnected(registry: NodeRegistry): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (registry.activeConnection(remoteId)) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for the remote node to disconnect.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 
 test("remote transfer ids are opaque and upload replays only identical last chunks", async () => {
   const local = createInitialClusterConfig("both", "Coordinator", 41000);
@@ -60,6 +68,8 @@ test("remote transfer ids are opaque and upload replays only identical last chun
   const executorFixture = await fixture({ nodeId: remoteId, nodeLabel: "Remote A", chunkBytes: 1024 }, undefined, { startDesktopCommander: false });
   const downloadBytes = Buffer.alloc(1536, 0x5a);
   await writeFile(path.join(executorFixture.root, "remote-download.bin"), downloadBytes);
+  let dropNextDownloadChunkSocket = false;
+  let downloadChunkExecutions = 0;
   const server = new CoordinatorNodeServer({ host: "127.0.0.1", expectedBindHost: "127.0.0.1", port: 0, config: added.config, registry, userStates: () => initialRemoteUserState });
   const address = await server.start();
   const executorBase = createInitialClusterConfig("executor", "Remote A");
@@ -68,11 +78,13 @@ test("remote transfer ids are opaque and upload replays only identical last chun
     config: executorConfig,
     capabilities: { executor_generation: executorGeneration, desktop_commander_generation: commanderGeneration, operations: ["file", "transfer"], roots: [{ root_id: "files", absolute_path: executorFixture.root }], path_base: "root" },
     onRequest: async (payload) => {
+      if (typeof payload === "object" && payload !== null
+        && "operation" in payload && payload.operation === "file_transfer_download_chunk") downloadChunkExecutions += 1;
       const response = await executorFixture.service.executeNodeRequest(payload);
-      if (dropNextDownloadChunkResponse && typeof payload === "object" && payload !== null
+      if (dropNextDownloadChunkSocket && typeof payload === "object" && payload !== null
         && "operation" in payload && payload.operation === "file_transfer_download_chunk") {
-        dropNextDownloadChunkResponse = false;
-        throw new Error("synthetic lost download response after executor commit");
+        dropNextDownloadChunkSocket = false;
+        await client.close();
       }
       return response;
     },
@@ -82,7 +94,6 @@ test("remote transfer ids are opaque and upload replays only identical last chun
   });
   let coordinatorFixture: Awaited<ReturnType<typeof fixture>> | undefined;
   let api: Awaited<ReturnType<typeof mcp>> | undefined;
-  let dropNextDownloadChunkResponse = false;
   try {
     await client.connect("127.0.0.1", address.port);
     await waitForRemoteActive(registry);
@@ -97,16 +108,37 @@ test("remote transfer ids are opaque and upload replays only identical last chun
     const replay = await api.call("file_transfer_download_chunk", { session_id: opened.session_id, transfer_id: publicDownloadId, offset: 0 });
     assert.equal(first.data, replay.data);
     assert.equal(first.next_offset, replay.next_offset);
-    dropNextDownloadChunkResponse = true;
+    const originalConnectionId = registry.activeConnection(remoteId)?.connection_id;
+    assert.ok(originalConnectionId);
+    dropNextDownloadChunkSocket = true;
     const finalOffset = Number(first.next_offset);
     await assert.rejects(
       api.call("file_transfer_download_chunk", { session_id: opened.session_id, transfer_id: publicDownloadId, offset: finalOffset }),
       /TODO_OPERATION_OUTCOME_UNKNOWN/,
     );
+    assert.equal(dropNextDownloadChunkSocket, false, "the final chunk was committed before its executor socket was closed");
+    assert.equal(downloadChunkExecutions, 2, "the final chunk side effect ran exactly once before the socket closed");
+    const executorTransfer = executorFixture.service.transfers.get(internalDownloadId) as unknown as {
+      offset: number;
+      downloadReplay?: { offset: number; data: string; nextOffset: number; complete: boolean };
+    };
+    assert.equal(executorTransfer?.offset, downloadBytes.length, "the executor committed the final chunk before the connection closed");
+    const committedReplay = executorTransfer.downloadReplay;
+    assert.ok(committedReplay);
+    assert.equal(committedReplay.offset, finalOffset);
+    await waitForRemoteDisconnected(registry);
+    await client.connect("127.0.0.1", address.port);
+    await waitForRemoteActive(registry);
+    const reconnectedId = registry.activeConnection(remoteId)?.connection_id;
+    assert.ok(reconnectedId);
+    assert.notEqual(reconnectedId, originalConnectionId, "recovery must use a new authenticated transport connection");
     const pendingStatus = await api.call("file_transfer_status", { session_id: opened.session_id, transfer_id: publicDownloadId });
     assert.equal(pendingStatus.state, "active", "a terminal executor state must stay publicly recoverable while the final chunk response is pending");
     assert.equal(pendingStatus.next_offset, finalOffset, "public offset must not pass the unreturned final chunk");
     const last = await api.call("file_transfer_download_chunk", { session_id: opened.session_id, transfer_id: publicDownloadId, offset: finalOffset });
+    assert.equal(downloadChunkExecutions, 3, "recovery retries the exact same offset through the authenticated transport");
+    assert.equal(executorTransfer.offset, downloadBytes.length, "executor replay must not advance the committed side effect a second time");
+    assert.deepEqual(executorTransfer.downloadReplay, committedReplay, "executor replay returns the identical cached chunk");
     assert.equal(last.complete, true);
     const recoveredStatus = await api.call("file_transfer_status", { session_id: opened.session_id, transfer_id: publicDownloadId });
     assert.equal(recoveredStatus.state, "complete");
