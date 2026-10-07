@@ -1,5 +1,6 @@
 ﻿import assert from "node:assert/strict";
 import test from "node:test";
+import { createConnection } from "node:net";
 import {
   addExecutor,
   createInitialClusterConfig,
@@ -164,6 +165,32 @@ test("authenticated user stop is applied while a duplicate-safe request is pendi
   } finally {
     release();
     await client.close();
+    await server.close();
+  }
+});
+
+test("coordinator rejects an oversized pre-auth frame from its header without buffering a body", async () => {
+  const { coordinator } = configs();
+  const registry = new NodeRegistry(coordinator);
+  const server = new CoordinatorNodeServer({
+    host: "127.0.0.1", expectedBindHost: "127.0.0.1", port: 0, config: coordinator, registry, userStates: () => [],
+  });
+  const address = await server.start();
+  const socket = createConnection({ host: "127.0.0.1", port: address.port });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(8 * 1024 + 1);
+    socket.write(header);
+    await new Promise<void>((resolve, reject) => {
+      socket.once("close", resolve);
+      socket.once("error", reject);
+    });
+  } finally {
+    socket.destroy();
     await server.close();
   }
 });

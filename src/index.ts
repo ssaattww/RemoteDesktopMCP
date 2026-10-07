@@ -111,6 +111,11 @@ export type RuntimeConfig = {
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
+const isGooglePrincipal = (principal: string) => principal.startsWith("google:") && principal.length <= 1024
+  && !Array.from(principal).some((character) => {
+    const code = character.codePointAt(0)!;
+    return code <= 0x1f || code === 0x7f;
+  });
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const inside = (parent: string, candidate: string) => { const relative = path.relative(parent, candidate); return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)); };
 const overlaps = (a: string, b: string) => inside(a, b) || inside(b, a);
@@ -637,9 +642,10 @@ export class RemoteDesktopService {
     return { ...state, stopped: state.stopped || this.executionStateUnavailable || this.executionResumes.has(user) };
   }
   nodeUserStates(): Array<{ principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null }> {
-    return this.cfg.users.map(({ email }) => {
-      const state = this.userExecutionState(email);
-      return { principal_id: email, stopped: state.stopped, stop_generation: state.stopGeneration, stop_id: state.stopId ?? null };
+    const principals = new Set([...this.cfg.users.map(({ email }) => email), ...this.executionStates.keys()]);
+    return [...principals].map((principal_id) => {
+      const state = this.userExecutionState(principal_id);
+      return { principal_id, stopped: state.stopped, stop_generation: state.stopGeneration, stop_id: state.stopId ?? null };
     });
   }
   nodeCapabilities(): NodeCapabilities & { executor_generation: string; desktop_commander_generation: string } {
@@ -662,7 +668,7 @@ export class RemoteDesktopService {
     const user = state.principal_id;
     this.synchronizedNodeUsers.delete(user);
     if (!this.coordinatorEpoch || state.coordinator_epoch !== this.coordinatorEpoch) throw new Error("User state coordinator epoch is not synchronized.");
-    if (!this.cfg.users.some((configured) => configured.email === user)) throw new Error("User state principal is unknown.");
+    if (!this.cfg.users.some((configured) => configured.email === user) && !isGooglePrincipal(user)) throw new Error("User state principal is unknown.");
     if (!Number.isSafeInteger(state.stop_generation) || state.stop_generation < 0 || typeof state.stopped !== "boolean" || !(typeof state.stop_id === "string" || state.stop_id === null) || (state.stopped && !state.stop_id)) throw new Error("User state payload is invalid.");
     if (this.executionStateUnavailable) throw new Error("User execution state is unavailable.");
     const prior = this.executionStates.get(user);
@@ -733,7 +739,7 @@ export class RemoteDesktopService {
   }
   isNodeOperationAuthorized(request: NodeOperationRequest, coordinatorEpoch: string): boolean {
     if (this.executionStateUnavailable || !this.coordinatorEpoch || coordinatorEpoch !== this.coordinatorEpoch) return false;
-    if (!this.cfg.users.some((configured) => configured.email === request.principal_id)) return false;
+    if (!this.cfg.users.some((configured) => configured.email === request.principal_id) && !isGooglePrincipal(request.principal_id)) return false;
     if (!this.synchronizedNodeUsers.has(request.principal_id)) return false;
     const state = this.userExecutionState(request.principal_id);
     return !state.stopped && state.stopGeneration === request.stop_generation;
@@ -1297,7 +1303,7 @@ export class RemoteDesktopService {
       throw new Error(`Remote node does not provide the ${contract.capability} operation capability.`);
     }
     if (!this.cfg.nodeRequest) throw new Error("Remote node request handling is unavailable.");
-    const state = this.userExecutionState(user);
+    const state = await this.synchronizeRemotePrincipal(user, target.node_id);
     const request = createNodeOperationRequest(user, state.stopGeneration, undefined, operation, args);
     return parseNodeOperationResponse(operation, await this.cfg.nodeRequest(target.node_id, request));
   }
@@ -1314,9 +1320,32 @@ export class RemoteDesktopService {
       throw new Error(`Remote node does not provide the ${contract.capability} operation capability.`);
     }
     if (!this.cfg.nodeRequest) throw new Error("Remote node request handling is unavailable.");
-    const state = this.userExecutionState(user);
+    const state = await this.synchronizeRemotePrincipal(user, target.node_id);
     const request = createNodeOperationRequest(user, state.stopGeneration, session.id, operation, args);
     return parseNodeOperationResponse(operation, await this.cfg.nodeRequest(target.node_id, request));
+  }
+  private async synchronizeRemotePrincipal(user: string, nodeId: string): Promise<UserExecutionState> {
+    this.requireExecutionAllowed(user);
+    const state = this.userExecutionState(user);
+    if (!this.cfg.nodeStateSync) {
+      // The initial authenticated executor handshake carries configured users.
+      // Dynamic principals and resumed generations need an explicit live ACK.
+      if (this.cfg.users.some((configured) => configured.email === user) && !state.stopped && state.stopGeneration === 0) return state;
+      throw new Error("Remote user state synchronization is unavailable.");
+    }
+    const acknowledgements = await this.cfg.nodeStateSync({
+      principal_id: user,
+      stopped: state.stopped,
+      stop_generation: state.stopGeneration,
+      stop_id: state.stopId ?? null,
+    });
+    const ack = acknowledgements.find((item) => item.node_id === nodeId);
+    if (!ack || ack.state_applied !== true || ack.failed_process_ids.length > 0) {
+      throw new Error("Remote user state synchronization was not acknowledged by the target node.");
+    }
+    const current = this.userExecutionState(user);
+    if (current.stopped || current.stopGeneration !== state.stopGeneration) throw new UserStopRequested(current);
+    return current;
   }
   private async dispatchNodeOperation(
     user: string,

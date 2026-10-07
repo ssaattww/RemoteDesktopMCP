@@ -118,6 +118,15 @@ test("only the current synchronized state authorizes an operation", async () => 
   assert.equal(await guard.execute(envelope(), () => auth.isNodeOperationAuthorized(request, epoch), async () => "allowed"), "allowed");
 });
 
+test("a coordinator-synchronized Google principal can authorize executor work", async () => {
+  const auth = serviceFixture();
+  auth.activateNodeCoordinatorEpoch(epoch);
+  const principal = "google:https://accounts.google.com:subject-123";
+  await applyState(auth, false, 0, epoch, principal);
+  assert.equal(auth.nodeUserStates().some((state) => state.principal_id === principal), true);
+  assert.equal(auth.isNodeOperationAuthorized({ ...request, principal_id: principal, stop_generation: 0 }, epoch), true);
+});
+
 test("failed user state application remains unauthorized", async () => {
   const auth = serviceFixture();
   auth.activateNodeCoordinatorEpoch(epoch);

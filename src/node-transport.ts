@@ -246,6 +246,21 @@ class FramedSocket {
 
   private receive(chunk: Buffer): void {
     if (this.terminalError) return;
+    const waiter = this.waiters[0];
+    if (waiter) {
+      let advertisedLength: number | undefined;
+      if (this.buffer.length >= 4) advertisedLength = this.buffer.readUInt32BE(0);
+      else if (this.buffer.length + chunk.length >= 4) {
+        const header = Buffer.allocUnsafe(4);
+        this.buffer.copy(header, 0);
+        chunk.copy(header, this.buffer.length, 0, 4 - this.buffer.length);
+        advertisedLength = header.readUInt32BE(0);
+      }
+      if (advertisedLength !== undefined && advertisedLength > waiter.maxBytes) {
+        this.fail(new Error("Node frame exceeds the allowed size for this protocol phase."));
+        return;
+      }
+    }
     this.buffer = Buffer.concat([this.buffer, chunk]);
     while (this.buffer.length >= 4) {
       const length = this.buffer.readUInt32BE(0);
