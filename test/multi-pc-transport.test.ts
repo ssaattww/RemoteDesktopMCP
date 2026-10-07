@@ -69,7 +69,10 @@ test("executor authenticates, becomes active, and serves authenticated requests"
       executor_generation: generation(1),
       desktop_commander_generation: generation(2),
       operations: ["file", "process"],
-      roots: [{ root_id: "remote", absolute_path: "D:\\files" }],
+      roots: Array.from({ length: 100 }, (_, index) => ({
+        root_id: `remote-${String(index).padStart(3, "0")}`,
+        absolute_path: `D:\\${"x".repeat(100)}-${index}`,
+      })),
       path_base: "root",
     },
     onRequest: async (payload) => ({ received: payload }),
@@ -87,7 +90,7 @@ test("executor authenticates, becomes active, and serves authenticated requests"
 
     const listed = registry.list().find((node) => node.node_id === remoteId);
     assert.deepEqual(listed?.operations, ["file", "process"]);
-    assert.deepEqual(listed?.root_ids, ["remote"]);
+    assert.equal((listed?.root_ids as string[]).length, 100);
 
     const response = await server.request(remoteId, {
       principal_id: "owner@example.test",

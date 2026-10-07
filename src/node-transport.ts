@@ -246,7 +246,6 @@ class FramedSocket {
 
   private receive(chunk: Buffer): void {
     if (this.terminalError) return;
-    const maxFrameBytes = this.waiters[0]?.maxBytes ?? MAX_FRAME_BYTES;
     const waiter = this.waiters[0];
     if (waiter) {
       let advertisedLength: number | undefined;
@@ -263,7 +262,12 @@ class FramedSocket {
       }
     }
     this.buffer = Buffer.concat([this.buffer, chunk]);
-    while (this.buffer.length >= 4) {
+    this.processBufferedFrames();
+  }
+
+  private processBufferedFrames(): void {
+    while (this.waiters.length > 0 && this.buffer.length >= 4) {
+      const maxFrameBytes = this.waiters[0].maxBytes;
       const length = this.buffer.readUInt32BE(0);
       if (length > MAX_FRAME_BYTES) {
         this.fail(new Error("Node frame exceeds the maximum size."));
@@ -326,6 +330,7 @@ class FramedSocket {
     if (this.terminalError) return Promise.reject(this.terminalError);
     return new Promise<unknown>((resolve, reject) => {
       this.waiters.push({ maxBytes, resolve, reject });
+      this.processBufferedFrames();
     });
   }
 
