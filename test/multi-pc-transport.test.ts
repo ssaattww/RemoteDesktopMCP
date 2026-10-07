@@ -202,11 +202,13 @@ test("coordinator rejects an oversized coalesced pre-auth frame before parsing i
     oversizedBody.write("{}", 0, "utf8");
     const oversizedHeader = Buffer.alloc(4);
     oversizedHeader.writeUInt32BE(oversizedBody.length);
-    socket.write(Buffer.concat([helloHeader, hello, oversizedHeader, oversizedBody]));
-    await new Promise<void>((resolve, reject) => {
+    const closed = new Promise<void>((resolve, reject) => {
       socket.once("close", resolve);
       socket.once("error", reject);
     });
+    socket.on("data", () => {});
+    socket.write(Buffer.concat([helloHeader, hello, oversizedHeader, oversizedBody]));
+    await closed;
   } finally {
     socket.destroy();
     await server.close();
