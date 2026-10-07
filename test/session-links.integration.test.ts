@@ -71,9 +71,9 @@ test("session_open stores owner-only link metadata, skips manual-title retrieval
   const base = `http://127.0.0.1:${address.port}`;
   try {
     const sessionOpenDescription = (await api.listTools()).tools.find((tool) => tool.name === "session_open")?.description ?? "";
-    assert.match(sessionOpenDescription, /unauthenticated public request/u);
-    assert.match(sessionOpenDescription, /no cookies or local credentials/u);
-    assert.match(sessionOpenDescription, /enter a title for those links/u);
+    assert.match(sessionOpenDescription, /may retrieve a public page title/u);
+    assert.match(sessionOpenDescription, /without cookies or local credentials/u);
+    assert.match(sessionOpenDescription, /provide a public HTTP\(S\) url and display title/u);
     const manualUrl = "https://example.com/manual?api_key=private-test-secret#task";
     const manual = await api.call("session_open", { url: manualUrl, title: "<Manual & title>" });
     assert.equal(manual.external_url, manualUrl);

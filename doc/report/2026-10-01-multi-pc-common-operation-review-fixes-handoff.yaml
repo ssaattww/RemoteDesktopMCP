@@ -1,0 +1,122 @@
+﻿schema_version: 3
+task:
+  repository: ssaattww/RemoteDesktopMCP
+  pr: 28
+  branch: issue-25-design
+  base_ref: main
+  mode: review_follow_up
+target_identity:
+  reviewed_head: ad7fb065a99740c43453f5fab58b8bc2ef837422
+  technical_head: 6134288bc231a63dce5dcb9a50b02c47a1bc8446
+findings:
+  - id: RDMCP-25-DR-001
+    severity: high
+    status: fix_locally_verified_ci_pending
+    required_action: re-review the actual CoordinatorNodeServer/ExecutorNodeClient response-loss fixture after exact-head CI evidence is available
+    evidence:
+      - test/multi-pc-mcp.test.ts
+      - 8cd0fec5937ee0570082acf88346e7aa823b6d89
+      - e8da598f93b48292600641ca34b94d8c58dee578
+      - c0ba7083b728b6efbb658d93611b2396f3194664
+      - local focused test: 1/1 pass
+  - id: RDMCP-25-DR-003
+    severity: medium
+    status: fix_locally_verified_ci_pending
+    required_action: re-review the shared typed operation registry and common execution core, including upload and process adapters, after exact-head CI evidence is available
+    evidence:
+      - src/node-operation.ts
+      - src/index.ts
+      - src/node-transport.ts
+      - test/multi-pc-transport.test.ts
+      - test/multi-pc.test.ts
+      - 877ba1fa00e951ad8f22eeddbd733abb7a99f58e
+      - 0bf7d5973693c6da17369edfd6d147d33a5aedfa
+      - 6214352db8d30bbc7f95feaa21f63255e6de4a29
+      - 24f6a9daf1856700e0d4a34823c568b6b275844b
+      - 6134288bc231a63dce5dcb9a50b02c47a1bc8446
+      - local process focused tests: 2/2 pass
+      - local multi-PC focused tests: 25/25 pass
+implementation:
+  commits:
+    - 8cd0fec5937ee0570082acf88346e7aa823b6d89
+    - 877ba1fa00e951ad8f22eeddbd733abb7a99f58e
+    - 0bf7d5973693c6da17369edfd6d147d33a5aedfa
+    - c09239927483fe7a05680df541d1208297e54adb
+    - 6dc92f5932e7eacce0c45fa24fcddf9735dca42a
+    - 6214352db8d30bbc7f95feaa21f63255e6de4a29
+    - e8da598f93b48292600641ca34b94d8c58dee578
+    - c0ba7083b728b6efbb658d93611b2396f3194664
+    - 24f6a9daf1856700e0d4a34823c568b6b275844b
+    - 831e95a8d43ce3ceb710cde22247a3fe7723b5ce
+    - 6134288bc231a63dce5dcb9a50b02c47a1bc8446
+  tdd:
+    test_first_commit: 8cd0fec5937ee0570082acf88346e7aa823b6d89
+    red_observed: true
+    evidence:
+      - DR-001 runtime failure observed as NODE_OUTCOME_UNKNOWN before fixture stabilization
+      - DR-003 upload common-handler test observed Node operation is not supported before registry implementation
+    limitation: the original 8cd0fec test-first commit itself was not executed at that time because the local executor was unavailable
+verification:
+  capability: local_execution_available
+  execution_environment:
+    rdmcp_process_start: available
+  local_validation:
+    technical_head: 6134288bc231a63dce5dcb9a50b02c47a1bc8446
+    lint: pass
+    markdown_files: 64
+    markdown_issues: 0
+    check: pass
+    build: pass
+    multi_pc_focused_tests: 25/25 pass
+    upload_process_regressions: 4/4 pass
+    full_tests: 123 pass / 1 skip / 0 fail
+    full_test_total: 124
+    diff_check: pass
+  static_checks:
+    operation_registry_present: true
+    executor_request_parser_present: true
+    actual_composition_fixture_present: true
+    arbitrary_tool_rejection_fixture_present: true
+    upload_common_handler_present: true
+    process_common_handler_present: true
+    added_line_trailing_whitespace_detected: false
+  publication_validation:
+    candidate_head: 722765f081de0e1b71136a90e27f98759bacac30
+    merged_main_head: ef54f7a93dc10bafcd8114f740bdd666f26b0e7a
+    conflict_resolution: src/index.ts retained ensureSafeDataDirectory and NodeRegistry/NodeOperation imports
+    lint: pass
+    markdown_files: 64
+    markdown_issues: 0
+    check: pass
+    build: pass
+    multi_pc_focused_tests: 28/28 pass
+    full_tests: 124 pass / 1 skip / 0 fail
+    full_test_total: 125
+    staged_diff_check: pass
+    diagnostics_path: C:\Users\donabe\RemoteDesktopWorkspace\_diagnostics\RemoteDesktopMCP-issue25\merge-main
+  ci:
+    publication_candidate_head: 722765f081de0e1b71136a90e27f98759bacac30
+    run_id: 36847395864
+    matching_pull_request_runs: 1
+    ubuntu_job: success
+    windows_shard_1: success
+    windows_shard_2: success
+    windows_shard_3: success
+    conclusion: success
+    alternate_sha_used: false
+  diagnostics:
+    workflow: .github/workflows/lint.yml
+    artifact_contract_present: true
+report:
+  path: doc/report/2026-10-01-multi-pc-common-operation-review-fixes.md
+  status: final_update_pending_commit
+remaining_risks:
+  - the final report-only commit still requires its own exact-head pull_request CI before repository changes stop
+  - remote upload public-id to remote_transfer_id mapping remains later implementation scope
+  - remote process public-id to remote_process_id mapping remains later implementation scope
+  - DR-001 and DR-003 disposition still requires normal re-review
+next_action:
+  type: review
+  summary: commit and push only this final report/handoff update, verify exact-head CI, then stop repository writes and return DR-001 and DR-003 to normal re-review
+merge:
+  performed: false
