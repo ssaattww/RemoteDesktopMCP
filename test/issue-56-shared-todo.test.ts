@@ -55,16 +55,18 @@ async function harness() {
   return { service, audits, connect, setAuditFailure(error?: Error, events?: string[]) { auditFailure = error; auditFailureEvents = events ? new Set(events) : undefined; }, async close() { await service.close(); } };
 }
 
-function seedProcess(service: RemoteDesktopService, values: { id?: string; sessionId: string; user?: string; state?: "running" | "terminating" | "finished"; output?: string }) {
-  const internals = service as unknown as { processes: Map<string, unknown>; currentProcessOwners: Map<string, string>; dc: { currentGeneration(): string; generation?: string; client?: unknown } };
-  const generation = "issue-56-process-generation";
-  internals.dc.generation = generation;
-  internals.dc.client = { close: async () => undefined };
+function seedProcess(service: RemoteDesktopService, values: { id?: string; sessionId: string; user?: string; state?: "running" | "terminating" | "finished"; output?: string; backend?: "desktop-commander" | "adapter" }) {
+  const internals = service as unknown as { processes: Map<string, unknown>; currentProcessOwners: Map<string, string>; processAdapterGeneration: string; cfg: RuntimeConfig; dc: { currentGeneration(): string; generation?: string; client?: unknown } };
+  const generation = values.backend === "adapter" ? internals.processAdapterGeneration : "issue-56-process-generation";
+  if (values.backend !== "adapter") {
+    internals.dc.generation = generation;
+    internals.dc.client = { close: async () => undefined };
+  }
   const id = values.id ?? "owned-process-issue-56";
   const pid = 4242;
   const user = values.user ?? "owner@example.test";
   internals.processes.set(id, { id, sessionId: values.sessionId, user, generation, pid, state: values.state ?? "running", output: values.output ?? "cached process output", cursor: 0 });
-  if (values.state !== "finished") internals.currentProcessOwners.set(`local:${generation}:${pid}`, id);
+  if (values.state !== "finished") internals.currentProcessOwners.set(`${internals.cfg.nodeId}:${generation}:${pid}`, id);
   return { id, pid, generation, internals };
 }
 
@@ -343,7 +345,7 @@ test("versioned Todos reject every nonfinite or invalid update timestamp and rec
   }
 });
 
-test("stale process status returns the cached snapshot without reading Desktop Commander", async () => {
+test("process status stays available after the Todo freshness deadline", async () => {
   const originalNow = performance.now.bind(performance);
   const originalWallNow = Date.now.bind(Date);
   let monotonicNow = originalNow();
@@ -357,19 +359,17 @@ test("stale process status returns the cached snapshot without reading Desktop C
     const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "cached process status test" });
     const sessionId = String(opened.session_id);
     const processId = "owned-process-status-test";
-    const internals = h.service as unknown as { processes: Map<string, unknown>; currentProcessOwners: Map<string, string>; dc: { currentGeneration(): string; generation?: string; client?: unknown }; cfg: RuntimeConfig };
-    internals.dc.generation = "test-generation";
-    internals.dc.client = { close: async () => undefined };
-    const generation = internals.dc.currentGeneration();
+    const internals = h.service as unknown as { processes: Map<string, unknown>; currentProcessOwners: Map<string, string>; processAdapterGeneration: string; dc: { currentGeneration(): string; generation?: string; client?: unknown }; cfg: RuntimeConfig };
+    const generation = internals.processAdapterGeneration;
     internals.processes.set(processId, { id: processId, sessionId, user: "owner@example.test", generation, pid: 42, state: "running", output: "cached output", cursor: 10 });
-    internals.currentProcessOwners.set(`local:${generation}:42`, processId);
+    internals.currentProcessOwners.set(`${internals.cfg.nodeId}:${generation}:42`, processId);
     internals.cfg.processAdapter = { async start() { return ""; }, async read() { reads += 1; return "fresh output"; }, async terminate() { return ""; }, async sessions() { return "PID: 42"; } };
     monotonicNow += 300_000;
     wallNow += 300_000;
     const snapshot = await owner.call("process_status", { session_id: sessionId, node_id: "local", process_id: processId });
     assert.equal(snapshot.state, "running");
-    assert.equal(snapshot.output, "cached output");
-    assert.equal(reads, 0, "stale process status must not fetch output after the gate expires");
+    assert.equal(snapshot.output, "fresh output");
+    assert.equal(reads, 1, "process status remains available as a recovery and inspection operation");
   } finally {
     performance.now = originalNow;
     Date.now = originalWallNow;
@@ -393,14 +393,14 @@ test("owned process status and output survive receipt-audit failure in fresh and
       try {
         const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: `${toolName} receipt audit failure` });
         const sessionId = String(opened.session_id);
-        const fixture = seedProcess(h.service, { sessionId, id: `${toolName}-${stale ? "stale" : "fresh"}` });
+        const fixture = seedProcess(h.service, { sessionId, id: `${toolName}-${stale ? "stale" : "fresh"}`, backend: "adapter" });
         h.service.cfg.processAdapter = { async start() { return ""; }, async read() { reads += 1; return "fresh downstream output"; }, async terminate() { return ""; }, async sessions() { return `PID: ${fixture.pid}`; } };
         if (stale) { monotonicNow += 300_000; wallNow += 300_000; }
         h.setAuditFailure(new Error("receipt audit unavailable"), ["operation.received", "todo.gate_allowed"]);
         const result = await owner.call(toolName, { session_id: sessionId, node_id: "local", process_id: fixture.id });
         assert.equal(result.audit_warning, true, `${toolName} must disclose the missing receipt audit`);
-        assert.equal(result.output, stale ? "cached process output" : "fresh downstream output");
-        assert.equal(reads, stale ? 0 : 1, `${toolName} should read fresh output only before the Todo deadline`);
+        assert.equal(result.output, "fresh downstream output");
+        assert.equal(reads, 1, `${toolName} remains available for inspection after the Todo deadline`);
       } finally {
         performance.now = originalNow;
         Date.now = originalWallNow;
@@ -426,7 +426,7 @@ test("process kill is owner scoped, serializes duplicates, retries terminating a
     const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "kill retry test" });
     const sessionId = String(opened.session_id);
     const wrongSession = await owner.call("session_open", { working_directory: process.cwd(), purpose: "other process session" });
-    const processFixture = seedProcess(h.service, { sessionId });
+    const processFixture = seedProcess(h.service, { sessionId, backend: "adapter" });
     h.service.cfg.processAdapter = {
       async start() { return ""; },
       async read() { return ""; },
@@ -475,7 +475,7 @@ test("accepted process kill remains successful with an applied warning when its 
   try {
     const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "kill audit failure" });
     const sessionId = String(opened.session_id);
-    const fixture = seedProcess(h.service, { sessionId });
+    const fixture = seedProcess(h.service, { sessionId, backend: "adapter" });
     let terminateCalls = 0;
     h.service.cfg.processAdapter = { async start() { return ""; }, async read() { return ""; }, async terminate() { terminateCalls += 1; return "Successfully initiated termination of session"; }, async sessions() { return `PID: ${fixture.pid}`; } };
     h.setAuditFailure(new Error("kill audit unavailable"), ["process.kill_requested"]);
@@ -507,7 +507,7 @@ test("process kill preserves applied certainty across internal and common audit 
     try {
       const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: `kill certainty ${entry.outcome} ${entry.failure}` });
       const sessionId = String(opened.session_id);
-      const fixture = seedProcess(h.service, { sessionId, id: `kill-${entry.outcome}-${entry.failure}` });
+      const fixture = seedProcess(h.service, { sessionId, id: `kill-${entry.outcome}-${entry.failure}`, backend: "adapter" });
       h.service.cfg.processAdapter = {
         async start() { return ""; },
         async read() { return ""; },
@@ -630,7 +630,7 @@ test("transfer cancellation performs owner cleanup when its audit write fails", 
     const wrongSession = await owner.call("session_open", { working_directory: process.cwd(), purpose: "wrong transfer session" });
     const transferId = "owned-transfer-issue-56";
     await writeFile(snapshot, "private transfer snapshot");
-    (h.service.transfers as unknown as Map<string, unknown>).set(transferId, { id: transferId, direction: "download", sessionId, nodeId: "local", rootId: "root", target: snapshot, snapshot, size: 24, sha256: "", offset: 0, touched: Date.now(), state: "active" });
+    (h.service.transfers as unknown as Map<string, unknown>).set(transferId, { id: transferId, direction: "download", principalId: "owner@example.test", sessionId, nodeId: "local", rootId: "root", target: snapshot, snapshot, size: 24, sha256: "", offset: 0, touched: Date.now(), state: "active" });
     await assert.rejects(owner.call("file_transfer_cancel", { session_id: String(wrongSession.session_id), transfer_id: transferId }), /Transfer/i);
     await assert.rejects(other.call("file_transfer_cancel", { session_id: sessionId, transfer_id: transferId }), /session/i);
     await access(snapshot);
@@ -661,7 +661,7 @@ test("emergency stop persists the stop and cleans session resources when audit s
     const snapshot = path.join(stopDataDir, "active.snapshot");
     await writeFile(snapshot, "cleanup me");
     const transferId = "stop-cancel-transfer-issue-56";
-    (h.service.transfers as unknown as Map<string, unknown>).set(transferId, { id: transferId, direction: "download", sessionId, nodeId: "local", rootId: "root", target: snapshot, snapshot, size: 10, sha256: "", offset: 0, touched: Date.now(), state: "active" });
+    (h.service.transfers as unknown as Map<string, unknown>).set(transferId, { id: transferId, direction: "download", principalId: "owner@example.test", sessionId, nodeId: "local", rootId: "root", target: snapshot, snapshot, size: 10, sha256: "", offset: 0, touched: Date.now(), state: "active" });
     h.service.cfg.processAdapter = { async start() { return ""; }, async read() { return ""; }, async terminate() { return ""; }, async sessions() { return "[]"; } };
     h.setAuditFailure(new Error("audit unavailable"));
     const stopped = await h.service.stopUserExecution("owner@example.test");

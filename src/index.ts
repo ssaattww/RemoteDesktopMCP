@@ -1548,7 +1548,7 @@ export class RemoteDesktopService {
   }
   private currentProcessForOperation(user: string, sessionId: string, processId: string): Process {
     const item = this.processForOperation(user, sessionId, processId);
-    if (item.state !== "running") throw new Error("Process id is stale or finished.");
+    if (item.state !== "running" && item.state !== "terminating") throw new Error("Process id is stale or finished.");
     return item;
   }
   async executeNodeRequest(payload: unknown): Promise<unknown> {
@@ -1818,8 +1818,12 @@ export class RemoteDesktopService {
           item.state = "cancelled";
           await this.cleanup(item);
           this.rememberTerminal(item);
-          await this.audit(nodeOperationContract(request.operation).auditEvent, { transferId: item.id, sessionId });
-          return { cancelled: true };
+          try {
+            await this.audit(nodeOperationContract(request.operation).auditEvent, { transferId: item.id, sessionId });
+            return { cancelled: true };
+          } catch {
+            return { cancelled: true, audit_warning: true, applied: true };
+          }
         });
       case "process_start":
         return this.processLock.run(async () => {
@@ -1910,6 +1914,7 @@ export class RemoteDesktopService {
               nodeId: this.cfg.nodeId,
               processId: item.id,
               pid: item.pid,
+              workingDirectorySnapshot: item.workingDirectorySnapshot,
               command: this.redactCommand(command),
               comment,
               output: this.redactCommand(output),
@@ -1950,6 +1955,13 @@ export class RemoteDesktopService {
           if (!sessionId) throw new Error("Node operation session is required.");
           const { process_id } = request.args as { process_id: string };
           const item = this.currentProcessForOperation(user, sessionId, process_id);
+          const attemptMono = performance.now();
+          if (!Number.isFinite(attemptMono)) throw new Error("Process termination throttle clock is unavailable.");
+          if (item.lastTerminationAttemptMono !== undefined) {
+            const elapsed = attemptMono - item.lastTerminationAttemptMono;
+            if (elapsed < 0 || elapsed < 2_000) throw new Error("Process termination request is throttled.");
+          }
+          item.lastTerminationAttemptMono = attemptMono;
           let outcome: "acknowledged" | "rejected" | "timed_out";
           try {
             const output = await this.terminateProcessBackend(item);
@@ -1963,21 +1975,27 @@ export class RemoteDesktopService {
               : "rejected";
           }
           if (outcome === "rejected") {
-            await this.audit("process.kill_rejected", { processId: item.id });
+            let auditWarning = false;
+            try { await this.audit("process.kill_rejected", { processId: item.id }); }
+            catch { auditWarning = true; }
             this.watchProcess(item.id);
-            return { state: item.state, rejected: true };
+            return { state: item.state, rejected: true, ...(auditWarning ? { audit_warning: true, applied: false } : {}) };
           }
           item.state = "terminating";
           item.terminationRequested = true;
           if (outcome === "timed_out") {
             item.terminationUnconfirmed = true;
-            await this.audit("process.termination_unconfirmed", { processId: item.id });
+            let auditWarning = false;
+            try { await this.audit("process.termination_unconfirmed", { processId: item.id }); }
+            catch { auditWarning = true; }
             this.watchProcess(item.id);
-            return { state: item.state, termination_unconfirmed: true };
+            return { state: item.state, termination_unconfirmed: true, ...(auditWarning ? { audit_warning: true, applied: "unknown" as const } : {}) };
           }
-          await this.audit(nodeOperationContract(request.operation).auditEvent, { processId: item.id });
+          let auditWarning = false;
+          try { await this.audit(nodeOperationContract(request.operation).auditEvent, { processId: item.id }); }
+          catch { auditWarning = true; }
           this.watchProcess(item.id);
-          return { state: item.state };
+          return { state: item.state, ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
         });
     }
   }
@@ -2631,7 +2649,25 @@ export class RemoteDesktopService {
       return { session_id: session.id, connection_id: session.id, node_id: session.nodeId, working_directory: session.workingDirectory, purpose: session.purpose, version: session.version, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state, ...(session.externalUrl ? { external_url: session.externalUrl } : {}), ...(session.externalTitle ? { external_title: session.externalTitle } : {}), ...(session.externalTitleSource ? { external_title_source: session.externalTitleSource } : {}), external_title_status: session.externalTitleStatus };
     }));
     server.registerTool("session_list", { description: "List the caller's active sessions with their selected node, working directory, purpose, and session metadata.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, node_id: entry.nodeId, working_directory: entry.workingDirectory, purpose: entry.purpose, version: entry.version, todo_version: entry.todo.version, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state, ...(entry.externalUrl ? { external_url: entry.externalUrl } : {}), ...(entry.externalTitle ? { external_title: entry.externalTitle } : {}), ...(entry.externalTitleSource ? { external_title_source: entry.externalTitleSource } : {}), external_title_status: entry.externalTitleStatus, link_revision: entry.linkRevision })) }; }));
-    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.clearSessionLink(session); this.remoteProcessMappings.expireSession(session.id); this.remoteTransferMappings.expireSession(session.id); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
+    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => {
+      await this.sweepExpiredLocked();
+      const session = this.session(user, session_id);
+      session.state = "closed";
+      this.clearSessionLink(session);
+      this.remoteProcessMappings.expireSession(session.id);
+      this.remoteTransferMappings.expireSession(session.id);
+      for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") {
+        item.state = "cancelled";
+        await this.cleanup(item);
+        this.rememberTerminal(item);
+      }
+      try {
+        await this.audit("session.close", { user, sessionId: session_id });
+        return { closed: true };
+      } catch {
+        return { closed: true, audit_warning: true, applied: true };
+      }
+    })));
     server.registerTool("todo_get", { description: "Read the shared Todo list for a session owned by the authenticated caller.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.todoGet(user, session_id)));
     server.registerTool("todo_update", { description: "Add, edit, reorder, complete, or delete Todo items using an expected version.", inputSchema: { session_id: sessionId, expected_version: z.number().int().nonnegative(), changes: todoChangesSchema } }, this.tool(user, async ({ session_id, expected_version, changes }) => this.todoUpdate(user, session_id, expected_version, changes)));
     server.registerTool("todo_enforcement_set", { description: "Enable or disable the session Todo freshness gate.", inputSchema: { session_id: sessionId, enabled: z.boolean() } }, this.tool(user, async ({ session_id, enabled }) => this.todoSetEnforcement(user, session_id, enabled)));

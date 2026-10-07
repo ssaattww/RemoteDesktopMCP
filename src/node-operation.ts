@@ -159,7 +159,7 @@ export const NODE_OPERATION_CONTRACTS = {
   file_transfer_cancel: {
     capability: "transfer",
     args: z.object({ transfer_id: z.string().min(16) }),
-    response: z.object({ cancelled: z.literal(true) }),
+    response: z.object({ cancelled: z.literal(true), audit_warning: z.boolean().optional(), applied: z.boolean().optional() }),
     auditEvent: "transfer.cancel",
     requiresSession: true,
   },
@@ -198,6 +198,8 @@ export const NODE_OPERATION_CONTRACTS = {
       state: z.enum(["running", "terminating"]),
       rejected: z.boolean().optional(),
       termination_unconfirmed: z.boolean().optional(),
+      audit_warning: z.boolean().optional(),
+      applied: z.union([z.boolean(), z.literal("unknown")]).optional(),
     }),
     auditEvent: "process.kill_requested",
     requiresSession: true,
