@@ -1,6 +1,6 @@
 ﻿import assert from "node:assert/strict";
 import test from "node:test";
-import { createConnection } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import {
   addExecutor,
   createInitialClusterConfig,
@@ -11,11 +11,19 @@ import { NodeRegistry } from "../src/node-registry.js";
 import {
   CoordinatorNodeServer,
   ExecutorNodeClient,
+  FramedSocket,
   validateCoordinatorBindHost,
 } from "../src/node-transport.js";
 
 const remoteId = "node_AAAAAAAAAAAAAAAAAAAAAA";
 const generation = (byte: number) => Buffer.alloc(16, byte).toString("base64url");
+
+function framed(value: unknown): Buffer {
+  const body = Buffer.from(JSON.stringify(value));
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(body.length);
+  return Buffer.concat([header, body]);
+}
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -202,6 +210,41 @@ test("coordinator rejects an oversized coalesced pre-auth frame before parsing i
   } finally {
     socket.destroy();
     await server.close();
+  }
+});
+
+test("framed socket applies the next phase limit to a coalesced buffered frame", async () => {
+  const server = createServer();
+  let accept!: (socket: Socket) => void;
+  const accepted = new Promise<Socket>((resolve) => { accept = resolve; });
+  server.once("connection", accept);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0 }, resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = createConnection({ host: "127.0.0.1", port: address.port });
+  let serverSocket: Socket | undefined;
+  try {
+    serverSocket = await accepted;
+    await new Promise<void>((resolve, reject) => {
+      client.once("connect", resolve);
+      client.once("error", reject);
+    });
+    const frames = new FramedSocket(serverSocket);
+    const initialRead = frames.read(8 * 1024);
+    const largeBody = Buffer.alloc(8 * 1024 + 1, 0x20);
+    largeBody.write("{}", 0, "utf8");
+    const largeHeader = Buffer.alloc(4);
+    largeHeader.writeUInt32BE(largeBody.length);
+    client.write(Buffer.concat([framed({ phase: "proof" }), largeHeader, largeBody]));
+    assert.deepEqual(await initialRead, { phase: "proof" });
+    assert.deepEqual(await frames.read(32 * 1024 * 1024), {});
+  } finally {
+    client.destroy();
+    serverSocket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

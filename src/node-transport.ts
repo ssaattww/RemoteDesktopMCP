@@ -226,7 +226,7 @@ function withDeadline<T>(promise: Promise<T>, deadline: number, message: string)
   });
 }
 
-class FramedSocket {
+export class FramedSocket {
   private buffer = Buffer.alloc(0);
   private readonly queue: QueuedFrame[] = [];
   private readonly waiters: FrameWaiter[] = [];
