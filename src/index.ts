@@ -70,6 +70,30 @@ const overlaps = (a: string, b: string) => inside(a, b) || inside(b, a);
 const result = (body: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(body, null, 2) }] });
 const failure = (message: string) => ({ isError: true as const, content: [{ type: "text" as const, text: message }] });
 const stoppedFailure = (state: UserExecutionState) => ({ isError: true as const, content: [{ type: "text" as const, text: JSON.stringify({ error: { code: "USER_STOP_REQUESTED", message: "The user has explicitly requested that remote execution stop.", required_action: "Do not retry, continue the task, or create another execution path until the user explicitly resumes remote execution.", stop_id: state.stopId, stop_generation: state.stopGeneration } }) }] });
+const AUDIT_ERROR_CODES = new Set(["EACCES", "EBUSY", "EEXIST", "EISDIR", "EINVAL", "EIO", "EMFILE", "ENAMETOOLONG", "ENFILE", "ENOENT", "ENOMEM", "ENOSPC", "ENOTDIR", "ENOTEMPTY", "ENOTSUP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "ABORT_ERR", "ERR_INVALID_ARG_TYPE", "ERR_OUT_OF_RANGE"]);
+const AUDIT_NUMERIC_ERROR_CODES = new Set([-32_000, -32_001, -32_042, -32_700, -32_600, -32_601, -32_602, -32_603]);
+const auditErrorName = (error: unknown): string => {
+  try {
+    return error instanceof AggregateError ? "AggregateError"
+      : error instanceof TypeError ? "TypeError"
+      : error instanceof RangeError ? "RangeError"
+      : error instanceof ReferenceError ? "ReferenceError"
+      : error instanceof SyntaxError ? "SyntaxError"
+      : error instanceof URIError ? "URIError"
+      : error instanceof EvalError ? "EvalError"
+      : error instanceof Error ? "Error"
+      : typeof error;
+  } catch { return "UnknownError"; }
+};
+const auditErrorCode = (error: unknown): string | number | undefined => {
+  try {
+    if (typeof error !== "object" || error === null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+    const code = descriptor && "value" in descriptor ? descriptor.value : undefined;
+    if (typeof code === "string") return AUDIT_ERROR_CODES.has(code) ? code : undefined;
+    return typeof code === "number" && AUDIT_NUMERIC_ERROR_CODES.has(code) ? code : undefined;
+  } catch { return undefined; }
+};
 const equal = (left: string, right: string) => { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); };
 
 export function configFromEnv(env = process.env): RuntimeConfig {
@@ -1335,14 +1359,15 @@ export class RemoteDesktopService {
       if (error instanceof UserStopRequested) {
         const status = started ? "cancelled" : "rejected";
         const detail = await this.operationDetail(toolName, record, undefined, "USER_STOP_REQUESTED").catch(() => undefined);
-        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
+        await this.audit(`operation.${status}`, { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status, reason: "USER_STOP_REQUESTED", errorName: "UserStopRequested", errorCode: "USER_STOP_REQUESTED", stopId: error.state.stopId, stopGeneration: error.state.stopGeneration, ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
         return stoppedFailure(error.state);
       }
       const message = error instanceof Error ? error.message : "Operation failed.";
       const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
       const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory)/.test(message) ? message : "Operation failed.";
       const detail = await this.operationDetail(toolName, record, undefined, publicMessage).catch(() => undefined);
-      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
+      const errorCode = auditErrorCode(error);
+      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, errorName: auditErrorName(error), ...(errorCode !== undefined ? { errorCode } : {}), ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
       if (gated && started) return failure(JSON.stringify({ error: { code: "TODO_OPERATION_OUTCOME_UNKNOWN", applied: "unknown", message: publicMessage } }));
       return failure(publicMessage);
     }
@@ -1384,7 +1409,7 @@ export class RemoteDesktopService {
         : "—";
       const detail = await this.operationDetail(toolName, record, undefined, errorText).catch(() => undefined);
       await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt }).catch(() => undefined);
-      await this.audit("operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "rejected", reason: "input_validation", ...(detail ? { detail } : {}) }).catch(() => undefined);
+      await this.audit("operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "rejected", reason: "input_validation", errorName: "InputValidationError", errorCode: "INPUT_VALIDATION", ...(detail ? { detail } : {}) }).catch(() => undefined);
       return response;
     });
     const intercept = server as unknown as { registerTool: (name: string, config: { description?: string; inputSchema?: Record<string, z.ZodTypeAny>; _meta?: Record<string, unknown> }, handler: unknown) => unknown };
