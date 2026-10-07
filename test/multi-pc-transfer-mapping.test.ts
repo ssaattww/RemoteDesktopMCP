@@ -67,13 +67,22 @@ test("remote transfer ids are opaque and upload replays only identical last chun
   const client = new ExecutorNodeClient({
     config: executorConfig,
     capabilities: { executor_generation: executorGeneration, desktop_commander_generation: commanderGeneration, operations: ["file", "transfer"], roots: [{ root_id: "files", absolute_path: executorFixture.root }], path_base: "root" },
-    onRequest: (payload) => executorFixture.service.executeNodeRequest(payload),
+    onRequest: async (payload) => {
+      const response = await executorFixture.service.executeNodeRequest(payload);
+      if (dropNextDownloadChunkResponse && typeof payload === "object" && payload !== null
+        && "operation" in payload && payload.operation === "file_transfer_download_chunk") {
+        dropNextDownloadChunkResponse = false;
+        throw new Error("synthetic lost download response after executor commit");
+      }
+      return response;
+    },
     onCoordinatorEpoch: async (epoch) => executorFixture.service.activateNodeCoordinatorEpoch(epoch),
     isOperationAuthorized: (operation) => executorFixture.service.isNodeOperationAuthorized(operation.request, operation.operation_id.coordinator_epoch),
     onUserState: (state) => executorFixture.service.applyNodeUserState(state),
   });
   let coordinatorFixture: Awaited<ReturnType<typeof fixture>> | undefined;
   let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  let dropNextDownloadChunkResponse = false;
   try {
     await client.connect("127.0.0.1", address.port);
     await waitForRemoteActive(registry);
@@ -88,7 +97,20 @@ test("remote transfer ids are opaque and upload replays only identical last chun
     const replay = await api.call("file_transfer_download_chunk", { session_id: opened.session_id, transfer_id: publicDownloadId, offset: 0 });
     assert.equal(first.data, replay.data);
     assert.equal(first.next_offset, replay.next_offset);
-    const last = await api.call("file_transfer_download_chunk", { session_id: opened.session_id, transfer_id: publicDownloadId, offset: Number(first.next_offset) });
+    dropNextDownloadChunkResponse = true;
+    const finalOffset = Number(first.next_offset);
+    await assert.rejects(
+      api.call("file_transfer_download_chunk", { session_id: opened.session_id, transfer_id: publicDownloadId, offset: finalOffset }),
+      /TODO_OPERATION_OUTCOME_UNKNOWN/,
+    );
+    const pendingStatus = await api.call("file_transfer_status", { session_id: opened.session_id, transfer_id: publicDownloadId });
+    assert.equal(pendingStatus.state, "active", "a terminal executor state must stay publicly recoverable while the final chunk response is pending");
+    assert.equal(pendingStatus.next_offset, finalOffset, "public offset must not pass the unreturned final chunk");
+    const last = await api.call("file_transfer_download_chunk", { session_id: opened.session_id, transfer_id: publicDownloadId, offset: finalOffset });
+    assert.equal(last.complete, true);
+    const recoveredStatus = await api.call("file_transfer_status", { session_id: opened.session_id, transfer_id: publicDownloadId });
+    assert.equal(recoveredStatus.state, "complete");
+    assert.equal(recoveredStatus.next_offset, downloadBytes.length);
     assert.equal(Buffer.from(String(first.data), "base64").length + Buffer.from(String(last.data), "base64").length, downloadBytes.length);
 
     const uploadBytes = Buffer.from("same-chunk upload replay through authenticated executor");

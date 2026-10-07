@@ -1491,12 +1491,12 @@ export class RemoteDesktopService {
     return observed;
   }
   private watchProcess(processId: string): void {
-    if (this.processWatchers.has(processId)) return;
+    if (this.closing || this.processWatchers.has(processId)) return;
     let checking = false;
     const watcher = setInterval(() => {
-      if (checking) return;
+      if (this.closing || checking) return;
       checking = true;
-      void this.processLock.run(async () => {
+      const run = this.processLock.run(async () => {
         const item = this.processes.get(processId);
         if (!item || item.state === "finished" || item.state === "stale") {
           this.stopWatchingProcess(processId);
@@ -1523,9 +1523,17 @@ export class RemoteDesktopService {
         if (this.processes.get(processId)?.state === "finished") {
           this.stopWatchingProcess(processId);
         }
+      }).catch((error: unknown) => {
+        if (!this.processWatcherFailed) {
+          this.processWatcherFailed = true;
+          this.processWatcherFailure = error;
+        }
       }).finally(() => {
         checking = false;
+        this.processWatcherRuns.delete(run);
       });
+      this.processWatcherRuns.add(run);
+      void run;
     }, 250);
     watcher.unref();
     this.processWatchers.set(processId, watcher);
@@ -2850,11 +2858,13 @@ export class RemoteDesktopService {
       if (target.node_id === this.cfg.nodeId) return this.executeLocalNodeOperation(user, session.id, "file_transfer_status", { transfer_id });
       const known = this.remoteTransferMappings.lookupPublic(transfer_id, user, session.id, target.node_id);
       if (!known) throw new Error("Remote transfer mapping is unavailable.");
-      if ((known.state === "complete" || known.state === "cancelled" || known.state === "failed" || known.state === "expired") && !known.pendingDownload) {
+      if ((known.state === "complete" || known.state === "cancelled" || known.state === "failed" || known.state === "expired")
+        && (!known.pendingDownload || known.state === "complete")) {
         return this.transferStatusSnapshot(known);
       }
       const mapping = await this.remoteTransferForOperation(user, session, target, transfer_id);
-      if ((mapping.state === "complete" || mapping.state === "cancelled" || mapping.state === "failed" || mapping.state === "expired") && !mapping.pendingDownload) {
+      if ((mapping.state === "complete" || mapping.state === "cancelled" || mapping.state === "failed" || mapping.state === "expired")
+        && (!mapping.pendingDownload || mapping.state === "complete")) {
         return this.transferStatusSnapshot(mapping);
       }
       if (mapping.state !== "active") throw new Error("Remote transfer status is unavailable.");
