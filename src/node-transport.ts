@@ -246,6 +246,7 @@ class FramedSocket {
 
   private receive(chunk: Buffer): void {
     if (this.terminalError) return;
+    const maxFrameBytes = this.waiters[0]?.maxBytes ?? MAX_FRAME_BYTES;
     const waiter = this.waiters[0];
     if (waiter) {
       let advertisedLength: number | undefined;
@@ -266,6 +267,10 @@ class FramedSocket {
       const length = this.buffer.readUInt32BE(0);
       if (length > MAX_FRAME_BYTES) {
         this.fail(new Error("Node frame exceeds the maximum size."));
+        return;
+      }
+      if (length > maxFrameBytes) {
+        this.fail(new Error("Node frame exceeds the allowed size for this protocol phase."));
         return;
       }
       if (this.buffer.length < 4 + length) return;

@@ -169,7 +169,7 @@ test("authenticated user stop is applied while a duplicate-safe request is pendi
   }
 });
 
-test("coordinator rejects an oversized pre-auth frame from its header without buffering a body", async () => {
+test("coordinator rejects an oversized coalesced pre-auth frame before parsing its body", async () => {
   const { coordinator } = configs();
   const registry = new NodeRegistry(coordinator);
   const server = new CoordinatorNodeServer({
@@ -182,9 +182,16 @@ test("coordinator rejects an oversized pre-auth frame from its header without bu
       socket.once("connect", resolve);
       socket.once("error", reject);
     });
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(8 * 1024 + 1);
-    socket.write(header);
+    const hello = Buffer.from(JSON.stringify({
+      type: "hello", version: 1, node_id: remoteId, client_nonce: Buffer.alloc(32, 4).toString("base64url"),
+    }));
+    const helloHeader = Buffer.alloc(4);
+    helloHeader.writeUInt32BE(hello.length);
+    const oversizedBody = Buffer.alloc(8 * 1024 + 1, 0x20);
+    oversizedBody.write("{}", 0, "utf8");
+    const oversizedHeader = Buffer.alloc(4);
+    oversizedHeader.writeUInt32BE(oversizedBody.length);
+    socket.write(Buffer.concat([helloHeader, hello, oversizedHeader, oversizedBody]));
     await new Promise<void>((resolve, reject) => {
       socket.once("close", resolve);
       socket.once("error", reject);
