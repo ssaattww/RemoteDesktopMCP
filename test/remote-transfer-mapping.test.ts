@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { RemoteTransferMappingStore } from "../src/remote-transfer-mapping.js";
+import { publicRemoteTransferState, RemoteTransferMappingStore } from "../src/remote-transfer-mapping.js";
 
 const binding = {
   nodeId: "node_AAAAAAAAAAAAAAAAAAAAAA",
@@ -103,9 +103,11 @@ test("terminal download status keeps a pending chunk offset until its bytes are 
   assert.equal(finished?.state, "complete");
   assert.equal(finished?.lastAckOffset, 0);
   assert.equal(finished?.pendingDownload?.offset, 0);
+  assert.equal(publicRemoteTransferState(finished!), "active", "the public status must keep the caller recovering a chunk whose response may be lost");
   const replay = { data: Buffer.from("final").toString("base64"), next_offset: 5, complete: true };
   const recovered = store.acknowledgeDownloadChunk(mapping.trackingId, finished!.version, 0, replay);
   assert.equal(recovered?.state, "complete");
   assert.equal(recovered?.lastAckOffset, 5);
   assert.equal(recovered?.pendingDownload, undefined);
+  assert.equal(publicRemoteTransferState(recovered!), "complete");
 });

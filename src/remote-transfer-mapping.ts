@@ -32,6 +32,10 @@ export type RemoteTransferMapping = RemoteTransferBinding & {
   commitResponse?: Record<string, unknown>;
 };
 
+export function publicRemoteTransferState(mapping: Pick<RemoteTransferMapping, "state" | "pendingDownload">): RemoteTransferState {
+  return mapping.state === "complete" && mapping.pendingDownload ? "active" : mapping.state;
+}
+
 export type RemoteTransferStartInput = RemoteTransferBinding & {
   publicId: string;
   principalId: string;

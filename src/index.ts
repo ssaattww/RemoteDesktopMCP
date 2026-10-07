@@ -33,7 +33,7 @@ import {
 import { mountAdmin } from "./admin.js";
 import { mountUserConsole } from "./user-console.js";
 import { RemoteProcessMappingStore, type RemoteProcessBinding, type RemoteProcessMapping } from "./remote-process-mapping.js";
-import { RemoteTransferMappingStore, type RemoteTransferBinding, type RemoteTransferMapping, type RemoteTransferState } from "./remote-transfer-mapping.js";
+import { publicRemoteTransferState, RemoteTransferMappingStore, type RemoteTransferBinding, type RemoteTransferMapping, type RemoteTransferState } from "./remote-transfer-mapping.js";
 import { applySessionLinkFetchResult, captureSessionLinkFetchLease, createSessionLink, fetchSessionLinkTitle, updateSessionLink, type SessionLinkOwnerState, type SessionLinkTransport } from "./session-links.js";
 
 type User = { email: string; passwordHash: string };
@@ -1191,7 +1191,13 @@ export class RemoteDesktopService {
     }
   }
   private transferStatusSnapshot(mapping: RemoteTransferMapping): Record<string, unknown> {
-    return { state: mapping.state, next_offset: mapping.lastAckOffset, transferred_bytes: mapping.lastAckOffset };
+    // A terminal executor status does not complete the public download until
+    // the caller has recovered the chunk whose response may have been lost.
+    return {
+      state: publicRemoteTransferState(mapping),
+      next_offset: mapping.lastAckOffset,
+      transferred_bytes: mapping.lastAckOffset,
+    };
   }
   private committedRemoteUpload(mapping: RemoteTransferMapping): Record<string, unknown> | undefined {
     if (mapping.commitResponse) return { ...mapping.commitResponse };
@@ -2844,11 +2850,11 @@ export class RemoteDesktopService {
       if (target.node_id === this.cfg.nodeId) return this.executeLocalNodeOperation(user, session.id, "file_transfer_status", { transfer_id });
       const known = this.remoteTransferMappings.lookupPublic(transfer_id, user, session.id, target.node_id);
       if (!known) throw new Error("Remote transfer mapping is unavailable.");
-      if (known.state === "complete" || known.state === "cancelled" || known.state === "failed" || known.state === "expired") {
+      if ((known.state === "complete" || known.state === "cancelled" || known.state === "failed" || known.state === "expired") && !known.pendingDownload) {
         return this.transferStatusSnapshot(known);
       }
       const mapping = await this.remoteTransferForOperation(user, session, target, transfer_id);
-      if (mapping.state === "complete" || mapping.state === "cancelled" || mapping.state === "failed" || mapping.state === "expired") {
+      if ((mapping.state === "complete" || mapping.state === "cancelled" || mapping.state === "failed" || mapping.state === "expired") && !mapping.pendingDownload) {
         return this.transferStatusSnapshot(mapping);
       }
       if (mapping.state !== "active") throw new Error("Remote transfer status is unavailable.");
@@ -2867,7 +2873,12 @@ export class RemoteDesktopService {
         nextOffset: response.next_offset,
       });
       if (!confirmed) throw new Error("Remote transfer mapping changed while status was pending.");
-      return { ...response, next_offset: confirmed.lastAckOffset, transferred_bytes: confirmed.lastAckOffset };
+      return {
+        ...response,
+        state: publicRemoteTransferState(confirmed),
+        next_offset: confirmed.lastAckOffset,
+        transferred_bytes: confirmed.lastAckOffset,
+      };
     }));
     server.registerTool("file_transfer_cancel", { description: "Cancel and clean up a transfer.", inputSchema: { session_id: sessionId, transfer_id: transferId } }, this.tool(user, async ({ session_id, transfer_id }) => {
       const { session, target } = this.transferOperationTarget(user, session_id);
