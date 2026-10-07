@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/bootstrap.js",
     "dev": "tsx watch src/bootstrap.ts",
+    "preview:issue70": "tsx scripts/issue70-ui-fixture.ts --write-html artifacts/issue70-todo-preview.html",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "benchmark:transfer": "tsx scripts/benchmark-file-transfer.ts",
@@ -22,7 +23,7 @@
     "lint:md": "node scripts/lint-markdown.mjs",
     "lint:md:terms:candidates": "node scripts/check-markdown-whitelist.mjs --list-unknown",
     "lint:md:terms": "node scripts/check-markdown-whitelist.mjs",
-    "lint:md:terms:design": "node scripts/check-markdown-whitelist.mjs --files doc/design/functional-requirements.md doc/design/tailscale-funnel-architecture.md doc/design/multi-pc-architecture.md doc/design/tool-operation-detail-logging.md"
+    "lint:md:terms:design": "node scripts/check-markdown-whitelist.mjs --files doc/design/functional-requirements.md doc/design/tailscale-funnel-architecture.md doc/design/multi-pc-architecture.md doc/design/tool-operation-detail-logging.md doc/design/session-metadata-edit.md doc/design/session-external-links.md doc/design/user-console-auto-refresh.md doc/design/long-running-process-context.md doc/design/shared-todo-and-stale-update-gate.md doc/design/ci-test-runtime-reduction-design.md doc/design/使用者コンソール日時相対表示.md"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

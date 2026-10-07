@@ -1,10 +1,11 @@
-﻿import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { access, appendFile, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import { networkInterfaces } from "node:os";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type { Server as HttpServer } from "node:http";
 import express, { type Express, type Request, type Response } from "express";
@@ -33,12 +34,15 @@ import { mountAdmin } from "./admin.js";
 import { mountUserConsole } from "./user-console.js";
 import { RemoteProcessMappingStore, type RemoteProcessBinding, type RemoteProcessMapping } from "./remote-process-mapping.js";
 import { RemoteTransferMappingStore, type RemoteTransferBinding, type RemoteTransferMapping, type RemoteTransferState } from "./remote-transfer-mapping.js";
+import { applySessionLinkFetchResult, captureSessionLinkFetchLease, createSessionLink, fetchSessionLinkTitle, updateSessionLink, type SessionLinkOwnerState, type SessionLinkTransport } from "./session-links.js";
 
 type User = { email: string; passwordHash: string };
 type Root = { id: string; path: string };
 type OAuthClient = { client_id: string; client_name: string; redirect_uris: string[] };
 type Authorization = { clientId: string; redirectUri: string; state?: string; challenge: string; email?: string; expires: number; scope: "mcp" };
-type Session = { id: string; user: string; nodeId: string; workingDirectory: string; purpose: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed" };
+type TodoItem = { id: string; text: string; status: "not_started" | "in_progress" | "completed"; order: number; createdBy: string; createdAt: string; updatedAt: string };
+type TodoState = { items: TodoItem[]; version: number; lastTodoUpdatedMono: number | null; lastUpdatedAt: string | null; enabled: boolean; enabledAtMono: number; lastGateMono?: number; lastGateWall?: number; clockAnomaly?: boolean };
+type Session = { id: string; user: string; version: number; nodeId: string; workingDirectory: string; purpose: string; created: number; touched: number; expires: number; state: "active" | "expired" | "closed"; todo: TodoState } & SessionLinkOwnerState;
 // Node's default Stats numbers lose NTFS file-id precision above 2^53.  Keep
 // identity values as decimal strings derived from bigint stats so unrelated
 // files cannot collide with a protected config pin or an owned upload.
@@ -47,9 +51,9 @@ type OwnedUploadArtifact = FileIdentity & { rootId: string; path: string };
 type ProtectedConfigIdentity = FileIdentity & { pin: string };
 type DownloadChunkReplay = { offset: number; data: string; nextOffset: number; complete: boolean };
 type Transfer = { id: string; direction: "download" | "upload"; principalId: string; sessionId: string; nodeId: string; rootId: string; target: string; snapshot?: string; temp?: string; tempHandle?: FileHandle; tempIdentity?: FileIdentity; size: number; sha256: string; offset: number; touched: number; state: "active" | "complete" | "cancelled" | "failed" | "expired"; overwrite?: boolean; sent?: ReturnType<typeof createHash>; downloadReplay?: DownloadChunkReplay; committedPreview?: OperationDetailEntry };
-type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; observationFailures?: number; nextObservationAt?: number };
+type Process = { id: string; sessionId: string; user: string; generation: string; pid: number; workingDirectorySnapshot: string; state: "running" | "terminating" | "stale" | "finished"; output: string; cursor: number; exitCode?: number; exitAudited?: boolean; completionPending?: boolean; outputDrained?: boolean; terminationRequested?: boolean; terminationUnconfirmed?: boolean; lastTerminationAttemptMono?: number; observationFailures?: number; nextObservationAt?: number };
 export type UserExecutionState = { principalId: string; stopped: boolean; stopGeneration: number; stoppedAt?: string; stopId?: string };
-type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; comment?: string; sessionAccessAt?: string };
+type ExecutionOperation = { user: string; operationId: string; stopGeneration: number; comment?: string; sessionAccessAt?: string; todoStale?: boolean };
 type OperationDetailEntry = { label: string; value: string; format: "text" | "diff"; truncated?: boolean };
 type OperationDetail = { version: 1; summary: string; entries: OperationDetailEntry[] };
 export type AuditLogItem = { id: string; cursor: string; event: Record<string, unknown> & { event: string; at: string } };
@@ -66,10 +70,44 @@ const MAX_TRANSFERS = 20;
 const MAX_TERMINAL_TRANSFERS = 100;
 const MAX_PROCESS_OUTPUT_CHARS = 2 * 1024 * 1024;
 const MAX_AUDIT_EVENTS = 20_000;
+const TODO_GRACE_MS = 300_000;
+const todoChangeSchema = z.discriminatedUnion("op", [z.object({ op: z.literal("add"), text: z.string().trim().min(1).max(1000), status: z.enum(["not_started", "in_progress", "completed"]).optional() }), z.object({ op: z.literal("edit"), id: z.string().min(1), text: z.string().trim().min(1).max(1000) }), z.object({ op: z.literal("status"), id: z.string().min(1), status: z.enum(["not_started", "in_progress", "completed"]) }), z.object({ op: z.literal("delete"), id: z.string().min(1) }), z.object({ op: z.literal("move"), id: z.string().min(1), order: z.number().int().nonnegative() })]);
+const todoChangesSchema = z.array(todoChangeSchema).min(1).max(200);
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; nodeRegistry?: NodeRegistry; nodeRequest?: (nodeId: string, payload: NodeOperationRequest) => Promise<unknown>; nodeStateSync?: (state: { principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null }) => Promise<Array<{ node_id?: string; state_applied: true; requested_process_ids?: string[]; failed_process_ids: string[] }>> };
+export type RuntimeConfig = {
+  adminUsers?: string[];
+  baseUrl: string;
+  tokenSecret: string;
+  users: User[];
+  roots: Root[];
+  dataDir: string;
+  port: number;
+  chunkBytes: number;
+  nodeId: string;
+  nodeLabel: string;
+  dcCommand: string;
+  dcArgs: string[];
+  dcManagedConfig?: boolean;
+  allowedRedirectOrigins: Set<string>;
+  authMode?: "password" | "google";
+  publicAuth?: PublicAuthConfig;
+  publicAuthOptions?: PublicAuthOptions;
+  linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>;
+  linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>;
+  processAdapter?: ProcessAdapter;
+  nodeRegistry?: NodeRegistry;
+  nodeRequest?: (nodeId: string, payload: NodeOperationRequest) => Promise<unknown>;
+  nodeStateSync?: (state: { principal_id: string; stopped: boolean; stop_generation: number; stop_id: string | null }) => Promise<Array<{
+    node_id?: string;
+    state_applied: boolean;
+    requested_process_ids?: string[];
+    failed_process_ids: string[];
+    sync_error?: "NODE_STATE_SYNC_UNAVAILABLE" | "NODE_STATE_SYNC_TIMEOUT" | "NODE_STATE_SYNC_FAILED";
+  }>>;
+  sessionLinkTransport?: SessionLinkTransport;
+};
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -223,6 +261,7 @@ export class RemoteDesktopService {
   readonly authorizations = new Map<string, Authorization>();
   readonly codes = new Map<string, Authorization>();
   private readonly processLock = new Mutex();
+  private readonly todoLock = new Mutex();
   private readonly transferLock = new Mutex();
   private readonly dc: DesktopCommander;
   private readonly linkNoReplace: (existingPath: string, newPath: string) => Promise<void>;
@@ -235,6 +274,11 @@ export class RemoteDesktopService {
   private remoteProcessSweepTimer?: NodeJS.Timeout;
   private remoteProcessSweepRunning = false;
   private remoteTransferSweepRunning = false;
+  private readonly processWatcherRuns = new Set<Promise<void>>();
+  private processWatcherFailure?: unknown;
+  private processWatcherFailed = false;
+  private closing = false;
+  private closePromise?: Promise<void>;
   private readonly protectedConfigIdentities = new Map<string, ProtectedConfigIdentity>();
   private readonly configIdentityLock = new Mutex();
   private readonly executionStates = new Map<string, UserExecutionState>();
@@ -246,6 +290,7 @@ export class RemoteDesktopService {
   private auditGeneration = makeId();
   private readonly auditEntries: AuditLogEntry[] = [];
   private readonly auditListeners = new Set<(event: Record<string, unknown> & { event: string; at: string }) => void>();
+  private readonly sessionLinkListeners = new Set<(user: string, sessionId: string, linkRevision: number) => void>();
   private readonly auditConnectionClosers = new Set<() => void>();
   private readonly auditProcessOwners = new Map<string, { user: string; sessionId?: string }>();
   private readonly auditLock = new Mutex();
@@ -255,6 +300,15 @@ export class RemoteDesktopService {
   private executionStateUnavailable = false;
   readonly publicAuth?: PublicAuthService;
   private expiryTimer?: NodeJS.Timeout;
+  private clearSessionLink(session: Session): void { session.externalUrl = undefined; session.externalTitle = undefined; session.externalTitleSource = undefined; session.externalTitleStatus = "not_requested"; }
+  private startSessionLinkTitleFetch(session: Session): void {
+    const lease = captureSessionLinkFetchLease(session);
+    if (!lease) return;
+    void fetchSessionLinkTitle(lease.url, { transport: this.cfg.sessionLinkTransport }).then(
+      (title) => this.executionStateLock.run(async () => { const current = this.sessions.get(lease.id); if (current && this.userOwnsActiveSession(lease.user, lease.id) && applySessionLinkFetchResult(current, lease, title)) this.notifySessionLinkUpdated(lease.user, lease.id, lease.revision); }),
+      () => this.executionStateLock.run(async () => { const current = this.sessions.get(lease.id); if (current && this.userOwnsActiveSession(lease.user, lease.id) && applySessionLinkFetchResult(current, lease)) this.notifySessionLinkUpdated(lease.user, lease.id, lease.revision); }),
+    );
+  }
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
   async initialize(options: { startDesktopCommander?: boolean } = {}): Promise<void> {
     await ensureSafeDataDirectory(this.cfg.dataDir);
@@ -282,7 +336,40 @@ export class RemoteDesktopService {
     this.remoteProcessSweepTimer = setInterval(() => { void this.trackRemoteProcesses(); void this.trackRemoteTransfers(); }, 30_000);
     this.remoteProcessSweepTimer.unref();
   }
-  async close(): Promise<void> { if (this.expiryTimer) clearInterval(this.expiryTimer); if (this.remoteProcessSweepTimer) clearInterval(this.remoteProcessSweepTimer); for (const watcher of this.processWatchers.values()) clearInterval(watcher); this.processWatchers.clear(); for (const close of this.auditConnectionClosers) close(); this.auditConnectionClosers.clear(); this.auditListeners.clear(); await this.transferLock.run(async () => { for (const item of this.transfers.values()) await this.cleanup(item); }); await this.dc.close(); }
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.closePromise = this.finishClose();
+    return this.closePromise;
+  }
+  private async finishClose(): Promise<void> {
+    const failures: unknown[] = [];
+    const attempt = async (work: () => Promise<unknown>) => {
+      try { await work(); } catch (error) { failures.push(error); }
+    };
+    if (this.expiryTimer) clearInterval(this.expiryTimer); if (this.remoteProcessSweepTimer) clearInterval(this.remoteProcessSweepTimer);
+    for (const watcher of this.processWatchers.values()) clearInterval(watcher);
+    this.processWatchers.clear();
+    await attempt(() => this.processLock.run(async () => undefined));
+    await attempt(async () => { await Promise.all([...this.processWatcherRuns]); });
+    if (this.processWatcherFailed) failures.push(this.processWatcherFailure);
+    for (const close of this.auditConnectionClosers) {
+      try { close(); } catch (error) { failures.push(error); }
+    }
+    this.auditConnectionClosers.clear();
+    this.auditListeners.clear();
+    this.sessionLinkListeners.clear();
+    await attempt(() => this.transferLock.run(async () => {
+      for (const item of this.transfers.values()) {
+        try { await this.cleanup(item); } catch (error) { failures.push(error); }
+      }
+    }));
+    await attempt(() => this.dc.close());
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(failures, "Remote Desktop service close encountered multiple failures.");
+    }
+  }
   async audit(event: string, fields: Record<string, unknown>): Promise<void> { await this.auditLock.run(async () => { await this.refreshAuditIndexLocked(); const file = path.join(this.cfg.dataDir, "audit.jsonl"); try { await assertPrivateAuditStorage(this.cfg.dataDir, file); } catch (error) { if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error; await createPrivateFile(file, ""); await assertPrivateAuditStorage(this.cfg.dataDir, file); await this.refreshAuditIndexLocked(); } const entry = { at: new Date().toISOString(), event, ...fields }; const line = `${JSON.stringify(entry)}\n`; await appendFile(file, line); this.rememberAuditEntry(entry); const stats = await lstat(file, { bigint: true }); const identity = this.identityFromStats(stats); const expectedBytes = this.auditFileBytes + BigInt(Buffer.byteLength(line)); if (this.auditFileIdentity && this.auditFileIdentity.dev === identity.dev && this.auditFileIdentity.ino === identity.ino && stats.size === expectedBytes) this.auditFileBytes = stats.size;
     else await this.loadAuditIndex(true);
   }); }
@@ -374,6 +461,96 @@ export class RemoteDesktopService {
     const session = this.sessions.get(sessionId);
     return Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now());
   }
+  checkSessionWorkingDirectoryAccess(directory: string): Promise<void> {
+    return access(directory, constants.X_OK);
+  }
+  async resolveSessionWorkingDirectory(supplied: string): Promise<string | undefined> {
+    try {
+      const resolved = await realpath(supplied);
+      if (!(await lstat(resolved)).isDirectory()) return undefined;
+      await this.checkSessionWorkingDirectoryAccess(resolved);
+      return resolved;
+    } catch { return undefined; }
+  }
+  async updateSessionMetadata(user: string, sessionId: string, input: unknown) {
+    const fail = (status: number, error: string, extra: { currentVersion?: number } = {}) => ({ ok: false as const, status, error, ...extra });
+    if (!isRecord(input)) return fail(400, "invalid_request");
+    const allowed = new Set(["expectedVersion", "workingDirectory", "purpose", "externalUrl", "externalTitle"]);
+    if (Object.keys(input).some((key) => !allowed.has(key))) return fail(400, "invalid_request");
+    if (!Object.hasOwn(input, "expectedVersion") || !Number.isSafeInteger(input.expectedVersion) || Number(input.expectedVersion) < 1) return fail(400, "invalid_request");
+    const hasWorkingDirectory = Object.hasOwn(input, "workingDirectory");
+    const hasPurpose = Object.hasOwn(input, "purpose");
+    const hasExternalUrl = Object.hasOwn(input, "externalUrl");
+    const hasExternalTitle = Object.hasOwn(input, "externalTitle");
+    if (!hasWorkingDirectory && !hasPurpose && !hasExternalUrl && !hasExternalTitle) return fail(400, "invalid_request");
+    if ((hasExternalUrl && input.externalUrl !== null && typeof input.externalUrl !== "string") || (hasExternalTitle && input.externalTitle !== null && typeof input.externalTitle !== "string")) return fail(400, "invalid_external_link");
+    const externalUrlInput = hasExternalUrl ? input.externalUrl === null ? "" : input.externalUrl as string : undefined;
+    const externalTitleInput = hasExternalTitle ? input.externalTitle === null ? "" : input.externalTitle as string : undefined;
+    try {
+      const candidate = createSessionLink({ url: externalUrlInput, title: externalTitleInput });
+      if (hasExternalUrl && externalUrlInput?.trim() && !candidate.externalUrl) return fail(400, "invalid_external_link");
+    } catch { return fail(400, "invalid_external_link"); }
+
+    return this.processLock.run(async () => {
+      const available = (session: Session | undefined) => Boolean(session && session.user === user && session.state === "active" && session.expires > Date.now() && !this.executionStateFor(user).stopped);
+      const initial = this.sessions.get(sessionId);
+      if (!available(initial)) return fail(404, "session_unavailable");
+      if (initial!.version !== input.expectedVersion) return fail(409, "version_conflict", { currentVersion: initial!.version });
+      let workingDirectory: string | undefined;
+      if (hasWorkingDirectory) {
+        if (typeof input.workingDirectory !== "string") return fail(400, "invalid_working_directory");
+        const supplied = input.workingDirectory.trim();
+        if (!supplied || supplied.length > 4096 || !path.isAbsolute(supplied)) return fail(400, "invalid_working_directory");
+        workingDirectory = await this.resolveSessionWorkingDirectory(supplied);
+        if (!workingDirectory) return fail(400, "invalid_working_directory");
+      }
+      let purpose: string | undefined;
+      if (hasPurpose) {
+        if (typeof input.purpose !== "string") return fail(400, "invalid_purpose");
+        purpose = input.purpose.trim();
+        if (!purpose || purpose.length > 200) return fail(400, "invalid_purpose");
+      }
+      const committed = await this.executionStateLock.run(async () => {
+        const session = this.sessions.get(sessionId);
+        if (!available(session)) return { result: fail(404, "session_unavailable") };
+        if (session!.version !== input.expectedVersion) return { result: fail(409, "version_conflict", { currentVersion: session!.version }) };
+        const target = session!;
+        const linkUpdate = updateSessionLink(target, { ...(hasExternalUrl ? { url: externalUrlInput } : {}), ...(hasExternalTitle ? { title: externalTitleInput } : {}) });
+        const changedFields: string[] = [];
+        if (workingDirectory !== undefined && workingDirectory !== target.workingDirectory) changedFields.push("workingDirectory");
+        if (purpose !== undefined && purpose !== target.purpose) changedFields.push("purpose");
+        if (hasExternalUrl && linkUpdate.link.externalUrl !== target.externalUrl) changedFields.push("externalUrl");
+        if (hasExternalTitle && (linkUpdate.link.externalTitle !== target.externalTitle || linkUpdate.link.externalTitleSource !== target.externalTitleSource || linkUpdate.shouldFetch)) changedFields.push("externalTitle");
+        if (!changedFields.length) return { result: { ok: true as const, session_id: target.id, working_directory: target.workingDirectory, purpose: target.purpose, external_url: target.externalUrl, external_title: target.externalTitle, external_title_source: target.externalTitleSource, external_title_status: target.externalTitleStatus, version: target.version, changedFields } };
+        const previous = { workingDirectory: target.workingDirectory, purpose: target.purpose, externalUrl: target.externalUrl, externalTitle: target.externalTitle, externalTitleSource: target.externalTitleSource, externalTitleStatus: target.externalTitleStatus, linkRevision: target.linkRevision, version: target.version, touched: target.touched, expires: target.expires };
+        if (workingDirectory !== undefined) target.workingDirectory = workingDirectory;
+        if (purpose !== undefined) target.purpose = purpose;
+        Object.assign(target, linkUpdate.link);
+        target.version++;
+        target.touched = Date.now();
+        target.expires = target.touched + SESSION_TTL;
+        return { target, previous, changedFields, shouldFetch: linkUpdate.shouldFetch, result: { ok: true as const, session_id: target.id, working_directory: target.workingDirectory, purpose: target.purpose, external_url: target.externalUrl, external_title: target.externalTitle, external_title_source: target.externalTitleSource, external_title_status: target.externalTitleStatus, version: target.version, changedFields } };
+      });
+      if (!committed.target || !committed.previous) return committed.result;
+      try {
+        await this.audit("session.metadata.updated", { user, sessionId: committed.target.id, previousVersion: committed.previous.version, version: committed.target.version, changedFields: committed.changedFields });
+      } catch {
+        await this.executionStateLock.run(async () => {
+          // A terminal lifecycle transition (close, expiry, or emergency stop) owns the final state and must not be undone by this rollback.
+          if (this.sessions.get(sessionId) !== committed.target || !available(committed.target) || committed.target.version !== committed.previous.version + 1) return;
+          committed.target.workingDirectory = committed.previous.workingDirectory;
+          committed.target.purpose = committed.previous.purpose;
+          if (committed.target.linkRevision !== committed.previous.linkRevision) Object.assign(committed.target, { externalUrl: committed.previous.externalUrl, externalTitle: committed.previous.externalTitle, externalTitleSource: committed.previous.externalTitleSource, externalTitleStatus: committed.previous.externalTitleStatus, linkRevision: committed.previous.linkRevision });
+          committed.target.version = committed.previous.version;
+          committed.target.touched = committed.previous.touched;
+          committed.target.expires = committed.previous.expires;
+        });
+        return fail(503, "update_unavailable");
+      }
+      if (committed.shouldFetch) this.startSessionLinkTitleFetch(committed.target);
+      return committed.result;
+    });
+  }
   userOwnsAuditSession(user: string, sessionId: string): boolean {
     if (this.userOwnsActiveSession(user, sessionId)) return true;
     if (this.auditEntries.some((entry) => entry.event.event === "session.open" && entry.event.user === user && entry.event.sessionId === sessionId)) return true;
@@ -382,6 +559,8 @@ export class RemoteDesktopService {
   }
   auditEntriesForConsole(): Array<Record<string, unknown> & { event: string; at: string }> { return this.auditEntries.map((entry) => entry.event); }
   subscribeAudit(listener: (event: Record<string, unknown> & { event: string; at: string }) => void): () => void { this.auditListeners.add(listener); return () => this.auditListeners.delete(listener); }
+  subscribeSessionLink(listener: (user: string, sessionId: string, linkRevision: number) => void): () => void { this.sessionLinkListeners.add(listener); return () => this.sessionLinkListeners.delete(listener); }
+  private notifySessionLinkUpdated(user: string, sessionId: string, linkRevision: number): void { for (const listener of this.sessionLinkListeners) { try { listener(user, sessionId, linkRevision); } catch { /* Notification delivery must not fail title retrieval. */ } } }
   subscribeAuditConnection(close: () => void): () => void { this.auditConnectionClosers.add(close); return () => this.auditConnectionClosers.delete(close); }
   sign(body: object): string { const encoded = Buffer.from(JSON.stringify(body)).toString("base64url"); return `${encoded}.${createHmac("sha256", this.cfg.tokenSecret).update(encoded).digest("base64url")}`; }
   validRedirect(uri: string): boolean { try { return this.cfg.allowedRedirectOrigins.has(new URL(uri).origin); } catch { return false; } }
@@ -578,7 +757,7 @@ export class RemoteDesktopService {
     catch { this.executionStateUnavailable = true; persistenceFailure = new Error("Emergency stop recovery marker could not be persisted; remote execution remains stopped."); await this.audit("user.stop_marker_failed", { user }).catch(() => undefined); }
     if (!persistenceFailure) try { await this.persistExecutionStates(); await rm(this.executionStopMarkerPath(), { force: true }); }
     catch { persistenceFailure = new Error("Emergency stop state could not be persisted; remote execution remains stopped."); await this.audit("user.stop_persistence_failed", { user }).catch(() => undefined); }
-    for (const session of this.sessions.values()) if (session.user === user && session.state === "active") session.state = "closed";
+    for (const session of this.sessions.values()) if (session.user === user && session.state === "active") { session.state = "closed"; this.clearSessionLink(session); }
     // Do not queue behind a long-running process_start/output operation. The
     // bridge latches the owner and also catches a PID published after this call.
     let bridgeAvailable = false;
@@ -619,7 +798,7 @@ export class RemoteDesktopService {
         await this.audit("transfer.cancelled_by_user_stop", { user, transferId: item.id, stopId: state.stopId }).catch(() => undefined);
       }
     });
-    let remoteStopAcks: Array<{ node_id?: string; state_applied: true; requested_process_ids?: string[]; failed_process_ids: string[] }> = [];
+    let remoteStopAcks: Array<{ node_id?: string; state_applied: boolean; requested_process_ids?: string[]; failed_process_ids: string[]; sync_error?: "NODE_STATE_SYNC_UNAVAILABLE" | "NODE_STATE_SYNC_TIMEOUT" | "NODE_STATE_SYNC_FAILED" }> = [];
     if (this.cfg.nodeStateSync) {
       try {
         const acknowledgements = await this.cfg.nodeStateSync({ principal_id: user, stopped: true, stop_generation: state.stopGeneration, stop_id: state.stopId ?? null });
@@ -646,7 +825,7 @@ export class RemoteDesktopService {
           processId: mapping.publicId,
           nodeId: mapping.nodeId,
           stopId: state.stopId,
-          reason: failed ? "executor_reported_failure" : ack ? "process_outcome_not_reported" : "node_sync_unavailable",
+          reason: failed ? "executor_reported_failure" : ack?.state_applied === true ? "process_outcome_not_reported" : "node_sync_unavailable",
         }).catch(() => undefined);
       }
     }
@@ -695,11 +874,19 @@ export class RemoteDesktopService {
     this.remoteTransferMappings.sweep(now);
     for (const session of this.sessions.values()) {
       if (session.state === "active" && session.expires <= now) {
-        await this.audit("session.expired", { user: session.user, sessionId: session.id });
         session.state = "expired";
+        this.clearSessionLink(session);
+        let auditFailed = false;
         this.remoteProcessMappings.expireSession(session.id);
         this.remoteTransferMappings.expireSession(session.id);
-        for (const transfer of this.transfers.values()) if (transfer.sessionId === session.id && transfer.state === "active") await this.fail(transfer, "session_expired");
+        let auditFailure: unknown;
+        try { await this.audit("session.expired", { user: session.user, sessionId: session.id }); }
+        catch (error) { auditFailed = true; auditFailure = error; }
+        for (const transfer of this.transfers.values()) if (transfer.sessionId === session.id && transfer.state === "active") {
+          try { await this.fail(transfer, "session_expired"); }
+          catch (error) { if (!auditFailed) { auditFailed = true; auditFailure = error; } }
+        }
+        if (auditFailed) throw auditFailure;
       }
     }
     for (const transfer of this.transfers.values()) if (transfer.state === "active" && now - transfer.touched > TRANSFER_TTL) await this.fail(transfer, "expired");
@@ -786,6 +973,87 @@ export class RemoteDesktopService {
         }
       }
     } finally { this.remoteTransferSweepRunning = false; }
+  }
+  private todoSnapshot(session: Session) {
+    const todo = session.todo;
+    return { session_id: session.id, version: todo.version, items: todo.items.map((item) => ({ ...item })), total: todo.items.length, completed: todo.items.filter((item) => item.status === "completed").length, last_updated_at: todo.lastUpdatedAt, enforcement_enabled: todo.enabled };
+  }
+  async todoGet(user: string, sessionId: string) { return this.todoLock.run(async () => this.todoSnapshot(this.session(user, sessionId))); }
+  async todoUpdate(user: string, sessionId: string, expectedVersion: number, inputChanges: unknown) {
+    const parsed = todoChangesSchema.safeParse(inputChanges);
+    if (!parsed.success) throw new Error("Invalid Todo changes.");
+    return this.todoLock.run(async () => {
+      const session = this.session(user, sessionId); const todo = session.todo;
+      if (todo.version !== expectedVersion) return { ...this.todoSnapshot(session), conflict: true, error: "TODO_VERSION_CONFLICT", message: "作業一覧が別の場所で更新されています。最新状態を読み直してください。" };
+      const now = Date.now(); const mono = performance.now(); let items = todo.items.map((item) => ({ ...item }));
+      for (const change of parsed.data) {
+        if (change.op === "add") { if (items.length >= 200) throw new Error("Todo item limit reached."); items.push({ id: makeId(), text: change.text, status: change.status ?? "not_started", order: items.length, createdBy: user, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() }); }
+        else { const index = items.findIndex((item) => item.id === change.id); if (index < 0) throw new Error("Todo item is unavailable."); const item = items[index]!; if (change.op === "delete") items.splice(index, 1); else if (change.op === "edit") { item.text = change.text; item.updatedAt = new Date(now).toISOString(); } else if (change.op === "status") { item.status = change.status; item.updatedAt = new Date(now).toISOString(); } else { const [moved] = items.splice(index, 1); items.splice(Math.min(change.order, items.length), 0, moved!); } }
+      }
+      items = items.map((item, order) => ({ ...item, order }));
+      todo.items = items; todo.version += 1; todo.lastTodoUpdatedMono = mono; todo.lastUpdatedAt = new Date(now).toISOString(); todo.clockAnomaly = false; todo.lastGateMono = mono; todo.lastGateWall = now;
+      let auditWarning = false; try { await this.audit("todo.updated", { user, sessionId: session.id, version: todo.version, itemCount: items.length }); } catch { auditWarning = true; }
+      return { ...this.todoSnapshot(session), ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
+    });
+  }
+  async todoSetEnforcement(user: string, sessionId: string, enabled: boolean) {
+    return this.todoLock.run(async () => {
+      const session = this.session(user, sessionId);
+      const before = session.todo.enabled;
+      let auditWarning = false;
+      if (before !== enabled) {
+        let mono: number | undefined;
+        let wall: number | undefined;
+        if (enabled) {
+          mono = performance.now();
+          if (!Number.isFinite(mono)) throw new Error("Monotonic clock is unavailable.");
+          wall = Date.now();
+        }
+        session.todo.enabled = enabled;
+        session.todo.clockAnomaly = false;
+        if (enabled) {
+          session.todo.enabledAtMono = mono!;
+          session.todo.lastGateMono = mono!;
+          session.todo.lastGateWall = wall!;
+        } else {
+          delete session.todo.lastGateMono;
+          delete session.todo.lastGateWall;
+        }
+        try { await this.audit("todo.enforcement_changed", { user, sessionId: session.id, enabled, previous: before }); } catch { auditWarning = true; }
+      }
+      return { session_id: sessionId, enabled: session.todo.enabled, ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
+    });
+  }
+  private todoException(toolName: string, user: string, sessionId: unknown, record: Record<string, unknown>): boolean {
+    if (["session_open", "session_close", "todo_get", "todo_update", "todo_enforcement_set", "file_transfer_cancel"].includes(toolName)) return true;
+    if (!["process_status", "process_output", "process_kill"].includes(toolName) || typeof sessionId !== "string" || typeof record.process_id !== "string") return false;
+    const process = this.processes.get(record.process_id);
+    if (process && process.user === user && process.sessionId === sessionId) return true;
+    const session = this.sessions.get(sessionId);
+    return Boolean(session && this.remoteProcessMappings.lookupPublic(record.process_id, user, sessionId, session.nodeId));
+  }
+  private async todoGate(session: Session): Promise<{ stale: boolean; reason?: string; lastUpdatedAt: string | null }> {
+    return this.todoLock.run(async () => {
+      const todo = session.todo;
+      if (!todo.enabled) return { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
+      let mono: number;
+      try { mono = performance.now(); if (!Number.isFinite(mono)) throw new Error(); }
+      catch { todo.clockAnomaly = true; return { stale: true, reason: "clock_unavailable", lastUpdatedAt: todo.lastUpdatedAt }; }
+      const wall = Date.now();
+      if (todo.lastGateMono !== undefined && todo.lastGateWall !== undefined) {
+        const elapsedMono = mono - todo.lastGateMono; const elapsedWall = wall - todo.lastGateWall;
+        if (elapsedMono < 0 || elapsedWall < 0 || Math.abs(elapsedWall - elapsedMono) > 60_000) todo.clockAnomaly = true;
+      }
+      todo.lastGateMono = mono; todo.lastGateWall = wall;
+      if (todo.clockAnomaly) return { stale: true, reason: "clock_anomaly", lastUpdatedAt: todo.lastUpdatedAt };
+      if (!todo.enabled) return { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
+      if (todo.version > 0 && (typeof todo.lastTodoUpdatedMono !== "number" || !Number.isFinite(todo.lastTodoUpdatedMono) || todo.lastTodoUpdatedMono < 0 || todo.lastTodoUpdatedMono > mono)) {
+        todo.clockAnomaly = true;
+        return { stale: true, reason: "updated_timestamp_invalid", lastUpdatedAt: todo.lastUpdatedAt };
+      }
+      const base = Math.max(todo.lastTodoUpdatedMono ?? todo.enabledAtMono, todo.enabledAtMono);
+      return mono - base >= TODO_GRACE_MS ? { stale: true, reason: "todo_stale", lastUpdatedAt: todo.lastUpdatedAt } : { stale: false, lastUpdatedAt: todo.lastUpdatedAt };
+    });
   }
   session(user: string, sessionId: string): Session { this.requireCurrentOperation(); const value = this.sessions.get(sessionId); if (!value || value.user !== user || value.state !== "active" || value.expires <= Date.now()) throw new Error("Session is invalid, expired, or belongs to another user."); value.touched = Date.now(); value.expires = value.touched + SESSION_TTL; const operation = this.operationContext.getStore(); if (operation?.user === user) operation.sessionAccessAt = new Date(value.touched).toISOString(); return value; }
   private nodeEntries(): NodeListEntry[] {
@@ -1608,6 +1876,7 @@ export class RemoteDesktopService {
             user,
             generation: this.cfg.processAdapter ? this.processAdapterGeneration : this.dc.currentGeneration(),
             pid,
+            workingDirectorySnapshot: workingDirectory,
             state: initialCompletion ? "finished" : "running",
             output,
             cursor: 0,
@@ -2210,15 +2479,40 @@ export class RemoteDesktopService {
       : typeof record.command === "string" ? "command execution"
       : "—";
     let started = false;
+    let gated = false;
+    let auditWarning = false;
+    let receivedAuditFailed = false;
+    const safeException = this.todoException(toolName, user, record.session_id, record);
     const entryGeneration = entryState.stopGeneration;
     const executionOperation: ExecutionOperation = { user, operationId, stopGeneration: entryGeneration, comment };
     const sessionAccess = () => executionOperation.sessionAccessAt ? { sessionAccessAt: executionOperation.sessionAccessAt } : {};
     try {
-      await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt });
+      try { await this.audit("operation.received", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, receivedAt }); }
+      catch { auditWarning = true; receivedAuditFailed = true; }
       if (entryState.stopped) throw new UserStopRequested(entryState);
+      const gateSession = typeof record.session_id === "string" ? this.sessions.get(record.session_id) : undefined;
+      const processReadException = ["process_status", "process_output"].includes(toolName) && safeException;
+      if ((!safeException || processReadException) && gateSession?.user === user && gateSession.state === "active" && gateSession.expires > Date.now()) {
+        if (receivedAuditFailed && gateSession.todo.enabled && !processReadException) return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } }));
+        const decision = await this.todoGate(gateSession);
+        if (decision.stale) {
+          if (processReadException) executionOperation.todoStale = true;
+          if (decision.reason === "clock_anomaly" || decision.reason === "clock_unavailable" || decision.reason === "updated_timestamp_invalid") await this.audit("todo.clock_anomaly", { user, sessionId: gateSession.id, version: gateSession.todo.version, reason: decision.reason }).catch(() => undefined);
+          if (!processReadException) {
+            await this.audit("todo.gate_denied", { user, sessionId: gateSession.id, version: gateSession.todo.version, operation: toolName, reason: decision.reason }).catch(() => undefined);
+            return failure(JSON.stringify({ error: { code: "TODO_STALE", reason: decision.reason, last_updated_at: decision.lastUpdatedAt, action: "作業一覧を開いて更新してから操作を再実行してください。" } }));
+          }
+        }
+        if (!decision.stale && gateSession.todo.enabled && !processReadException) {
+          try { await this.audit("todo.gate_allowed", { user, sessionId: gateSession.id, version: gateSession.todo.version, operation: toolName }); }
+          catch { return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } })); }
+          gated = true;
+        }
+      }
       started = true;
       const startAt = new Date().toISOString();
-      await this.audit("operation.started", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, startAt });
+      try { await this.audit("operation.started", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, startAt }); }
+      catch { if (safeException) auditWarning = true; else if (gated) return failure(JSON.stringify({ error: { code: "TODO_GATE_AUDIT_UNAVAILABLE", applied: false, action: "監査記録を復旧してから操作を再実行してください。" } })); else throw new Error("Audit unavailable."); }
       const body = await this.operationContext.run(executionOperation, () => { this.requireCurrentOperation(); return fn(args, operationId); });
       const detail = await this.operationDetail(toolName, record, body).catch(() => undefined);
       // A stop can arrive while an unavoidable in-flight I/O operation is
@@ -2226,7 +2520,21 @@ export class RemoteDesktopService {
       this.requireCurrentOperation();
       const openedConnection = isRecord(body) && typeof body.connection_id === "string" ? body.connection_id : isRecord(body) && typeof body.session_id === "string" ? body.session_id : undefined;
       const terminalConnection = openedConnection ?? connectionId;
-      await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...(detail ? { detail } : {}), ...sessionAccess() });
+      try { await this.audit("operation.succeeded", { user, operationId, tool: toolName, connectionId: terminalConnection, sessionId: terminalConnection, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: "succeeded", ...(detail ? { detail } : {}), ...sessionAccess() }); }
+      catch { auditWarning = true; }
+      if (auditWarning && isRecord(body)) {
+        const appliedByTool = (toolName === "session_open" && typeof body.session_id === "string")
+          || (toolName === "session_close" && body.closed === true)
+          || (toolName === "todo_update" && typeof body.version === "number" && body.conflict !== true)
+          || (toolName === "todo_enforcement_set" && typeof body.enabled === "boolean")
+          || (toolName === "file_transfer_cancel" && body.cancelled === true)
+          || (toolName === "process_kill" && body.state === "terminating" && body.rejected !== true);
+        const appliedResult = body.applied !== undefined ? {}
+          : toolName === "process_kill" && body.termination_unconfirmed === true ? { applied: "unknown" as const }
+          : toolName === "process_kill" && body.rejected === true ? { applied: false }
+          : gated || appliedByTool ? { applied: true } : {};
+        return result({ ...body, audit_warning: true, ...appliedResult });
+      }
       return result(body);
     } catch (error) {
       if (error instanceof UserStopRequested) {
@@ -2239,7 +2547,8 @@ export class RemoteDesktopService {
       const reason = message.startsWith("Protected service") ? "protected_config_identity" : message.startsWith("Desktop Commander allowedDirectories") ? "allowed_root" : message.startsWith("Desktop Commander") ? "desktop_commander" : "error";
       const publicMessage = /^(Session|Unknown|Transfer|Chunk|Only|Path|Protected|Upload|Destination|Desktop Commander|Process|Transfer limit|A relative|Snapshot|Working directory|node_id|Selected node|Remote node)/.test(message) ? message : "Operation failed.";
       const detail = await this.operationDetail(toolName, record, undefined, publicMessage).catch(() => undefined);
-      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...(detail ? { detail } : {}), ...sessionAccess() });
+      await this.audit(started ? "operation.failed" : "operation.rejected", { user, operationId, tool: toolName, connectionId, sessionId: connectionId, target, comment, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(receivedAt), status: started ? "failed" : "rejected", reason, ...(detail ? { detail } : {}), ...sessionAccess() }).catch(() => undefined);
+      if (gated && started) return failure(JSON.stringify({ error: { code: "TODO_OPERATION_OUTCOME_UNKNOWN", applied: "unknown", message: publicMessage } }));
       return failure(publicMessage);
     }
     };
@@ -2291,20 +2600,27 @@ export class RemoteDesktopService {
       return originalRegisterTool(name, { ...config, description: `${config.description ?? ""} A non-empty comment explaining what this call is intended to accomplish is required and is recorded with the operation.`, inputSchema: { ...config.inputSchema, comment: z.string().trim().min(1).max(500).describe("Briefly explain what this call is intended to accomplish.") }, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
     };
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
-    server.registerTool("session_open", { description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Select node_id when multiple operation targets are configured, and set that node's required absolute working_directory plus a brief purpose. The session remains bound to that node for its lifetime. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Opening is rejected while the caller's Emergency Stop is active.", inputSchema: { node_id: nodeId, working_directory: z.string().trim().min(1).max(4096), purpose: z.string().trim().min(1).max(200) } }, this.tool(user, async ({ node_id, working_directory, purpose }) => {
+    server.registerTool("session_open", { description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Select node_id when multiple operation targets are configured, and set that node's required absolute working_directory plus a brief purpose. The session remains bound to that node for its lifetime. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Optionally provide a public HTTP(S) url and display title. When title is blank or omitted and the URL is eligible, the server may retrieve a public page title without cookies or local credentials. Opening is rejected while the caller's Emergency Stop is active.", inputSchema: { node_id: nodeId, working_directory: z.string().trim().min(1).max(4096), purpose: z.string().trim().min(1).max(200), url: z.string().optional(), title: z.string().optional() } }, this.tool(user, async ({ node_id, working_directory, purpose, url, title }) => {
       await this.sweepExpired();
       this.requireCurrentOperation();
       const target = this.sessionTarget(node_id);
       const workingDirectory = await this.validateSessionWorkingDirectory(user, target, working_directory);
       this.requireCurrentOperation();
+      const externalLink = createSessionLink({ url, title });
       const now = Date.now();
-      const session: Session = { id: makeId(), user, nodeId: target.node_id, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active" };
+      const mono = performance.now();
+      if (!Number.isFinite(mono)) throw new Error("Monotonic clock is unavailable.");
+      const session: Session = { id: makeId(), user, nodeId: target.node_id, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active", version: 1, todo: { items: [], version: 0, lastTodoUpdatedMono: null, lastUpdatedAt: null, enabled: true, enabledAtMono: mono, lastGateMono: mono, lastGateWall: now }, ...externalLink };
       this.sessions.set(session.id, session);
       await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, nodeId: session.nodeId, workingDirectory, purpose: session.purpose, stopGeneration: this.userExecutionState(user).stopGeneration });
-      return { session_id: session.id, connection_id: session.id, node_id: session.nodeId, working_directory: session.workingDirectory, purpose: session.purpose, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state };
+      if (externalLink.externalTitleStatus === "pending") this.startSessionLinkTitleFetch(session);
+      return { session_id: session.id, connection_id: session.id, node_id: session.nodeId, working_directory: session.workingDirectory, purpose: session.purpose, version: session.version, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state, ...(session.externalUrl ? { external_url: session.externalUrl } : {}), ...(session.externalTitle ? { external_title: session.externalTitle } : {}), ...(session.externalTitleSource ? { external_title_source: session.externalTitleSource } : {}), external_title_status: session.externalTitleStatus };
     }));
-    server.registerTool("session_list", { description: "List the caller's active sessions with their selected node, working directory, and purpose.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, node_id: entry.nodeId, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state })) }; }));
-    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.remoteProcessMappings.expireSession(session.id); this.remoteTransferMappings.expireSession(session.id); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
+    server.registerTool("session_list", { description: "List the caller's active sessions with their selected node, working directory, purpose, and session metadata.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, node_id: entry.nodeId, working_directory: entry.workingDirectory, purpose: entry.purpose, version: entry.version, todo_version: entry.todo.version, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state, ...(entry.externalUrl ? { external_url: entry.externalUrl } : {}), ...(entry.externalTitle ? { external_title: entry.externalTitle } : {}), ...(entry.externalTitleSource ? { external_title_source: entry.externalTitleSource } : {}), external_title_status: entry.externalTitleStatus, link_revision: entry.linkRevision })) }; }));
+    server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.clearSessionLink(session); this.remoteProcessMappings.expireSession(session.id); this.remoteTransferMappings.expireSession(session.id); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } await this.audit("session.close", { user, sessionId: session_id }); return { closed: true }; })));
+    server.registerTool("todo_get", { description: "Read the shared Todo list for a session owned by the authenticated caller.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.todoGet(user, session_id)));
+    server.registerTool("todo_update", { description: "Add, edit, reorder, complete, or delete Todo items using an expected version.", inputSchema: { session_id: sessionId, expected_version: z.number().int().nonnegative(), changes: todoChangesSchema } }, this.tool(user, async ({ session_id, expected_version, changes }) => this.todoUpdate(user, session_id, expected_version, changes)));
+    server.registerTool("todo_enforcement_set", { description: "Enable or disable the session Todo freshness gate.", inputSchema: { session_id: sessionId, enabled: z.boolean() } }, this.tool(user, async ({ session_id, enabled }) => this.todoSetEnforcement(user, session_id, enabled)));
     server.registerTool("node_list", { description: "List registered operation nodes, including disconnected remote nodes. It is available before session_open. An optional session_id is validated for compatibility but does not filter the node list. roots contains each root_id and its canonical absolute_path; root_ids is retained for compatibility. File and transfer relative_path values are relative to the returned root, while process_start uses the selected session working_directory.", inputSchema: { session_id: sessionId.optional() } }, this.tool(user, async ({ session_id }) => { if (session_id) this.session(user, session_id); return { nodes: this.nodeEntries() }; }));
     server.registerTool("file_search", { description: "Search file names through Desktop Commander within the configured directory identified by root_id. Requires the caller's active session_id; query is 1–120 characters. This searches names only and does not search file contents. root_id identifies the path base, not the session working_directory.", inputSchema: { session_id: sessionId, node_id: nodeId, root_id: z.string(), query: z.string().min(1).max(120) } }, this.tool(user, async ({ session_id, node_id, root_id, query }) => {
       await this.sweepExpired();

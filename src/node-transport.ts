@@ -47,7 +47,11 @@ type UserState = {
 };
 type SynchronizedUserState = UserState & { coordinator_epoch: string };
 type UserStateAck = { principal_id: string; stop_generation: number; coordinator_epoch: string; state_applied: true; requested_process_ids: string[]; failed_process_ids: string[] };
-type NodeUserStateAck = UserStateAck & { node_id: string };
+type NodeUserStateAck = Omit<UserStateAck, "state_applied"> & {
+  node_id: string;
+  state_applied: boolean;
+  sync_error?: "NODE_STATE_SYNC_UNAVAILABLE" | "NODE_STATE_SYNC_TIMEOUT" | "NODE_STATE_SYNC_FAILED";
+};
 type UserStateResult = { requested_process_ids: string[]; failed_process_ids: string[] };
 
 type ExecutorCapabilities = NodeCapabilities & {
@@ -731,7 +735,25 @@ export class CoordinatorNodeServer {
         });
       }));
       connection.stateSyncTail = current.then(() => undefined, () => undefined);
-      return current.then((ack) => ({ ...ack, node_id: connection.nodeId }));
+      return current.then(
+        (ack) => ({ ...ack, node_id: connection.nodeId }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : "";
+          const syncError: NonNullable<NodeUserStateAck["sync_error"]> = message === "NODE_STATE_SYNC_TIMEOUT" || message === "NODE_STATE_SYNC_UNAVAILABLE"
+            ? message
+            : "NODE_STATE_SYNC_FAILED";
+          return {
+            principal_id: state.principal_id,
+            stop_generation: state.stop_generation,
+            coordinator_epoch: synchronizedState.coordinator_epoch,
+            state_applied: false,
+            requested_process_ids: [],
+            failed_process_ids: [],
+            node_id: connection.nodeId,
+            sync_error: syncError,
+          };
+        },
+      );
     }));
   }
 

@@ -168,6 +168,53 @@ test("authenticated user stop is applied while a duplicate-safe request is pendi
   }
 });
 
+test("user state sync preserves successful executor ACKs when another executor rejects the update", async () => {
+  const secondRemoteId = "node_BBBBBBBBBBBBBBBBBBBBBB";
+  const base = createInitialClusterConfig("both", "Coordinator", 41000);
+  const first = addExecutor(base, remoteId, "Remote A");
+  const second = addExecutor(first.config, secondRemoteId, "Remote B");
+  const registry = new NodeRegistry(second.config);
+  registry.setLocalCapabilities({ operations: ["file"], roots: [], path_base: "root" });
+  const server = new CoordinatorNodeServer({
+    host: "127.0.0.1", expectedBindHost: "127.0.0.1", port: 0, config: second.config, registry,
+    userStates: () => [{ principal_id: "owner@example.test", stopped: false, stop_generation: 0, stop_id: null }],
+  });
+  const address = await server.start();
+  let rejectSecondStop = false;
+  const makeClient = (nodeId: string, label: string, psk: string, rejectsStop: boolean) => {
+    const executorBase = createInitialClusterConfig("executor", label);
+    const executor = setCoordinator({ ...executorBase, local: { ...executorBase.local, node_id: nodeId } }, "127.0.0.1", address.port, psk);
+    return new ExecutorNodeClient({
+      config: executor,
+      capabilities: { executor_generation: generation(rejectsStop ? 12 : 10), desktop_commander_generation: generation(11), operations: ["file"], roots: [], path_base: "root" },
+      onRequest: async (payload) => payload,
+      onCoordinatorEpoch: async () => undefined,
+      onUserState: async (state) => {
+        if (rejectsStop && rejectSecondStop && state.stopped) throw new Error("synthetic user state rejection");
+      },
+    });
+  };
+  const firstClient = makeClient(remoteId, "Remote A", first.psk, false);
+  const secondClient = makeClient(secondRemoteId, "Remote B", second.psk, true);
+  try {
+    await firstClient.connect("127.0.0.1", address.port);
+    await waitFor(() => registry.activeConnection(remoteId) !== undefined);
+    await secondClient.connect("127.0.0.1", address.port);
+    try { await waitFor(() => registry.activeConnection(secondRemoteId) !== undefined); }
+    catch { assert.fail(`Second executor did not activate: ${JSON.stringify(registry.list())}`); }
+    rejectSecondStop = true;
+    const acknowledgements = await server.syncUserState({ principal_id: "owner@example.test", stopped: true, stop_generation: 1, stop_id: "partial-stop-0001" });
+    assert.equal(acknowledgements.length, 2);
+    assert.equal(acknowledgements.find((ack) => ack.node_id === remoteId)?.state_applied, true);
+    const rejected = acknowledgements.find((ack) => ack.node_id === secondRemoteId);
+    assert.equal(rejected?.state_applied, false);
+    assert.ok(["NODE_STATE_SYNC_UNAVAILABLE", "NODE_STATE_SYNC_TIMEOUT", "NODE_STATE_SYNC_FAILED"].includes(rejected?.sync_error ?? ""));
+  } finally {
+    await Promise.all([firstClient.close(), secondClient.close()]);
+    await server.close();
+  }
+});
+
 test("coordinator rejects unregistered nodes and wrong PSKs without activating them", async () => {
   const { coordinator, executor } = configs();
   const registry = new NodeRegistry(coordinator);

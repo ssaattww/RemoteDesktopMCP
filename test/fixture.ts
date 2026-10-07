@@ -3,18 +3,19 @@ import { link, mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/prom
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { hashPassword } from "../src/hash-password.js";
 import { RemoteDesktopService, type RuntimeConfig } from "../src/index.js";
 import { protectPrivateDirectory } from "../src/private-storage.js";
 
 export type Fixture = { service: RemoteDesktopService; root: string; data: string; base: string; cleanup: () => Promise<void> };
-export type FixtureOptions = { startDesktopCommander?: boolean };
+export const FIXTURE_PASSWORD_HASH = "scrypt$RDMCP-fixture-v1$Ci-VRJ7fpbDtSR0NQjdrTAZmrWJwSmDJ2XR5w_QEKsQ";
+export type FixtureOptions = { startDesktopCommander?: boolean; initializeService?: boolean };
 
 export async function fixture(
-  overrides: Partial<RuntimeConfig> = {},
+  overrides: Partial<RuntimeConfig> & { initializeService?: boolean } = {},
   prepare?: (paths: Pick<Fixture, "base" | "root" | "data">) => Partial<RuntimeConfig> | Promise<Partial<RuntimeConfig>>,
   options: FixtureOptions = {},
 ): Promise<Fixture> {
+  const { initializeService: initializeServiceOverride, ...runtimeOverrides } = overrides;
   // Node 22 does not keep the test process alive for an in-memory MCP handshake.
   // This referenced timer belongs to the fixture and is always cleared by cleanup.
   const keepAlive = setInterval(() => undefined, 1_000);
@@ -34,13 +35,13 @@ export async function fixture(
   const cfg: RuntimeConfig = {
     baseUrl: "http://127.0.0.1",
     tokenSecret: "x".repeat(32),
-    users: [{ email: "owner@example.test", passwordHash: await hashPassword("correct-horse-battery") }],
+    users: [{ email: "owner@example.test", passwordHash: FIXTURE_PASSWORD_HASH }],
     roots: [{ id: "files", path: root }], dataDir: data, port: 0, chunkBytes: 1024,
     nodeId: "local", nodeLabel: "This PC", dcCommand: process.execPath,
     dcArgs: [path.resolve("node_modules/@wonderwhy-er/desktop-commander/dist/index.js"), "--no-onboarding"],
     dcManagedConfig: true,
     allowedRedirectOrigins: new Set(["https://chatgpt.com"]),
-    ...overrides,
+    ...runtimeOverrides,
     ...prepared,
   };
   if (options.startDesktopCommander === false) {
@@ -49,12 +50,14 @@ export async function fixture(
     await writeFile(config, JSON.stringify({ allowedDirectories: [root], telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }), { mode: 0o600 });
   }
   const service = new RemoteDesktopService(cfg);
-  try { await service.initialize(options); }
-  catch (error) {
-    await service.close().catch(() => undefined);
-    await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
-    clearInterval(keepAlive);
-    throw error;
+  if (initializeServiceOverride !== false && options.initializeService !== false) {
+    try { await service.initialize({ startDesktopCommander: options.startDesktopCommander }); }
+    catch (error) {
+      await service.close().catch(() => undefined);
+      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+      clearInterval(keepAlive);
+      throw error;
+    }
   }
   return { service, root, data, base, cleanup: async () => { try { await service.close(); await rm(base, { recursive: true, force: true, maxRetries: 3 }); } finally { clearInterval(keepAlive); } } };
 }
