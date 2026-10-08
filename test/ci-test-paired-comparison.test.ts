@@ -12,6 +12,7 @@ import {
   compareInventories,
   formatFailureDiagnostic,
   formatSummaryError,
+  runScheduledSamples,
   summarizeComparison,
 } from "../scripts/ci-test-paired-comparison.mjs";
 
@@ -74,6 +75,25 @@ test("each file runs B→C, C→B, B→C with six samples and stable pair identi
   assert.deepEqual(schedule.map(({ pairIndex }) => pairIndex), [1, 1, 2, 2, 3, 3]);
   assert.deepEqual(schedule.map(({ orderInPair }) => orderInPair), [1, 2, 1, 2, 1, 2]);
   assert.ok(schedule.every(({ file }) => file === "test/a.test.ts"));
+});
+
+test("scheduled sample loop retains completed records and counts when a later sample throws", async () => {
+  const summary: Record<string, unknown> = {};
+  let calls = 0;
+  await assert.rejects(runScheduledSamples({
+    schedule: [{ side: "baseline" }, { side: "candidate" }],
+    summary,
+    recordPathForIndex: (index: number) => `records/${String(index).padStart(4, "0")}.json`,
+    runSample: async (_sample: unknown, index: number) => {
+      calls += 1;
+      if (index === 2) throw new Error("second sample failed");
+      return { status: "success", sampleIndex: index };
+    },
+  }), /second sample failed/);
+  assert.equal(calls, 2);
+  assert.equal(summary.sampleCount, 1);
+  assert.equal(summary.successfulSampleCount, 1);
+  assert.deepEqual(summary.records, ["records/0001.json"]);
 });
 
 test("comparison reports per-side descriptive statistics and control-adjusted target improvement", () => {

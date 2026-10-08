@@ -298,6 +298,21 @@ function sameEnvironment(left, right) {
   return Object.keys(left).every((key) => left[key] === right[key]);
 }
 
+export async function runScheduledSamples({ schedule, summary, recordPathForIndex, runSample }) {
+  const records = [];
+  summary.sampleCount = 0;
+  summary.successfulSampleCount = 0;
+  summary.records = [];
+  for (let index = 0; index < schedule.length; index++) {
+    const record = await runSample(schedule[index], index + 1);
+    records.push(record);
+    summary.sampleCount = records.length;
+    summary.successfulSampleCount = records.filter((sample) => sample.status === "success").length;
+    summary.records = records.map((_sample, recordIndex) => recordPathForIndex(recordIndex + 1));
+  }
+  return records;
+}
+
 async function runTestSample({ sample, cwd, runId, attempt, jobId, environment, recordDirectory, diagnosticsDirectory, index }) {
   const startedAt = new Date().toISOString();
   const start = performance.now();
@@ -428,17 +443,16 @@ async function runPairedComparison() {
     const recordEnvironment = { ...baselineEnvironment };
     const schedule = buildPairedSchedule([...inventory.targets, ...inventory.controls]);
     summary.scheduleSampleCount = schedule.length;
-    const records = [];
-    for (let index = 0; index < schedule.length; index++) {
-      const sample = schedule[index];
+    const records = await runScheduledSamples({
+      schedule,
+      summary,
+      recordPathForIndex: (index) => path.relative(artifactRoot, path.join(recordDirectory, `${String(index).padStart(4, "0")}.json`)).replaceAll("\\", "/"),
+      runSample: (sample, index) => {
       const commit = sample.side === "baseline" ? BASELINE_COMMIT : CANDIDATE_COMMIT;
       const cwd = sample.side === "baseline" ? baselinePath : candidatePath;
-      const record = await runTestSample({ sample: { ...sample, commit }, cwd, runId, attempt, jobId, environment: recordEnvironment, recordDirectory, diagnosticsDirectory, index: index + 1 });
-      records.push(record);
-    }
-    summary.sampleCount = records.length;
-    summary.successfulSampleCount = records.filter((record) => record.status === "success").length;
-    summary.records = records.map((record) => path.relative(artifactRoot, path.join(recordDirectory, `${String(records.indexOf(record) + 1).padStart(4, "0")}.json`)).replaceAll("\\", "/"));
+      return runTestSample({ sample: { ...sample, commit }, cwd, runId, attempt, jobId, environment: recordEnvironment, recordDirectory, diagnosticsDirectory, index });
+      },
+    });
     if (summary.successfulSampleCount !== schedule.length) throw new Error("One or more paired test samples failed; comparison statistics are not valid.");
     summary.statistics = summarizeComparison(records.map((record) => ({ ...record, durationMs: record.monotonicDurationMs })), inventory);
     summary.status = "success";

@@ -73,7 +73,7 @@ severity reclassification: なし。
 
 ## Fix verification: diagnostic redaction follow-up
 
-### Target identity and mode
+### Follow-up #1 — Target identity and mode
 
 - Mode: ordinary fix verification for `R24-02-C-NR-003` only.
 - Repository/branch: `ssaattww/RemoteDesktopMCP`, `issue-24-r24-02-post-split-main`.
@@ -82,7 +82,7 @@ severity reclassification: なし。
 - Worktree diff under review: runner, paired comparison contract test, task tracking, and implementation report. This review report is updated here as requested; no other files were edited by the reviewer.
 - Reviewer: `/root/r24_02c_normal_review`, separate from the implementation worker. This is not an independent final review.
 
-### Finding continuity and disposition
+### Follow-up #1 — Finding continuity and disposition
 
 - `R24-02-C-NR-001` — P2 — resolved in the prior fix verification. The PR-creation base and fail-closed source-path checks are unchanged in this diff.
 - `R24-02-C-NR-002` — P3 — resolved in the prior fix verification. Tracking continues to reflect implementation, reported validation, diagnostic follow-up, and review status.
@@ -110,8 +110,58 @@ The runner stores baseline/candidate environment objects before comparing them, 
 - Run `37772110573` remains a failed pre-sample run. Artifact metadata and its one HTTP 403 download failure are recorded in the implementation report; I did not access or retry the artifact, so its summary contents and original failure cause remain unavailable.
 - Windows Node 22 behavior, a successful paired run, driver exact-head CI, and performance effect remain unverified/held. No GitHub/API/Actions calls, artifact download, commit, push, or merge occurred.
 
-### Verdict and next action
+### Follow-up #1 — Verdict and next action
 
 - Verdict: `pass_with_held` for the reviewed diagnostic follow-up at driver HEAD `89450c3b4cb45b04792776bbdad049edbc456e4e`.
 - Remaining holds: Windows runner behavior and exact-head CI; a future paired run must verify that failure stderr and both environment objects are available. The inaccessible artifact does not count as measurement evidence.
 - This ordinary fix verification does not start or satisfy independent final review. `report_attestation_allowed: false`; no reservation or attestation path was established.
+
+## Fix verification: parent code-review follow-up #1
+
+### Target identity and mode
+
+- Mode: ordinary fix verification of the incremental sample-progress update.
+- Repository/branch: `ssaattww/RemoteDesktopMCP`, `issue-24-r24-02-post-split-main`.
+- Driver HEAD: `4a2723e3bd8116a4611fb79afbdb0ec5d94f1954`; unchanged during this review.
+- Pinned measurement base/candidate: `5dac2528e80cba3e3ff5c855f14420075b2da717` / `6ea1ca5636d909b32fad6199c034b9b1894fef34`.
+- Current uncommitted change set: `scripts/ci-test-paired-comparison.mjs`, `test/ci-test-paired-comparison.test.ts`, `reports/2026-10-08-r24-02-paired-comparison-implementation.md`, and parent-owned `tasks/tasks-status.md`. This review report is updated here as requested; no other files were edited by the reviewer.
+- Reviewer: `/root/r24_02c_normal_review`, separate from implementation. This is not an independent final review.
+
+### Finding continuity and disposition
+
+- `R24-02-C-NR-001` — P2 — remains resolved; the baseline and execution-path checks are unchanged.
+- `R24-02-C-NR-002` — P3 — remains resolved; prior task-state correction is unchanged.
+- `R24-02-C-NR-003` — P2 — remains resolved; sanitizer changes from that fix are unchanged in this diff.
+- No new finding in this follow-up. No severity reclassification.
+
+### Sample progress and failure behavior
+
+The new production `runScheduledSamples` helper initializes progress fields to zero/empty, then, after each `runSample` resolves, appends the returned record and updates `sampleCount`, `successfulSampleCount`, and the ordered record paths. Production `runTestSample` writes the JSON record before it returns, so each path added by the helper corresponds to a completed JSON record at the same one-based index. The next sample is awaited only after those updates. If a later sample throws, the helper rejects without resetting prior progress; the outer catch preserves those populated fields, records the error, and the summary remains `failure` (its initial status). The `finally` block retains cleanup and summary writing. The existing success-count gate still prevents statistics or success status when any returned sample is a failure.
+
+The contract test invokes the same helper used by production. It lets the first sample resolve and makes the second throw; it verifies two calls, a nonzero completed count, one successful sample, and exactly `records/0001.json` in the summary. It does not test JSON file writing through `runTestSample` itself, but source inspection confirms that write precedes return and uses the same sample index passed to the path callback. Path ordering and sample failure status are preserved by the production wrapper.
+
+The parent-owned task row now accurately says the progress-counter fix is implemented, records reported Green 8/8 plus check/build/lint/diff-check, and marks same-reviewer fix verification in progress. The implementation report distinguishes this local follow-up from the earlier exact-head CI run and records the failed 401 dispatch without claiming that measurement started.
+
+### Required coverage and validation
+
+| Criterion | Disposition |
+| --- | --- |
+| Requirement/design conformance | `checked_no_finding` |
+| Sample counts, success counts, record-path order, later-throw behavior | `checked_no_finding` |
+| Failure status, diagnostics, and cleanup | `checked_no_finding` |
+| Scope and changed-file set | `checked_no_finding` |
+| Test quality and validation | `checked_no_finding` for reported evidence; tests not rerun |
+| Reports and task tracking | `checked_no_finding` |
+| Current follow-up CI and Windows paired run | `held` |
+| Unexplored | None within requested scope |
+
+- Implementation-reported TDD: first focused run failed because the helper was not exported; the first Green attempt found an incorrect throw index in the fixture; after correcting the fixture, paired contract tests passed 8/8.
+- Implementation-reported local checks: `npm run check`, `npm run build`, `npm run lint`, and `git diff --check` passed on Linux x86_64 / Node `v24.19.0` / npm `11.9.0`, with a temporary symlink to existing locked dependencies removed after validation. I did not rerun those commands. I independently ran `git diff --check`; it passed.
+- Parent-provided exact-head CI `37774454906` succeeded across Ubuntu, assignment, and Windows shards 1–8 for HEAD `4a2723e3bd8116a4611fb79afbdb0ec5d94f1954`. It predates the current uncommitted changes and is not evidence for this follow-up.
+- Parent reports the paired workflow dispatch was rejected with HTTP 401 and a read-only in-progress run listing was empty. No active paired run or successful measurement is claimed. I made no remote/API/Actions call and did not access an artifact.
+
+### Verdict and next action
+
+- Verdict: `pass_with_held` for this incremental follow-up at driver HEAD `4a2723e3bd8116a4611fb79afbdb0ec5d94f1954` plus the reviewed worktree diff.
+- Holds: exact-head CI for the follow-up, a Windows paired run, and any runtime measurement or performance conclusion. The prior failed run remains pre-sample failure evidence only.
+- This ordinary fix verification does not initiate independent final review. `report_attestation_allowed: false`; no final-review reservation was made.

@@ -79,7 +79,7 @@
 - 診断修正のTDD: `formatFailureDiagnostic`をimportした契約testを実装前に実行し、未exportで失敗（SyntaxError、exit 1）。formatter実装後、paired contract 7件すべてpass（exit 0）。Redはこの未実装exportによる失敗であり、依存環境エラーと区別した。
 - 最終修正後validation: `node --import tsx --test test/ci-test-paired-comparison.test.ts` 7/7 pass、`npm run check` pass、`npm run build` pass、`npm run lint` pass（ESLint・markdownlint 157 files/0 issues・design whitelist）、`git diff --check` pass。Linux x86_64 / Node v24.19.0 / npm 11.9.0、既存locked node_modulesへの一時symlinkを利用し、検証後unlink。
 - 診断修正はrunまたはartifactへのアクセスを行わずローカルで実装・検証した。GitHub/API/Actions操作、認証やworkflow設定変更、commit/pushなし。
-- 再開条件: NR-003の通常fix verification `pass_with_held`を取得済み。driver修正をcommit/pushしexact-head CIを通した後、既存許可範囲のpaired manual runでstderrと両environment objectを確認する。失敗run/artifactの再取得は行わない。
+- 再開条件: NR-003の通常fix verification `pass_with_held`を取得済み。NR-003のdriver commit exact-head CIはrun `37774454906`で成功した。後続のsample-progress fixは別commit後にexact-head CIが必要。paired manual dispatchはそのCI後にHTTP 401で拒否され、別のread-only run listingは空だった。authは変更せず同一dispatchは再試行しない。次の測定前にscreening対象・代表controlと順序効果の設計を行う。失敗artifactの再取得は行わない。
 - `R24-02-C-NR-003` P2修正: sanitizerが`Authorization: Basic <credential>`のBasic scheme/credentialを残し、空白を含むquoted/unquoted Windows/Unix絶対pathの一部を表示する懸念に対応。Basic authorization値をschemeごと伏字にし、quoted pathを引用符内全体、unquoted pathを`;`または改行まで安全側に伏字にする。通常のcommand label、既存tokenパターン、500文字上限を保持する契約testを追加。通常reviewerのfix verificationは`pass_with_held`で、NR-003解消を確認。Windows/exact-head CIは引き続きheld。
 - NR-003 TDD evidence: test-firstのfocused実行は7件中6 pass/1 fail。失敗は`Authorization: Basic ...`のcredentialが残る回帰で、`dXNlcjpwYXNz-secret-marker`が実際の出力に存在することを確認。sanitizer変更後は同じfocused commandで7/7 pass。quoted/unquotedのWindows/Unix pathケースはユーザー名・空白付きsuffix・`#private-fragment`が残らないことを確認する。
 - NR-003後のローカル検証: `npm run check`、`npm run build`、`npm run lint`（ESLint、markdownlint 157 files/0 issues、design whitelist）成功。依存環境は既存locked `node_modules`への一時symlink（`/workspace/RemoteDesktopMCP-issue24/node_modules`）、Linux x86_64 / Node v24.19.0 / npm 11.9.0。symlinkは検証後にunlinkし、target側は変更していない。`git diff --check`も成功。Windows runnerではまだ未実行。通常fix verificationは`pass_with_held`。
@@ -90,3 +90,11 @@
 
 - GitHub artifact/PR comment読み取りがこのsessionで `401 Bad credentials` を返した。認証情報は変更していない。
 - paired Windows measurementはpush後のPR CI完了後に親がdispatchする。未検証のCI/measurementをGreen扱いしない。
+
+## Parent code-review follow-up #1
+
+- Status: implementation and same-reviewer fix verification complete (`pass_with_held`); exact-head CI and Windows paired execution held. Production sample iteration now uses `runScheduledSamples`; after each sample returns (after its JSON record has been written), the helper updates `sampleCount`, `successfulSampleCount`, and completed `records` paths. A later thrown sample leaves the earlier progress intact for summary/finally.
+- TDD: test-first focused run failed with ESM import error because `runScheduledSamples` was not yet exported. After implementation, the first Green attempt exposed an incorrect throw index in the test fixture; correcting the fixture produced 8/8 focused contract tests passing. The contract uses the same helper as production: first sample returns, second throws, and summary retains count 1, success count 1, and `records/0001.json`.
+- Parent provided driver HEAD `4a2723e3bd8116a4611fb79afbdb0ec5d94f1954` exact-head CI `37774454906` succeeded (Ubuntu assignment and Windows 8/8). This CI predates this local follow-up and is not exact-head evidence for it.
+- A later paired workflow dispatch request failed HTTP 401. Read-only in-progress run listing was empty, so no paired run is active. No auth changes or retry occurred. No Windows measurement evidence exists. Parent-requested sample-progress fix verification later passed with held status; exact-head CI is now required for the new fix commit.
+- Local follow-up validation environment: Linux x86_64, Node v24.19.0, npm 11.9.0; existing locked dependencies via temporary symlink, removed after validation.
