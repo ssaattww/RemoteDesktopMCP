@@ -73,8 +73,18 @@
 - initial ordinary review `R24-02-C-NR-001`の修正として、baselineをPR作成時SHA `5dac2528e80cba3e3ff5c855f14420075b2da717`へ同期。current main `d6688b64da23abe5eed03f61b4ca224426fe0212`との効果主張を明確に否定し、別評価待ちとする。
 - 修正後のHEAD/workspace candidateは`6ea1ca5636d909b32fad6199c034b9b1894fef34`。これは測定対象fixture treeの固定candidate commitで、今後のdriver commitとは別識別子である。commit/push pending（親が管理）。
 - 修正後validation: paired contract 6/6、scheduler invariants 19/19、`npm run check`、`npm run build`、`npm run lint`、`git diff --check`すべて成功。既存locked依存への一時symlinkから実行し、後でsymlinkだけunlink。package manifest/lockに変更なし。
+- 最初のpaired run `37772110573` はsample出力前に失敗。workflow logでは両worktreeの`npm ci`完了後にsummaryのstatusだけが出ており、17 files / 5,724 bytesのartifact `11547828726`（SHA-256 `cb33d1c1fef82a08b07979b184f32ad10aee5b8c81ccba30519b1609f6743878`）が作成された。
+- このartifactのblob downloadは2026-10-08 11:52 UTC頃にHTTP 403 Forbiddenを1回受け、再試行していない。summary.errorを読めていないため、runの失敗理由は不明。テストsampleは1件も記録されておらず、測定結果として扱わない。
+- 診断修正: 失敗summaryに安全化したerror文字列をstderrへ表示し、summary JSONにも保持。baseline/candidate双方の環境objectを環境一致判定より前にsummaryへ保存する。sanitizerの契約testでcommand label保持、絶対path/credentialの秘匿、出力長上限を確認。
+- 診断修正のTDD: `formatFailureDiagnostic`をimportした契約testを実装前に実行し、未exportで失敗（SyntaxError、exit 1）。formatter実装後、paired contract 7件すべてpass（exit 0）。Redはこの未実装exportによる失敗であり、依存環境エラーと区別した。
+- 最終修正後validation: `node --import tsx --test test/ci-test-paired-comparison.test.ts` 7/7 pass、`npm run check` pass、`npm run build` pass、`npm run lint` pass（ESLint・markdownlint 157 files/0 issues・design whitelist）、`git diff --check` pass。Linux x86_64 / Node v24.19.0 / npm 11.9.0、既存locked node_modulesへの一時symlinkを利用し、検証後unlink。
+- 診断修正はrunまたはartifactへのアクセスを行わずローカルで実装・検証した。GitHub/API/Actions操作、認証やworkflow設定変更、commit/pushなし。
+- 再開条件: NR-003の通常fix verification `pass_with_held`を取得済み。driver修正をcommit/pushしexact-head CIを通した後、既存許可範囲のpaired manual runでstderrと両environment objectを確認する。失敗run/artifactの再取得は行わない。
+- `R24-02-C-NR-003` P2修正: sanitizerが`Authorization: Basic <credential>`のBasic scheme/credentialを残し、空白を含むquoted/unquoted Windows/Unix絶対pathの一部を表示する懸念に対応。Basic authorization値をschemeごと伏字にし、quoted pathを引用符内全体、unquoted pathを`;`または改行まで安全側に伏字にする。通常のcommand label、既存tokenパターン、500文字上限を保持する契約testを追加。通常reviewerのfix verificationは`pass_with_held`で、NR-003解消を確認。Windows/exact-head CIは引き続きheld。
+- NR-003 TDD evidence: test-firstのfocused実行は7件中6 pass/1 fail。失敗は`Authorization: Basic ...`のcredentialが残る回帰で、`dXNlcjpwYXNz-secret-marker`が実際の出力に存在することを確認。sanitizer変更後は同じfocused commandで7/7 pass。quoted/unquotedのWindows/Unix pathケースはユーザー名・空白付きsuffix・`#private-fragment`が残らないことを確認する。
+- NR-003後のローカル検証: `npm run check`、`npm run build`、`npm run lint`（ESLint、markdownlint 157 files/0 issues、design whitelist）成功。依存環境は既存locked `node_modules`への一時symlink（`/workspace/RemoteDesktopMCP-issue24/node_modules`）、Linux x86_64 / Node v24.19.0 / npm 11.9.0。symlinkは検証後にunlinkし、target側は変更していない。`git diff --check`も成功。Windows runnerではまだ未実行。通常fix verificationは`pass_with_held`。
 - workflow_dispatchのpaired-comparison modeは実装済みだが、Windowsでの実走・測定は未実施。統計の結果に基づく効果判定も未実施。
-- 次工程: 親が修正範囲と既存CIを確認し、runner/design/tracker更新を含むdriver commitをPR #76へ通常pushする。そのdriver HEADの必須CI完了後、paired modeを一度起動する。runnerはPR作成時base `5dac2528e80cba3e3ff5c855f14420075b2da717`と固定candidate `6ea1ca5636d909b32fad6199c034b9b1894fef34`を比較し、workflow起動HEADはdriverとして別記録する。失敗は成功値へ含めず、診断記録で調査する。
+- 次工程: 親が通常fix verification reportを含む変更をcommitし、PR #76へ通常pushする。そのdriver HEADの必須CI完了後、paired modeの新runを起動する。runnerはPR作成時base `5dac2528e80cba3e3ff5c855f14420075b2da717`と固定candidate `6ea1ca5636d909b32fad6199c034b9b1894fef34`を比較し、workflow起動HEADはdriverとして別記録する。失敗は成功値へ含めず、診断記録で調査する。
 
 ## リスク
 

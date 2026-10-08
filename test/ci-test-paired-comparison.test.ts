@@ -10,6 +10,8 @@ import {
   buildPairedSchedule,
   compareRepositoryChanges,
   compareInventories,
+  formatFailureDiagnostic,
+  formatSummaryError,
   summarizeComparison,
 } from "../scripts/ci-test-paired-comparison.mjs";
 
@@ -48,6 +50,22 @@ test("repository diff rejects runtime/source drift and permits documented metada
   assert.deepEqual(compareRepositoryChanges([...targetFiles, "reports/example.md", "tasks/tasks-status.md"]), targetFiles);
   assert.throws(() => compareRepositoryChanges([...targetFiles, "src/index.ts"]), /execution|runtime|outside/i);
   assert.throws(() => compareRepositoryChanges([...targetFiles, "scripts/ci-test-measurement.mjs"]), /execution|runtime|outside/i);
+});
+
+test("failure summary output keeps the command label but redacts credentials and absolute paths", () => {
+  const error = "npm-ci-candidate failed Authorization: Basic dXNlcjpwYXNz-secret-marker at C:\\runner\\_temp\\worktree and /tmp/private/worktree; github_pat_abcdefghijklmnopqrstuvwxyz0123456789 token=local-secret-marker";
+  const message = formatFailureDiagnostic({ status: "failure", error });
+  assert.match(message, /^Paired comparison error:/);
+  assert.match(message, /npm-ci-candidate failed/);
+  assert.match(message, /\[path\]/);
+  assert.doesNotMatch(message, /C:\\runner|\/tmp\/private|github_pat_|local-secret-marker|dXNlcjpwYXNz/);
+  assert.doesNotMatch(message, /Authorization:\s*Basic/);
+  assert.match(formatSummaryError('cmd "C:\\Users\\alice smith\\secret.txt#private-fragment" after'), /^cmd \[path\] after$/);
+  assert.match(formatSummaryError("cmd C:\\Users\\alice smith\\secret.txt#private-fragment"), /^cmd \[path\]$/);
+  assert.match(formatSummaryError('cmd "/home/alice smith/private dir/secret.txt#private-fragment" after'), /^cmd \[path\] after$/);
+  assert.match(formatSummaryError("cmd /home/alice smith/private dir/secret.txt#private-fragment"), /^cmd \[path\]$/);
+  assert.equal(formatSummaryError("x".repeat(700)).length, 500);
+  assert.equal(formatFailureDiagnostic({ status: "success", error: undefined }), "");
 });
 
 test("each file runs B→C, C→B, B→C with six samples and stable pair identities", () => {

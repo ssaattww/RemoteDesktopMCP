@@ -23,6 +23,27 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const ordinal = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const DOCUMENTATION_ROOTS = ["doc/", "reports/", "tasks/"];
 
+export function formatSummaryError(value) {
+  return String(value ?? "")
+    .replace(/\u001b\[[0-9;]*m/gu, "")
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b/giu, "[redacted]")
+    .replace(/\bAuthorization\s*:\s*(?:Basic|Bearer)\s+\S+/giu, "Authorization: [redacted]")
+    .replace(/\bBearer\s+\S+/giu, "Bearer [redacted]")
+    .replace(/\b(token|secret|password|authorization)\s*[:=]\s*[^\s,;]+/giu, (_match, label) => `${label}=[redacted]`)
+    .replace(/(["'])(?:(?:[A-Za-z]:[\\/])|(?:\\\\)|\/)[^\r\n]*?\1/gu, "[path]")
+    .replace(/(?:[A-Za-z]:[\\/]|\\\\|\/)[^;\r\n]*/gu, "[path]")
+    .replace(/(?:[A-Za-z]:\\|\\\\)[^\s"'<>]+/gu, "[path]")
+    .replace(/\/(?:[^/\s]+\/)+[^/\s,;]*/gu, "[path]")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+export function formatFailureDiagnostic(summary) {
+  if (summary?.status !== "failure" || typeof summary.error !== "string" || !summary.error) return "";
+  return `Paired comparison error: ${formatSummaryError(summary.error)}\n`;
+}
+
 function assertUniqueSorted(files, label) {
   if (!Array.isArray(files) || files.some((file) => typeof file !== "string" || !/^test\/(?:[^/]+\/)*[^/]+\.test\.ts$/.test(file))) {
     throw new Error(`${label} test inventory contains an invalid path.`);
@@ -397,6 +418,7 @@ async function runPairedComparison() {
     }
     const baselineEnvironment = await environmentFor(baselinePath, artifactRoot);
     const candidateEnvironment = await environmentFor(candidatePath, artifactRoot);
+    summary.environments = { baseline: baselineEnvironment, candidate: candidateEnvironment };
     if (baselineEnvironment.runnerOS !== "Windows" || baselineEnvironment.platform !== "win32"
       || !sameEnvironment(baselineEnvironment, candidateEnvironment)) throw new Error("Baseline/candidate execution environments differ or are not Windows.");
     if (baselineEnvironment.packageLockSha256 !== summary.packageLockSha256) throw new Error("Installed worktree lock bytes differ from the pinned commit lock.");
@@ -421,16 +443,17 @@ async function runPairedComparison() {
     summary.statistics = summarizeComparison(records.map((record) => ({ ...record, durationMs: record.monotonicDurationMs })), inventory);
     summary.status = "success";
   } catch (error) {
-    summary.error = error instanceof Error ? error.message : String(error);
+    summary.error = formatSummaryError(error instanceof Error ? error.message : String(error));
     summary.sampleCount = summary.sampleCount ?? 0;
   } finally {
     for (const worktree of worktrees.reverse()) {
       try { await git(root, ["worktree", "remove", "--force", worktree], `worktree-remove-${path.basename(worktree)}`, artifactRoot); }
-      catch (error) { summary.cleanupError = error instanceof Error ? error.message : String(error); }
+      catch (error) { summary.cleanupError = formatSummaryError(error instanceof Error ? error.message : String(error)); }
     }
     summary.finishedAt = new Date().toISOString();
     await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
     process.stdout.write(`Paired comparison ${summary.status}; summary: ${summaryPath}\n`);
+    process.stderr.write(formatFailureDiagnostic(summary));
   }
   return summary.status === "success" ? 0 : 1;
 }
