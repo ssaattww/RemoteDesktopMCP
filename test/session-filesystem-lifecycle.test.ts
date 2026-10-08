@@ -25,9 +25,8 @@ async function upload(api: Awaited<ReturnType<typeof mcp>>, session: string, nam
 
 
 test("NR009: canonical allowed roots work through a symlink or Windows junction", async (t) => {
-  const f = await fixture(); let service: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
+  const f = await fixture({ initializeService: false }); let service: RemoteDesktopService | undefined; let api: Awaited<ReturnType<typeof mcp>> | undefined;
   try {
-    await f.service.close();
     const aliasedRoot = path.join(f.base, "allowed-root-link");
     try { await symlink(f.root, aliasedRoot, process.platform === "win32" ? "junction" : "dir"); }
     catch (error) {

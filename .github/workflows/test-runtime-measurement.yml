@@ -2,6 +2,15 @@ name: test-runtime-measurement
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Measurement mode
+        required: true
+        type: choice
+        default: individual
+        options:
+          - individual
+          - paired-comparison
   pull_request:
     types: [labeled]
 
@@ -30,7 +39,14 @@ jobs:
       CI_RUNNER_LABEL: windows-latest
     steps:
       - name: Checkout
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'paired-comparison'
         uses: actions/checkout@v4
+
+      - name: Checkout full history for paired comparison
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -52,7 +68,10 @@ jobs:
           "skip=$($decision -eq 'skip')" | Add-Content -Path $env:GITHUB_OUTPUT
 
       - name: Install dependencies
-        if: steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
+        if: >-
+          steps.measurement-gate.outcome != 'failure' &&
+          steps.measurement-gate.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison')
         run: npm ci
 
       - name: Resolve workflow metadata
@@ -67,7 +86,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Measure each tracked test file
-        if: steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
+        if: >-
+          steps.measurement-gate.outcome != 'failure' &&
+          steps.measurement-gate.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison')
         shell: pwsh
         run: |
           $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
@@ -76,13 +98,36 @@ jobs:
           & node scripts/ci-test-measurement.mjs
           exit $LASTEXITCODE
 
+      - name: Run fixed paired Windows comparison
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison'
+        shell: pwsh
+        env:
+          CI_RUNNER_LABEL: windows-latest
+        run: |
+          New-Item -ItemType Directory -Path ci-artifacts/paired-comparison -Force | Out-Null
+          & node scripts/ci-test-paired-comparison.mjs
+          exit $LASTEXITCODE
+
       - name: Upload measurement evidence
-        if: always() && steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
+        if: >-
+          always() &&
+          steps.measurement-gate.outcome != 'failure' &&
+          steps.measurement-gate.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison')
         uses: actions/upload-artifact@v4
         with:
           name: test-runtime-measurement-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           path: |
             ci-artifacts/test-measurement-records
             ci-artifacts/test-duration-manifest.candidate.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload paired comparison evidence
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runtime-paired-comparison-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ci-artifacts/paired-comparison
           if-no-files-found: warn
           retention-days: 14
