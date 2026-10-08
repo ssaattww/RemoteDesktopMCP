@@ -1,0 +1,199 @@
+﻿schema_version: 3
+producer:
+  skill: chat-review-worker
+  mode: initial_review
+  generated_at: "2026-10-07T00:16:00+09:00"
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #71 / PR #74"
+task_id: null
+branch: design/session-metadata-mcp-edit
+base_ref: main
+target:
+  current_head: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  reviewed_head: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  commit_range: f20c75e1ecd409f0e8573720c0f74b39d8178f93..6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  machine_id: local
+  connection: available
+  os: Windows
+  shell: cmd.exe
+  working_directory: 'C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP'
+  repository: ssaattww/RemoteDesktopMCP
+  branch: design/session-metadata-mcp-edit
+  head_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  source_state: dirty
+  source_fingerprint: "HEAD 6dbcead75db8b741ad4b6b397a12d6e280bffc0d; only same-task untracked review report before persistence"
+  ownership: current_task
+  writable_paths:
+    - doc/report/2026-10-06-session-metadata-mcp-edit-design-review.md
+    - doc/report/2026-10-06-session-metadata-mcp-edit-design-review-handoff.yaml
+  dependencies:
+    - {name: git, status: available, evidence: "rev-parse/status/diff-check succeeded"}
+    - {name: gh, status: available, evidence: "Issue/PR/exact-head run queried"}
+    - {name: npm, status: available, evidence: "lint/check succeeded"}
+  evidence:
+    - "GitHub PR current HEAD and local HEAD matched."
+    - "No other worktree was listed."
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - "git diff --check exit 0"
+    - "npm run lint exit 0; Markdown 146 files / 0 issues"
+    - "npm run check exit 0"
+  technical_head: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  administrative_parent: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  commit: {state: commit_pending, review_target_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d}
+  push: {state: push_pending, head_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d}
+  ci_wait: {state: not_required, required_for: not_required}
+  final_publication: {sequence: not_applicable, pr_action: update}
+authoritative_requirements:
+  - {source: user_instruction, reference: current_chat, summary: "Re-run rdmcp #71 design review; do not wait for CI."}
+  - {source: repository_instruction, reference: project_instructions, summary: "Use RDMCP and gh; save report; comment PR; use only exact-current-HEAD CI; do not merge."}
+  - {source: issue, reference: "Issue #71", summary: "MCP editing of working_directory/purpose/url/title must share HTTP mutation, version, safety, audit and process semantics."}
+development_policy:
+  method: design_review_only
+  testing_order: review_and_validation_only
+  governing_source: user_and_repository_instructions
+validation_plan:
+  commands:
+    - "git diff --check f20c75e1ecd409f0e8573720c0f74b39d8178f93..6dbcead75db8b741ad4b6b397a12d6e280bffc0d"
+    - "npm run lint"
+    - "npm run check"
+  required_failure_diagnostics:
+    - "ci-artifacts/test-results.txt"
+    - "per-step stdout/stderr/result logs"
+    - "environment.log"
+    - "Windows shard diagnostic JSON"
+blocked: []
+authorized_actions: [read_repository, write_report, write_handoff, commit, push, comment_pr]
+write_boundary:
+  allowed:
+    - {path_or_operation: "doc/report/2026-10-06-session-metadata-mcp-edit-design-review.md", reason: detailed_review_report}
+    - {path_or_operation: "doc/report/2026-10-06-session-metadata-mcp-edit-design-review-handoff.yaml", reason: review_handoff}
+    - {path_or_operation: "git commit/push and PR #74 comment", reason: review_publication}
+  forbidden:
+    - {path_or_operation: "src/**, test/**, doc/design/**, .github/workflows/**, tasks/**", reason: review_only}
+    - {path_or_operation: merge, reason: user_only}
+scope:
+  - "Review PR #74 design against Issue #71 and current implementation contracts."
+  - "Review every changed file/direct dependency and exact-head validation."
+non_goals:
+  - "Implement finding fixes."
+  - "Merge PR #74."
+files:
+  changed:
+    - {path: "doc/report/2026-10-06-session-metadata-mcp-edit-design-review.md", purpose: detailed_review}
+    - {path: "doc/report/2026-10-06-session-metadata-mcp-edit-design-review-handoff.yaml", purpose: handoff}
+  inspected:
+    - {path: "doc/design/session-metadata-mcp-edit.md", purpose: primary_design}
+    - {path: "src/index.ts", purpose: shared_update_todo_wrapper_process}
+    - {path: "src/session-links.ts", purpose: link_semantics}
+    - {path: "src/user-console.ts", purpose: http_shared_mutation}
+    - {path: "test/issue-56-shared-todo.test.ts", purpose: applied_semantics}
+    - {path: "test/user-console.test.ts", purpose: metadata_and_process_regressions}
+    - {path: ".github/workflows/lint.yml", purpose: diagnostics}
+  intentionally_untouched:
+    - {path_or_area: "product/design/test/workflow/tracking", reason: review_only}
+commands:
+  - {command: "git diff --check ...", purpose: diff_integrity, exit_code: 0, result: passed, head_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d, evidence: "exit 0", execution_environment: null, source_fingerprint: null}
+  - {command: "npm run lint", purpose: lint, exit_code: 0, result: passed, head_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d, evidence: "Markdown 146/0; terms pass", execution_environment: null, source_fingerprint: null}
+  - {command: "npm run check", purpose: typecheck, exit_code: 0, result: passed, head_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d, evidence: "tsc noEmit exit 0", execution_environment: null, source_fingerprint: null}
+tests:
+  - {name: product_tests, phase: not_applicable, result: not_run, head_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d, evidence: "Design-only review; exact-head CI ran product tests."}
+ci:
+  required: true
+  workflow: lint
+  run_id: 37299449587
+  head_sha: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  conclusion: success
+  artifacts: []
+implementation:
+  outcome: not_applicable
+  final_head: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  commits: []
+  addressed_findings: []
+  failure_diagnostics:
+    - {type: artifact, location: ".github/workflows/lint.yml", summary: "Captures tests, stdout, stderr, result files, environment and Windows shard diagnostics."}
+  blocked_items: []
+  summary: ["Reviewer made no implementation changes."]
+review:
+  mode: initial_review
+  reviewed_head: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  reviewer:
+    identity: current_ChatGPT_normal_review_chat
+    role: normal_reviewer
+    continuity: {previous_reviewer_identity: current_ChatGPT_normal_review_chat, changed: false, reason: null}
+    independence:
+      implemented_change: false
+      implemented_review_fix: false
+      served_as_normal_reviewer: true
+      inherited_conversation: true
+      evidence: ["This chat reviewed only; it did not author PR #74 design or fixes."]
+  verdict: fail
+  required_coverage:
+    - {criterion: requirement_and_design_conformance, disposition: checked_finding, evidence: RDMCP-71-DREV-001}
+    - {criterion: correctness_and_edge_cases, disposition: checked_finding, evidence: RDMCP-71-DREV-001}
+    - {criterion: scope_discipline, disposition: checked_no_finding, evidence: "reviewed full PR scope"}
+    - {criterion: changed_files_and_depencies, disposition: checked_no_finding, evidence: "all changed files/direct dependencies inspected"}
+    - {criterion: api_data_configuration_workflow_compatibility, disposition: checked_finding, evidence: RDMCP-71-DREV-001}
+    - {criterion: error_handling_and_failure_diagnostics, disposition: checked_finding, evidence: RDMCP-71-DREV-001}
+    - {criterion: security_and_secret_handling, disposition: checked_no_finding, evidence: "owner/no-value audit/shared SSRF preserved"}
+    - {criterion: tests_and_validation, disposition: checked_finding, evidence: "finding composition regression absent"}
+    - {criterion: current_head_ci, disposition: checked_no_finding, evidence: "run 37299449587 exact-head success"}
+    - {criterion: report_tracking_documentation, disposition: checked_no_finding, evidence: "report/handoff/terms inspected"}
+    - {criterion: regression_and_maintainability, disposition: checked_finding, evidence: RDMCP-71-DREV-001}
+  independent_closure:
+    initial_independent_reviewed_head: null
+    closure_reviewed_heads: []
+    reviewer_continuity: null
+    closure_scope: []
+    completeness_matrix:
+      - {finding_id: RDMCP-71-DREV-001, required_action: "Fix ok:false/applied precedence; add version_conflict and update_unavailable terminal-audit composition tests; define no-op applied semantics.", production_path: "doc/design/session-metadata-mcp-edit.md then implementation", actual_composition_fixture: "session_update + fresh Todo gate + terminal operation.succeeded audit failure", focused_evidence: pending}
+  validation_assessment:
+    - {item: reviewed_head_identity, result: supported, evidence: "GitHub/local HEAD match"}
+    - {item: local_validation, result: supported, evidence: "diff-check/lint/check pass"}
+    - {item: exact_head_ci, result: supported, evidence: "run 37299449587 success"}
+    - {item: todo_terminal_audit_contract, result: failed, evidence: RDMCP-71-DREV-001}
+  reserved_report_paths: []
+  report_attestation:
+    allowed: false
+    reviewed_implementation_head: null
+    allowed_paths: []
+    required_first_parent: null
+    maximum_commits_after_reviewed_head: null
+    forbidden_path_classes: []
+    no_later_commits_required: false
+    validation_status: not_applicable
+    validation_evidence: []
+  summary:
+    - "One Medium required finding blocks design acceptance."
+report:
+  report_type: review_report
+  outcome: created
+  persistence_mode: repository_file
+  paths:
+    - doc/report/2026-10-06-session-metadata-mcp-edit-design-review.md
+    - doc/report/2026-10-06-session-metadata-mcp-edit-design-review-handoff.yaml
+  reviewed_head: 6dbcead75db8b741ad4b6b397a12d6e280bffc0d
+  attestation_head: null
+  pr_comments: []
+  summary: ["Commit/push review-only artifacts; then post concise PR comment."]
+findings:
+  - id: RDMCP-71-DREV-001
+    severity: medium
+    origin: introduced_by_change
+    location: "doc/design/session-metadata-mcp-edit.md:200-202,237,242,258; src/index.ts:1292-1330; test/issue-56-shared-todo.test.ts:715-718"
+    description: "Rejected session_update can receive applied:true when terminal wrapper audit fails because Todo-gated path sets gated=true."
+    impact: "ok:false conflicts with applied:true, making retry and user-intent handling ambiguous."
+    evidence: "Wrapper uses gated || appliedByTool; existing node_list regression proves gated terminal-audit failure returns applied:true."
+    required_action: "Reject paths must not claim applied:true; only committed updates may; add conflict/update_unavailable composition regressions and define no-op semantics."
+    status: open
+held: []
+unexplored: []
+remaining_risks:
+  - "Generic gated changes could regress existing tools; prefer narrow session_update semantics or explicitly cover generic behavior."
+next_action:
+  - "Design author fixes RDMCP-71-DREV-001, then returns the new immutable HEAD to this same normal reviewer for fix verification."
+  - "Do not merge."

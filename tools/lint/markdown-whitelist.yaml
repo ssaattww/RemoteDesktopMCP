@@ -301,3 +301,21 @@ entries:
     description: 対象リポジトリのホスト名と管理場所。
   - term: lint
     description: 静的な規約や構文の検査を表す一般的な開発用語。
+  - term: Todo
+    description: 作業項目や作業一覧を表す一般的な開発用語。
+  - term: SSRF
+    description: 外部URL取得処理で非公開宛先への接続を防ぐ安全設計で一般的に使われる略称。
+  - term: ラッパー
+    description: 認証、監査、入出力変換などの共通処理で既存処理を包む実装構造を表す用語。
+  - term: スネークケース
+    description: 単語を下線で区切る識別子命名形式を表す用語。
+  - term: スキーマ
+    description: 入力項目やデータ構造と型の定義を表す用語。
+  - term: ハンドラー
+    description: 要求やイベントを受けて処理へ接続する入口を表す用語。
+  - term: ロールバック
+    description: 変更失敗時に直前状態へ戻す処理を表す用語。
+  - term: CI
+    description: 継続的な自動検証を表す一般的な略称。
+  - term: リンク
+    description: セッションが保持する外部URL参照を表す一般的な技術用語。
