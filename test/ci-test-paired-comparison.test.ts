@@ -7,9 +7,11 @@ import { parse } from "yaml";
 import {
   BASELINE_COMMIT,
   CANDIDATE_COMMIT,
+  PREDECLARED_CONTROL_FILES,
   buildPairedSchedule,
   compareRepositoryChanges,
   compareInventories,
+  comparePredeclaredControlBlobs,
   formatFailureDiagnostic,
   formatSummaryError,
   runScheduledSamples,
@@ -69,12 +71,40 @@ test("failure summary output keeps the command label but redacts credentials and
   assert.equal(formatFailureDiagnostic({ status: "success", error: undefined }), "");
 });
 
-test("each file runs B→C, C→B, B→C with six samples and stable pair identities", () => {
-  const schedule = buildPairedSchedule(["test/a.test.ts"]);
-  assert.deepEqual(schedule.map(({ side }) => side), ["baseline", "candidate", "candidate", "baseline", "baseline", "candidate"]);
-  assert.deepEqual(schedule.map(({ pairIndex }) => pairIndex), [1, 1, 2, 2, 3, 3]);
-  assert.deepEqual(schedule.map(({ orderInPair }) => orderInPair), [1, 2, 1, 2, 1, 2]);
-  assert.ok(schedule.every(({ file }) => file === "test/a.test.ts"));
+test("screening uses predeclared controls and records two separate warmups plus six balanced pairs", () => {
+  assert.deepEqual(PREDECLARED_CONTROL_FILES, [
+    "test/independent-transfer-lifecycle.test.ts",
+    "test/tool-root-contracts.test.ts",
+    "test/independent-process-ownership.test.ts",
+  ]);
+  const screeningFiles = [...targetFiles, ...PREDECLARED_CONTROL_FILES];
+  const schedule = buildPairedSchedule(screeningFiles);
+  assert.equal(schedule.length, 70);
+  for (const file of screeningFiles) assert.equal(schedule.filter((sample) => sample.file === file).length, 14);
+  const firstFile = schedule.filter((sample) => sample.file === [...screeningFiles].sort()[0]);
+  assert.deepEqual(firstFile.map(({ phase, side }) => `${phase}:${side}`), [
+    "warmup:baseline", "warmup:candidate",
+    "measured:baseline", "measured:candidate",
+    "measured:candidate", "measured:baseline",
+    "measured:baseline", "measured:candidate",
+    "measured:candidate", "measured:baseline",
+    "measured:baseline", "measured:candidate",
+    "measured:candidate", "measured:baseline",
+  ]);
+  assert.deepEqual(firstFile.slice(2).map(({ pairIndex }) => pairIndex), [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]);
+  assert.deepEqual(firstFile.slice(2).map(({ orderInPair }) => orderInPair), [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]);
+  assert.equal(schedule.filter(({ phase }) => phase === "warmup").length, 10);
+  assert.equal(schedule.filter(({ phase }) => phase === "measured").length, 60);
+});
+
+test("predeclared controls must have identical tracked blob identities on both sides", () => {
+  const baseline = new Map(PREDECLARED_CONTROL_FILES.map((file, index) => [file, { object: `blob-${index}` }]));
+  const candidate = new Map(PREDECLARED_CONTROL_FILES.map((file, index) => [file, { object: `blob-${index}` }]));
+  assert.deepEqual(comparePredeclaredControlBlobs(baseline, candidate), PREDECLARED_CONTROL_FILES.map((file, index) => ({
+    file, baselineObject: `blob-${index}`, candidateObject: `blob-${index}`, identical: true,
+  })));
+  candidate.set(PREDECLARED_CONTROL_FILES[1], { object: "changed-control-blob" });
+  assert.throws(() => comparePredeclaredControlBlobs(baseline, candidate), /predeclared control.*changed|changed.*control/i);
 });
 
 test("scheduled sample loop retains completed records and counts when a later sample throws", async () => {
@@ -96,29 +126,37 @@ test("scheduled sample loop retains completed records and counts when a later sa
   assert.deepEqual(summary.records, ["records/0001.json"]);
 });
 
-test("comparison reports per-side descriptive statistics and control-adjusted target improvement", () => {
+test("screening statistics exclude warmups and report six pairs plus first-side-stratified effects", () => {
+  const measured = (file: string, baseline: number[], candidate: number[]) => [
+    ...Array.from({ length: 6 }, (_unused, index) => ({ file, side: "baseline", phase: "measured", pairIndex: index + 1, orderInPair: index % 2 === 0 ? 1 : 2, status: "success", exitCode: 0, durationMs: baseline[index] })),
+    ...Array.from({ length: 6 }, (_unused, index) => ({ file, side: "candidate", phase: "measured", pairIndex: index + 1, orderInPair: index % 2 === 0 ? 2 : 1, status: "success", exitCode: 0, durationMs: candidate[index] })),
+    { file, side: "baseline", phase: "warmup", pairIndex: null, orderInPair: 1, status: "success", exitCode: 0, durationMs: 9999 },
+    { file, side: "candidate", phase: "warmup", pairIndex: null, orderInPair: 2, status: "success", exitCode: 0, durationMs: 8888 },
+  ];
   const records = [
-    ["target.test.ts", "baseline", 100], ["target.test.ts", "candidate", 80],
-    ["target.test.ts", "candidate", 90], ["target.test.ts", "baseline", 100],
-    ["target.test.ts", "baseline", 120], ["target.test.ts", "candidate", 100],
-    ["control.test.ts", "baseline", 100], ["control.test.ts", "candidate", 90],
-    ["control.test.ts", "candidate", 100], ["control.test.ts", "baseline", 100],
-    ["control.test.ts", "baseline", 100], ["control.test.ts", "candidate", 110],
-  ].map(([file, side, durationMs], index) => ({
-    file, side, pairIndex: Math.floor((index % 6) / 2) + 1, status: "success", exitCode: 0, durationMs,
-  }));
+    ...measured("target.test.ts", [100, 120, 100, 120, 100, 120], [80, 110, 90, 100, 80, 100]),
+    ...measured("control.test.ts", [100, 100, 100, 100, 100, 100], [90, 90, 90, 90, 90, 90]),
+  ];
   const result = summarizeComparison(records, { targets: ["target.test.ts"], controls: ["control.test.ts"] });
-  assert.deepEqual(result.files["target.test.ts"].baseline, { meanMs: 106.66666666666667, medianMs: 100, minMs: 100, maxMs: 120, rangeMs: 20 });
-  assert.deepEqual(result.files["target.test.ts"].candidate, { meanMs: 90, medianMs: 90, minMs: 80, maxMs: 100, rangeMs: 20 });
-  assert.equal(result.files["target.test.ts"].pairedDeltas.length, 3);
-  assert.ok(Math.abs(result.files["target.test.ts"].pairedDeltaMeanMs - 50 / 3) < 1e-10);
+  assert.deepEqual(result.files["target.test.ts"].baseline, { meanMs: 110, medianMs: 110, minMs: 100, maxMs: 120, rangeMs: 20 });
+  assert.deepEqual(result.files["target.test.ts"].candidate, { meanMs: 93.33333333333333, medianMs: 95, minMs: 80, maxMs: 110, rangeMs: 30 });
+  assert.equal(result.files["target.test.ts"].pairedDeltas.length, 6);
+  assert.equal(result.files["target.test.ts"].pairedDeltas[1].deltaMs, 10);
+  assert.equal(result.files["target.test.ts"].pairedDeltas[0].improvementPercent, 20);
+  assert.equal(result.files["target.test.ts"].pairedDeltaMeanMs, 100 / 6);
   assert.equal(result.files["target.test.ts"].pairedDeltaMedianMs, 20);
-  assert.ok(Math.abs(result.files["target.test.ts"].meanPairedImprovementPercent - (20 + 10 + (100 / 6)) / 3) < 1e-10);
-  assert.ok(Math.abs(result.files["target.test.ts"].medianPairedImprovementPercent - 50 / 3) < 1e-10);
+  assert.ok(Math.abs(result.files["target.test.ts"].meanPairedImprovementPercent - 15.277777777777779) < 1e-10);
+  assert.ok(Math.abs(result.files["target.test.ts"].medianPairedImprovementPercent - (50 / 3)) < 1e-10);
+  assert.equal(result.files["target.test.ts"].orderStratifiedEffects.baselineFirst.pairCount, 3);
+  assert.equal(result.files["target.test.ts"].orderStratifiedEffects.candidateFirst.pairCount, 3);
+  assert.equal(result.files["target.test.ts"].orderStratifiedEffects.baselineFirst.meanPairedDeltaMs, 50 / 3);
+  assert.equal(result.files["target.test.ts"].orderStratifiedEffects.candidateFirst.meanPairedDeltaMs, 50 / 3);
+  assert.equal(result.files["target.test.ts"].orderStratifiedEffects.baselineFirst.meanImprovementPercent, 50 / 3);
+  assert.ok(Math.abs(result.files["target.test.ts"].orderStratifiedEffects.candidateFirst.meanImprovementPercent - (125 / 9)) < 1e-10);
   assert.equal(result.controlDistribution.length, 1);
-  assert.equal(result.controlStatistics.medianMs, 0);
-  assert.equal(result.controlsMedianImprovementPercent, 0);
-  assert.ok(Math.abs(result.targets["target.test.ts"].controlAdjustedMedianImprovementPercentagePoints - 50 / 3) < 1e-10);
+  assert.equal(result.files["control.test.ts"].baseline.meanMs, 100);
+  assert.equal(result.controlsMedianImprovementPercent, 10);
+  assert.equal(result.targets["target.test.ts"].controlAdjustedMedianImprovementPercentagePoints, result.files["target.test.ts"].medianPairedImprovementPercent - 10);
   assert.throws(() => summarizeComparison(records.map((record, index) => index === 0 ? { ...record, status: "failure" } : record), {
     targets: ["target.test.ts"], controls: ["control.test.ts"],
   }), /succeed/i);

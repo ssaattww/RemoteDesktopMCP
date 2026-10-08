@@ -13,6 +13,11 @@ export const TARGET_FILES = [
   "test/config-transfer-integrity.test.ts",
   "test/session-filesystem-lifecycle.test.ts",
 ];
+export const PREDECLARED_CONTROL_FILES = [
+  "test/independent-transfer-lifecycle.test.ts",
+  "test/tool-root-contracts.test.ts",
+  "test/independent-process-ownership.test.ts",
+];
 export const EXCLUDED_FILES = [];
 export const EXPECTED_COMMON_TEST_FILE_COUNT = 31;
 export const EXPECTED_CONTROL_FILE_COUNT = 29;
@@ -102,17 +107,31 @@ export function compareRepositoryChanges(changedPaths, { targetFiles = TARGET_FI
   return targets;
 }
 
+export function comparePredeclaredControlBlobs(baselineBlobs, candidateBlobs) {
+  return PREDECLARED_CONTROL_FILES.map((file) => {
+    const baselineObject = baselineBlobs.get(file)?.object;
+    const candidateObject = candidateBlobs.get(file)?.object;
+    if (!baselineObject || !candidateObject || baselineObject !== candidateObject) {
+      throw new Error(`Predeclared control test content changed or is missing: ${file}`);
+    }
+    return { file, baselineObject, candidateObject, identical: true };
+  });
+}
+
 export function buildPairedSchedule(files) {
   if (!Array.isArray(files) || !files.length) throw new Error("Paired comparison requires at least one file.");
   const sorted = [...files].sort(ordinal);
   if (new Set(sorted).size !== sorted.length || sorted.some((file) => !/^test\/(?:[^/]+\/)*[^/]+\.test\.ts$/.test(file))) {
     throw new Error("Paired schedule contains an invalid or duplicate file.");
   }
-  const order = ["baseline", "candidate", "candidate", "baseline", "baseline", "candidate"];
+  const pairOrder = ["baseline", "candidate", "candidate", "baseline", "baseline", "candidate", "candidate", "baseline", "baseline", "candidate", "candidate", "baseline"];
   const schedule = [];
   for (const file of sorted) {
-    for (let index = 0; index < order.length; index++) {
-      schedule.push({ file, side: order[index], pairIndex: Math.floor(index / 2) + 1, orderInPair: index % 2 + 1 });
+    for (const [index, side] of ["baseline", "candidate"].entries()) {
+      schedule.push({ file, side, phase: "warmup", pairIndex: null, orderInPair: index + 1 });
+    }
+    for (let index = 0; index < pairOrder.length; index++) {
+      schedule.push({ file, side: pairOrder[index], phase: "measured", pairIndex: Math.floor(index / 2) + 1, orderInPair: index % 2 + 1 });
     }
   }
   return schedule;
@@ -139,23 +158,31 @@ export function summarizeComparison(records, { targets, controls }) {
   const files = {};
   for (const file of requested) {
     const samples = records.filter((record) => record.file === file);
-    if (samples.length !== 6 || samples.some((record) => record.status !== "success" || record.exitCode !== 0)) {
-      throw new Error(`All six paired samples for ${file} must succeed.`);
+    const measured = samples.filter((record) => record.phase === "measured");
+    const warmups = samples.filter((record) => record.phase === "warmup");
+    if (samples.length !== 14 || measured.length !== 12 || warmups.length !== 2
+      || ["baseline", "candidate"].some((side) => warmups.filter((record) => record.side === side).length !== 1)
+      || samples.some((record) => record.status !== "success" || record.exitCode !== 0)) {
+      throw new Error(`Both warmups and all twelve measured samples for ${file} must succeed.`);
     }
     const perSide = Object.fromEntries(["baseline", "candidate"].map((side) => {
-      const values = samples.filter((record) => record.side === side).map((record) => record.durationMs);
-      if (values.length !== 3) throw new Error(`Three ${side} samples are required for ${file}.`);
+      const values = measured.filter((record) => record.side === side).map((record) => record.durationMs);
+      if (values.length !== 6) throw new Error(`Six measured ${side} samples are required for ${file}.`);
       return [side, describe(values)];
     }));
-    const pairedDeltas = [1, 2, 3].map((pairIndex) => {
-      const pair = samples.filter((record) => record.pairIndex === pairIndex);
+    const pairedDeltas = [1, 2, 3, 4, 5, 6].map((pairIndex) => {
+      const pair = measured.filter((record) => record.pairIndex === pairIndex);
       const baseline = pair.find((record) => record.side === "baseline");
       const candidate = pair.find((record) => record.side === "candidate");
-      if (pair.length !== 2 || !baseline || !candidate || baseline.durationMs <= 0 || candidate.durationMs <= 0) {
+      if (pair.length !== 2 || !baseline || !candidate || baseline.durationMs <= 0 || candidate.durationMs <= 0
+        || ![1, 2].includes(baseline.orderInPair) || ![1, 2].includes(candidate.orderInPair)
+        || baseline.orderInPair === candidate.orderInPair
+        || (pairIndex % 2 === 1 ? baseline.orderInPair !== 1 : candidate.orderInPair !== 1)) {
         throw new Error(`Paired sample ${pairIndex} is incomplete for ${file}.`);
       }
       return {
         pairIndex,
+        firstSide: baseline.orderInPair === 1 ? "baseline" : "candidate",
         baselineMs: baseline.durationMs,
         candidateMs: candidate.durationMs,
         deltaMs: baseline.durationMs - candidate.durationMs,
@@ -164,6 +191,19 @@ export function summarizeComparison(records, { targets, controls }) {
     });
     const pairedImprovementValues = pairedDeltas.map(({ improvementPercent }) => improvementPercent);
     const pairedDeltaValues = pairedDeltas.map(({ deltaMs }) => deltaMs);
+    const orderStratifiedEffects = Object.fromEntries(["baseline", "candidate"].map((firstSide) => {
+      const pairs = pairedDeltas.filter((pair) => pair.firstSide === firstSide);
+      if (pairs.length !== 3) throw new Error(`Three ${firstSide}-first measured pairs are required for ${file}.`);
+      const deltas = pairs.map(({ deltaMs }) => deltaMs);
+      const improvements = pairs.map(({ improvementPercent }) => improvementPercent);
+      return [firstSide === "baseline" ? "baselineFirst" : "candidateFirst", {
+        pairCount: pairs.length,
+        meanPairedDeltaMs: describe(deltas, { positiveOnly: false }).meanMs,
+        medianPairedDeltaMs: median(deltas),
+        meanImprovementPercent: describe(improvements, { positiveOnly: false }).meanMs,
+        medianImprovementPercent: median(improvements),
+      }];
+    }));
     files[file] = {
       ...perSide,
       pairedDeltas,
@@ -171,6 +211,7 @@ export function summarizeComparison(records, { targets, controls }) {
       pairedDeltaMedianMs: median(pairedDeltaValues),
       meanPairedImprovementPercent: pairedImprovementValues.reduce((sum, value) => sum + value, 0) / pairedImprovementValues.length,
       medianPairedImprovementPercent: median(pairedImprovementValues),
+      orderStratifiedEffects,
     };
   }
   const controlDistribution = controls.map((file) => ({ file, medianImprovementPercent: files[file].medianPairedImprovementPercent }));
@@ -181,7 +222,12 @@ export function summarizeComparison(records, { targets, controls }) {
     medianPairedImprovementPercent: files[file].medianPairedImprovementPercent,
     controlAdjustedMedianImprovementPercentagePoints: files[file].medianPairedImprovementPercent - controlsMedianImprovementPercent,
   }]));
-  return { files, controlDistribution, controlStatistics, controlsMedianImprovementPercent, targets: targetSummary };
+  return {
+    screeningOnly: true,
+    warmupsExcluded: true,
+    claimsNotEstablished: ["all_test_files_effect", "full_workflow_duration", "180_second_target"],
+    files, controlDistribution, controlStatistics, controlsMedianImprovementPercent, targets: targetSummary,
+  };
 }
 
 function execute(command, args, { cwd, env = process.env, shell = false, stdoutPath, stderrPath, timeoutMs } = {}) {
@@ -302,12 +348,16 @@ export async function runScheduledSamples({ schedule, summary, recordPathForInde
   const records = [];
   summary.sampleCount = 0;
   summary.successfulSampleCount = 0;
+  summary.warmupSampleCount = 0;
+  summary.measuredSampleCount = 0;
   summary.records = [];
   for (let index = 0; index < schedule.length; index++) {
     const record = await runSample(schedule[index], index + 1);
     records.push(record);
     summary.sampleCount = records.length;
     summary.successfulSampleCount = records.filter((sample) => sample.status === "success").length;
+    summary.warmupSampleCount = records.filter((sample) => sample.phase === "warmup").length;
+    summary.measuredSampleCount = records.filter((sample) => sample.phase === "measured").length;
     summary.records = records.map((_sample, recordIndex) => recordPathForIndex(recordIndex + 1));
   }
   return records;
@@ -332,7 +382,9 @@ async function runTestSample({ sample, cwd, runId, attempt, jobId, environment, 
     status,
     file: sample.file,
     side: sample.side,
+    phase: sample.phase,
     commit: sample.commit,
+    scheduleIndex: index,
     pairIndex: sample.pairIndex,
     orderInPair: sample.orderInPair,
     startedAt,
@@ -356,7 +408,7 @@ async function runTestSample({ sample, cwd, runId, attempt, jobId, environment, 
     stderrFile: path.relative(recordDirectory, stderrPath).replaceAll("\\", "/"),
   };
   await writeFile(path.join(recordDirectory, `${String(index).padStart(4, "0")}.json`), `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" });
-  process.stdout.write(`${status} ${sample.file} ${sample.side} ${Math.round(durationMs)}ms\n`);
+  process.stdout.write(`${sample.phase} ${status} ${sample.file} ${sample.side} ${Math.round(durationMs)}ms\n`);
   return record;
 }
 
@@ -402,15 +454,30 @@ async function runPairedComparison() {
     const candidateTests = await trackedTests(root, CANDIDATE_COMMIT);
     const changed = (await gitText(root, ["diff", "--no-renames", "--name-only", BASELINE_COMMIT, CANDIDATE_COMMIT, "--", "test"])).split(/\r?\n/u).filter(Boolean).sort(ordinal);
     const inventory = compareInventories(baseTests, candidateTests, { changedFiles: changed, excludedFiles: [] });
+    for (const file of PREDECLARED_CONTROL_FILES) {
+      if (!inventory.controls.includes(file)) throw new Error(`Predeclared screening control is absent from the common inventory: ${file}`);
+    }
     const baseBlobs = await treeBlobs(root, BASELINE_COMMIT);
     const candidateBlobs = await treeBlobs(root, CANDIDATE_COMMIT);
     for (const file of inventory.controls) if (baseBlobs.get(file)?.object !== candidateBlobs.get(file)?.object) throw new Error(`Control test content changed unexpectedly: ${file}`);
+    const predeclaredControlBlobIdentities = comparePredeclaredControlBlobs(baseBlobs, candidateBlobs);
     for (const file of inventory.targets) if (baseBlobs.get(file)?.object === candidateBlobs.get(file)?.object) throw new Error(`Expected target test did not change: ${file}`);
     for (const file of inventory.excluded) if (baseBlobs.get(file)?.object === candidateBlobs.get(file)?.object) throw new Error(`Expected excluded difference is absent: ${file}`);
     const baseLock = await hashAt(root, BASELINE_COMMIT, "package-lock.json");
     const candidateLock = await hashAt(root, CANDIDATE_COMMIT, "package-lock.json");
     if (!Buffer.from(baseLock).equals(Buffer.from(candidateLock))) throw new Error("Pinned commits have different package-lock.json bytes.");
     summary.inventory = inventory;
+    summary.screening = {
+      mode: "screening_only",
+      targets: TARGET_FILES,
+      predeclaredControls: PREDECLARED_CONTROL_FILES,
+      predeclaredControlBlobIdentities,
+      warmupsPerSidePerFile: 1,
+      measuredPairsPerFile: 6,
+      expectedProcessRuns: 70,
+      claimsNotEstablished: ["all_test_files_effect", "full_workflow_duration", "180_second_target"],
+      manifestApplied: false,
+    };
     summary.packageLockSha256 = sha256(baseLock);
     summary.changedRepositoryPaths = changedRepositoryPaths;
     summary.runtimeChangedPaths = runtimeChangedPaths;
@@ -441,8 +508,14 @@ async function runPairedComparison() {
     const driverFile = await readFile(fileURLToPath(import.meta.url));
     summary.driverSha256 = sha256(driverFile);
     const recordEnvironment = { ...baselineEnvironment };
-    const schedule = buildPairedSchedule([...inventory.targets, ...inventory.controls]);
+    const screeningInventory = { ...inventory, controls: PREDECLARED_CONTROL_FILES };
+    const schedule = buildPairedSchedule([...inventory.targets, ...screeningInventory.controls]);
     summary.scheduleSampleCount = schedule.length;
+    summary.warmupScheduleSampleCount = schedule.filter((sample) => sample.phase === "warmup").length;
+    summary.measuredScheduleSampleCount = schedule.filter((sample) => sample.phase === "measured").length;
+    if (schedule.length !== 70 || summary.warmupScheduleSampleCount !== 10 || summary.measuredScheduleSampleCount !== 60) {
+      throw new Error("Screening schedule must contain 10 warmups and 60 measured samples.");
+    }
     const records = await runScheduledSamples({
       schedule,
       summary,
@@ -454,7 +527,7 @@ async function runPairedComparison() {
       },
     });
     if (summary.successfulSampleCount !== schedule.length) throw new Error("One or more paired test samples failed; comparison statistics are not valid.");
-    summary.statistics = summarizeComparison(records.map((record) => ({ ...record, durationMs: record.monotonicDurationMs })), inventory);
+    summary.statistics = summarizeComparison(records.map((record) => ({ ...record, durationMs: record.monotonicDurationMs })), screeningInventory);
     summary.status = "success";
   } catch (error) {
     summary.error = formatSummaryError(error instanceof Error ? error.message : String(error));
