@@ -125,6 +125,13 @@ URLと題名の意味検証を再実装しない。意味検証は`updateSession
 `version_conflict`を自動再送しない。利用者は`session_list`で最新状態と版を読み直し、
 更新意図を再評価した後に新しい`expected_version`で明示的に再実行する。
 
+共有処理が拒否結果を返した後にMCP共通ラッパーの終端監査だけが失敗した場合も、
+更新の拒否を成功へ読み替えない。応答は元の`ok: false`と`error`（競合時は
+`current_version`も）を保ち、`audit_warning: true`と`applied: false`を加える。
+`session_update`は通常のTodo更新期限確認対象だが、共通ラッパーの期限確認に伴う
+`applied: true`でこの明示的な拒否結果を上書きしない。この優先規則は
+`session_update`の適用結果に限り、ほかの操作に対する共通ラッパーの結果規則は変えない。
+
 緊急停止とTodo更新期限の拒否は、共有MCPラッパーの既存規則を維持する。
 `session_update`をTodo更新期限の例外操作には追加しない。
 
@@ -196,10 +203,21 @@ MCPスキーマで拒否された呼び出しを監査する`rejectedArgumentPro
 
 共有処理の更新監査が失敗した場合は既存ロールバックを使い、
 `ok: false`、`error: update_unavailable`として返す。
+更新は保存されず、`version`も変わらない。この結果の後に共通ラッパーの
+`operation.succeeded`監査も失敗した場合は、上記の拒否優先規則により
+`audit_warning: true`と`applied: false`を加える。
 
 共有処理の更新監査は成功したが、MCP共通ラッパーの終端監査だけが失敗した場合は、
-既に適用済みの更新を巻き戻さない。`appliedByTool`に`session_update`の
-`ok: true`を追加し、`audit_warning: true`と`applied: true`を返して適用状態を明示する。
+既に適用済みの更新を巻き戻さない。共有処理が実変更を確定した場合は、
+`appliedByTool`に`session_update`の`ok: true`を追加し、
+`audit_warning: true`と`applied: true`を返す。`applied: true`は
+`ok: true`かつ実変更が保存され、`session.metadata.updated`も成功した場合に限る。
+同値更新は成功（`ok: true`）だが変更を適用していないため、終端監査失敗時の
+`applied`は`false`とする。実変更がない成功では`version`を増やさず、更新監査記録も作らない。
+
+終端監査失敗時の`session_update`応答では、この操作固有の更新結果を共通ラッパーの
+汎用`gated`判定より優先する。したがって`ok: false`は常に`applied: false`となり、
+`applied: true`は確定済みの実変更にだけ付く。Todo更新期限の判定や他操作の共通結果規則は変更しない。
 
 ## 終了、期限切れ、緊急停止
 
@@ -239,9 +257,10 @@ MCP側では公開契約と共通処理利用の境界を重点的に検証す�
 9. Todo更新期限が切れている場合は共有処理を呼ばず`TODO_STALE`になる。
 10. 作業ディレクトリ変更前から走るプロセスは元の`workingDirectorySnapshot`を保持し、変更後の新規プロセスは新しい値を使う。
 11. `session.metadata.updated`の監査失敗では更新が戻り、終了などの終端遷移をロールバックが打ち消さない。
-12. MCP共通ラッパーの終端監査だけが失敗した場合は、成功済み更新について`audit_warning`と`applied: true`を返す。
-13. スキーマ拒否、成功、競合、URL・題名更新の監査と診断に更新値が含まれない。
-14. 更新成功後の`session_update`結果、`session_list`、`/api/console-state`で値と`version`が一致する。
+12. Todo更新期限の確認後に発生した`version_conflict`と`update_unavailable`について、共通ラッパーの`operation.succeeded`監査も失敗させ、元の`ok: false`、エラー分類、競合時の`current_version`を維持して`audit_warning: true`と`applied: false`を返す。拒否状態が保存されず、版も変わらないことを確認する。
+13. 実変更と`session.metadata.updated`が成功した後に終端監査を失敗させ、`ok: true`、`audit_warning: true`、`applied: true`を確認する。同値更新成功後に同じ失敗を起こす状況では`ok: true`、`audit_warning: true`、`applied: false`を確認し、版と更新監査記録が増えないことを確認する。
+14. スキーマ拒否、成功、競合、URL・題名更新の監査と診断に更新値が含まれない。
+15. 更新成功後の`session_update`結果、`session_list`、`/api/console-state`で値と`version`が一致する。
 
 `test/tool-root-contracts.test.ts`の必須MCP操作一覧も更新し、
 既存の`session_open`、`session_list`、`session_close`互換性を回帰する。
