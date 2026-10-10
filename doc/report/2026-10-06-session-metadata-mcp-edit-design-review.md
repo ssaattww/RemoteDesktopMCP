@@ -109,7 +109,7 @@ RDMCP-71-DREV-001 の限定再レビューを開始する前に、次を同一�
 
 ## verdict
 
-**fail**
+fail
 
 必須finding `RDMCP-71-DREV-001` Medium が未修正のため、設計を確定できない。
 
