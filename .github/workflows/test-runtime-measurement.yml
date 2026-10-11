@@ -11,6 +11,7 @@ on:
         options:
           - individual
           - paired-comparison
+          - paired-startup-diagnostic
   pull_request:
     types: [labeled]
 
@@ -31,7 +32,7 @@ jobs:
        github.event.label.name == 'ci-measure-runtime' &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: ${{ inputs.mode == 'paired-startup-diagnostic' && 10 || 360 }}
     permissions:
       contents: read
       actions: read
@@ -39,11 +40,11 @@ jobs:
       CI_RUNNER_LABEL: windows-latest
     steps:
       - name: Checkout
-        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'paired-comparison'
+        if: github.event_name != 'workflow_dispatch' || !(inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic')
         uses: actions/checkout@v4
 
       - name: Checkout full history for paired comparison
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison'
+        if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic')
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -71,7 +72,7 @@ jobs:
         if: >-
           steps.measurement-gate.outcome != 'failure' &&
           steps.measurement-gate.outputs.skip != 'true' &&
-          !(github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison')
+          !(github.event_name == 'workflow_dispatch' && (inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic'))
         run: npm ci
 
       - name: Resolve workflow metadata
@@ -89,7 +90,7 @@ jobs:
         if: >-
           steps.measurement-gate.outcome != 'failure' &&
           steps.measurement-gate.outputs.skip != 'true' &&
-          !(github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison')
+          !(github.event_name == 'workflow_dispatch' && (inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic'))
         shell: pwsh
         run: |
           $env:CI_NPM_VERSION = (& npm.cmd --version).Trim()
@@ -108,12 +109,22 @@ jobs:
           & node scripts/ci-test-paired-comparison.mjs
           exit $LASTEXITCODE
 
+      - name: Run bounded paired startup diagnostic
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-startup-diagnostic'
+        shell: pwsh
+        env:
+          CI_RUNNER_LABEL: windows-latest
+        run: |
+          New-Item -ItemType Directory -Path ci-artifacts/paired-startup-diagnostic -Force | Out-Null
+          & node scripts/ci-test-paired-startup-diagnostic.mjs
+          exit $LASTEXITCODE
+
       - name: Upload measurement evidence
         if: >-
           always() &&
           steps.measurement-gate.outcome != 'failure' &&
           steps.measurement-gate.outputs.skip != 'true' &&
-          !(github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison')
+          !(github.event_name == 'workflow_dispatch' && (inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic'))
         uses: actions/upload-artifact@v4
         with:
           name: test-runtime-measurement-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
@@ -124,10 +135,10 @@ jobs:
           retention-days: 14
 
       - name: Upload paired comparison evidence
-        if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison'
+        if: always() && github.event_name == 'workflow_dispatch' && (inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic')
         uses: actions/upload-artifact@v4
         with:
-          name: test-runtime-paired-comparison-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          name: test-runtime-paired-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           path: ci-artifacts/paired-comparison
           if-no-files-found: warn
           retention-days: 14
