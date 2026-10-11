@@ -6,8 +6,9 @@ export type StartupDiagnosticEvent =
   | "dc_list_tools_completed" | "dc_list_tools_failed" | "dc_roots_started" | "dc_roots_completed"
   | "dc_roots_failed" | "dc_ready" | "dc_transport_closed" | "dc_transport_error" | "bootstrap_started"
   | "bootstrap_entry_import_started" | "bootstrap_entry_import_succeeded" | "bootstrap_entry_import_failed"
-  | "bootstrap_failed" | "test_started" | "test_completed" | "diagnostic_timeout" | "tree_termination_verified"
-  | "tree_termination_unknown";
+  | "bootstrap_failed" | "test_started" | "test_completed" | "test_case_result" | "test_results_collection"
+  | "diagnostic_timeout" | "tree_termination_verified" | "tree_termination_unknown";
+export const STARTUP_DIAGNOSTIC_TEST_CASE_IDS: readonly string[];
 export function diagnosticEventPath(directory: string, producerId: string): string;
 export function emitStartupDiagnostic(event: StartupDiagnosticEvent, fields?: Record<string, unknown>): void;
 export function importEntryWithSafeDiagnosticMarkers<T>(
@@ -28,3 +29,6 @@ export function safeStartupError(error: unknown): {
   errorCode: string;
   classification: "spawn_failure" | "entry_import_failure" | "initialize_disconnect" | "other";
 };
+export default function startupDiagnosticTestReporter(
+  source: AsyncIterable<unknown>,
+): AsyncGenerator<string, void, unknown>;

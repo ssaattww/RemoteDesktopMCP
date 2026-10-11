@@ -13,7 +13,7 @@ import {
   writeSummaryCheckpoint,
 } from "./ci-test-paired-comparison.mjs";
 import { fileURLToPath } from "node:url";
-import { diagnosticEventPath } from "./ci-test-paired-startup-observer.mjs";
+import { diagnosticEventPath, STARTUP_DIAGNOSTIC_TEST_CASE_IDS } from "./ci-test-paired-startup-observer.mjs";
 
 export const STARTUP_DIAGNOSTIC_JOB_BUDGET_MS = 18 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS = 4 * 60 * 1000;
@@ -44,6 +44,10 @@ const observerTypesPath = path.join(path.dirname(thisFile), "ci-test-paired-star
 const SIDE_IDENTITIES = Object.freeze({ baseline: BASELINE_COMMIT, candidate: CANDIDATE_COMMIT });
 const NODE_ERROR_CODES = new Set(["ENOENT", "EACCES", "EPERM", "EISDIR", "ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_UNKNOWN_FILE_EXTENSION", "ERR_INVALID_MODULE_SPECIFIER", "ERR_UNSUPPORTED_DIR_IMPORT", "ERR_REQUIRE_ESM"]);
 const SAFE_PROCESS_SIGNALS = new Set(["SIGABRT", "SIGBREAK", "SIGFPE", "SIGILL", "SIGINT", "SIGSEGV", "SIGTERM", "SIGKILL"]);
+const SAFE_STARTUP_ERROR_CLASSES = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "McpError", "SystemError", "unknown"]);
+const SAFE_TEST_ERROR_CLASSES = new Set([...SAFE_STARTUP_ERROR_CLASSES, "AssertionError"]);
+const SAFE_TEST_ERROR_CODES = new Set([...NODE_ERROR_CODES, "EBUSY", "EEXIST", "EXDEV", "ENOTSUP", "ERR_ASSERTION", "ERR_INVALID_ARG_TYPE", "ERR_OUT_OF_RANGE", "ABORT_ERR"]);
+const SAFE_TEST_COLLECTION_STATUSES = new Set(["running", "complete", "incomplete", "invalid", "failed", "unavailable"]);
 const SAFE_TERMINATION_REASONS = new Set([
   "not_attempted", "not_applicable_no_child", "owned_child_handle_unavailable", "direct_child_already_closed",
   "direct_child_signal_failed", "direct_child_close_observed", "direct_child_close_unconfirmed", "unknown",
@@ -235,21 +239,23 @@ export function diagnosticWorktreesMayBeMutated({ preserveWorktrees, termination
 }
 
 export function validateDiagnosticRow(row, expectedIdentity, previousSequence = 0) {
-  const allowedKeys = new Set(["side", "runId", "sha", "seq", "event", "phase", "classification", "errorClass", "errorCode", "role", "present", "outcome", "exitCode", "signal", "argsShape", "cwdRole", "envPolicy", "shell"]);
+  const allowedKeys = new Set(["side", "runId", "sha", "seq", "event", "phase", "classification", "errorClass", "errorCode", "role", "present", "outcome", "exitCode", "signal", "argsShape", "cwdRole", "envPolicy", "shell", "caseId", "collectionStatus"]);
   const allowedEvents = new Set([
     "driver_started", "npm_ci_started", "npm_ci_completed", "overlay_applied", "overlay_restored", "overlay_restore_skipped",
     "fixture_prepare_started", "fixture_prepare_ready", "fixture_prepare_failed", "fixture_initialize_started", "fixture_initialize_failed", "fixture_cleanup_started", "fixture_cleanup_completed",
     "dc_transport_configured", "dc_connect_started", "dc_connect_completed", "dc_connect_failed", "dc_list_tools_started", "dc_list_tools_completed", "dc_list_tools_failed",
     "dc_roots_started", "dc_roots_completed", "dc_roots_failed", "dc_ready", "dc_transport_closed", "dc_transport_error", "bootstrap_started", "diagnostic_timeout", "tree_termination_verified", "tree_termination_unknown",
-    "bootstrap_entry_import_started", "bootstrap_entry_import_succeeded", "bootstrap_entry_import_failed", "bootstrap_failed", "direct_child_termination_verified", "test_started", "test_completed",
+    "bootstrap_entry_import_started", "bootstrap_entry_import_succeeded", "bootstrap_entry_import_failed", "bootstrap_failed", "direct_child_termination_verified", "test_started", "test_completed", "test_case_result", "test_results_collection",
   ]);
   if (!row || typeof row !== "object" || Array.isArray(row) || Object.keys(row).some((key) => !allowedKeys.has(key))) return false;
   if (row.side !== expectedIdentity.side || row.runId !== expectedIdentity.runId || row.sha !== expectedIdentity.sha
     || !Number.isSafeInteger(row.seq) || row.seq <= previousSequence || !allowedEvents.has(row.event)) return false;
   if (row.phase !== undefined && !new Set(["fixture", "fixture_workspace", "fixture_validation_directory", "fixture_validation_path_validation", "fixture_base_directory", "fixture_base_path_validation", "fixture_root_data_directories", "fixture_private_storage", "fixture_service_construction", "initialize", "transport_connect", "list_tools", "root_verification", "bootstrap", "config_manager", "ownership_bridge", "terminal_manager", "entry_import", "cleanup", "npm_ci", "test", "overlay_restore"]).has(row.phase)) return false;
   if (row.classification !== undefined && !new Set(["spawn_failure", "entry_import_failure", "initialize_disconnect", "other", "unknown"]).has(row.classification)) return false;
-  if (row.errorClass !== undefined && !new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "McpError", "SystemError", "unknown"]).has(row.errorClass)) return false;
-  if (row.errorCode !== undefined && row.errorCode !== "unknown" && !NODE_ERROR_CODES.has(row.errorCode)) return false;
+  const allowedErrorClasses = row.event === "test_case_result" ? SAFE_TEST_ERROR_CLASSES : SAFE_STARTUP_ERROR_CLASSES;
+  const allowedErrorCodes = row.event === "test_case_result" ? SAFE_TEST_ERROR_CODES : NODE_ERROR_CODES;
+  if (row.errorClass !== undefined && !allowedErrorClasses.has(row.errorClass)) return false;
+  if (row.errorCode !== undefined && row.errorCode !== "unknown" && !allowedErrorCodes.has(row.errorCode)) return false;
   if (row.role !== undefined && !new Set(["node_exec_path", "bootstrap", "dc_entry", "fixture_config", "test_worktree"]).has(row.role)) return false;
   if (row.present !== undefined && typeof row.present !== "boolean") return false;
   if (row.outcome !== undefined && !new Set(["success", "failure", "timeout", "unknown"]).has(row.outcome)) return false;
@@ -259,7 +265,70 @@ export function validateDiagnosticRow(row, expectedIdentity, previousSequence = 
   if (row.cwdRole !== undefined && row.cwdRole !== "test_worktree") return false;
   if (row.envPolicy !== undefined && row.envPolicy !== "process_env_minus_credential_blocklist") return false;
   if (row.shell !== undefined && typeof row.shell !== "boolean") return false;
+  if (row.caseId !== undefined && !STARTUP_DIAGNOSTIC_TEST_CASE_IDS.includes(row.caseId)) return false;
+  if (row.collectionStatus !== undefined && !SAFE_TEST_COLLECTION_STATUSES.has(row.collectionStatus)) return false;
+  if (row.event === "test_case_result") {
+    const testCaseKeys = new Set(["side", "runId", "sha", "seq", "event", "phase", "caseId", "outcome", "errorClass", "errorCode"]);
+    if (Object.keys(row).some((key) => !testCaseKeys.has(key)) || row.phase !== "test"
+      || !STARTUP_DIAGNOSTIC_TEST_CASE_IDS.includes(row.caseId) || !["success", "failure"].includes(row.outcome)) return false;
+    if (row.outcome === "success" && (row.errorClass !== undefined || row.errorCode !== undefined)) return false;
+    if (row.outcome === "failure" && (!SAFE_TEST_ERROR_CLASSES.has(row.errorClass)
+      || (row.errorCode !== "unknown" && !SAFE_TEST_ERROR_CODES.has(row.errorCode)))) return false;
+  }
+  if (row.event === "test_results_collection") {
+    const collectionKeys = new Set(["side", "runId", "sha", "seq", "event", "phase", "collectionStatus"]);
+    if (Object.keys(row).some((key) => !collectionKeys.has(key)) || row.phase !== "test"
+      || !SAFE_TEST_COLLECTION_STATUSES.has(row.collectionStatus)) return false;
+  }
   return true;
+}
+
+export function parseStartupTestReporterOutput(stdout, { truncated = false } = {}) {
+  if (typeof stdout !== "string") return { status: "unavailable", results: [] };
+  const expected = new Set(STARTUP_DIAGNOSTIC_TEST_CASE_IDS);
+  const seen = new Set();
+  const results = [];
+  let terminalStatus;
+  let invalid = false;
+  const lines = stdout.split(/\r?\n/u).filter(Boolean);
+  for (const line of lines) {
+    let record;
+    try { record = JSON.parse(line); } catch { invalid = true; continue; }
+    if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.kind !== "string") { invalid = true; continue; }
+    if (record.kind === "case") {
+      const expectedKeys = record.outcome === "failure"
+        ? ["kind", "caseId", "outcome", "errorClass", "errorCode"]
+        : ["kind", "caseId", "outcome"];
+      if (Object.keys(record).sort().join("|") !== expectedKeys.sort().join("|")
+        || !expected.has(record.caseId) || !["success", "failure"].includes(record.outcome)
+        || terminalStatus !== undefined || seen.has(record.caseId)
+        || (record.outcome === "failure" && (!SAFE_TEST_ERROR_CLASSES.has(record.errorClass) || (record.errorCode !== "unknown" && !SAFE_TEST_ERROR_CODES.has(record.errorCode))))) {
+        invalid = true;
+        continue;
+      }
+      seen.add(record.caseId);
+      results.push(record.outcome === "failure"
+        ? { caseId: record.caseId, outcome: record.outcome, errorClass: record.errorClass, errorCode: record.errorCode }
+        : { caseId: record.caseId, outcome: record.outcome });
+      continue;
+    }
+    if (record.kind === "collection") {
+      if (Object.keys(record).sort().join("|") !== "collectionStatus|kind" || terminalStatus !== undefined
+        || !["complete", "incomplete", "invalid"].includes(record.collectionStatus)) {
+        invalid = true;
+        continue;
+      }
+      terminalStatus = record.collectionStatus;
+      continue;
+    }
+    invalid = true;
+  }
+  if (truncated) return { status: "incomplete", results };
+  if (invalid || terminalStatus === "invalid") return { status: "invalid", results };
+  if (terminalStatus !== "complete" || seen.size !== expected.size) {
+    return { status: lines.length === 0 ? "unavailable" : "incomplete", results };
+  }
+  return { status: "complete", results };
 }
 
 function normalizeSource(text) {
@@ -411,9 +480,13 @@ export async function restoreOverlayFiles(overlays, { read = readFile, write = w
 export async function readSafeDiagnosticEvents(file, identity) {
   const text = await readFile(file, "utf8");
   let previousSequence = 0;
-  const rows = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  let rows;
+  try { rows = text.split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+  catch { throw Object.assign(new Error("Diagnostic sidecar JSON is invalid."), { diagnosticClass: "sidecar_invalid" }); }
   for (const row of rows) {
-    if (!validateDiagnosticRow(row, identity, previousSequence)) throw new Error("Diagnostic sidecar contains an unknown or unsafe record.");
+    if (!validateDiagnosticRow(row, identity, previousSequence)) {
+      throw Object.assign(new Error("Diagnostic sidecar contains an unknown or unsafe record."), { diagnosticClass: "sidecar_invalid" });
+    }
     previousSequence = row.seq;
   }
   return rows;
@@ -440,6 +513,7 @@ async function childProcess(command, args, {
   shell = false,
   deadline,
   captureStdout = false,
+  captureStdoutMaxBytes = Number.POSITIVE_INFINITY,
   allowPostDeadline = false,
   timeoutMsOverride,
   processStartedAt,
@@ -467,6 +541,10 @@ async function childProcess(command, args, {
     let resolveClosed;
     const childClose = new Promise((resolveClose) => { resolveClosed = resolveClose; });
     const chunks = [];
+    const stdoutLimit = Number.isFinite(captureStdoutMaxBytes) && captureStdoutMaxBytes >= 0
+      ? Math.floor(captureStdoutMaxBytes) : Number.POSITIVE_INFINITY;
+    let capturedStdoutBytes = 0;
+    let stdoutTruncated = false;
     let done = false;
     let timer;
     const finish = (result) => {
@@ -491,9 +569,16 @@ async function childProcess(command, args, {
         child,
         childClose,
         processDiagnostics: diagnostics,
+        stdoutTruncated,
       });
     };
-    if (captureStdout) child.stdout?.on("data", (chunk) => chunks.push(chunk));
+    if (captureStdout) child.stdout?.on("data", (chunk) => {
+      const remainingCapture = Math.max(0, stdoutLimit - capturedStdoutBytes);
+      const length = Math.min(remainingCapture, chunk.length);
+      if (length > 0) chunks.push(chunk.subarray(0, length));
+      capturedStdoutBytes += length;
+      if (length < chunk.length) stdoutTruncated = true;
+    });
     else child.stdout?.on("data", () => undefined);
     child.stderr?.on("data", () => undefined);
     child.once("spawn", () => {
@@ -642,9 +727,16 @@ async function applyOverlay(target, side, runId, register) {
   return overlays;
 }
 
-async function restoreSidecars(target, artifactRoot, side, identity) {
+export async function restoreSidecars(target, artifactRoot, side, identity) {
   const sourceDirectory = path.join(target, "ci-artifacts", "paired-startup-diagnostic");
-  const names = (await readdir(sourceDirectory)).filter((name) => /^events-(?:driver|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/u.test(name)).sort();
+  let names;
+  try {
+    names = (await readdir(sourceDirectory)).filter((name) => /^events-(?:driver|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/u.test(name)).sort();
+  } catch (error) {
+    if (error?.code === "ENOENT") return { status: "missing", eventCount: 0, producerCount: 0 };
+    throw error;
+  }
+  if (names.length === 0) return { status: "missing", eventCount: 0, producerCount: 0 };
   let eventCount = 0;
   for (const name of names) {
     const from = path.join(sourceDirectory, name);
@@ -656,7 +748,7 @@ async function restoreSidecars(target, artifactRoot, side, identity) {
     if (copied.length !== rows.length) throw new Error("Copied diagnostic sidecar failed verification.");
     eventCount += rows.length;
   }
-  return { eventCount, producerCount: names.length };
+  return { status: eventCount > 0 ? "complete" : "missing", eventCount, producerCount: names.length };
 }
 
 export function diagnosticOverlayIdentity(worktree, overlays) {
@@ -691,8 +783,9 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
     },
     sampleLimit: STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
     npmCliResolution: "not_started", npmCliSource: null, npmCliVersion: null,
-    testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", overlay: "not_applied", packageLockDiagnostics: null }, candidate: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", overlay: "not_applied", packageLockDiagnostics: null } },
+    testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", testProcessDiagnostics: null, testResultsCollectionStatus: "not_started", sidecarCollectionStatus: "not_started", eventCount: null, eventProducerCount: null, overlay: "not_applied", packageLockDiagnostics: null }, candidate: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", testProcessDiagnostics: null, testResultsCollectionStatus: "not_started", sidecarCollectionStatus: "not_started", eventCount: null, eventProducerCount: null, overlay: "not_applied", packageLockDiagnostics: null } },
     primaryError: null, checkpointFailureCount: 0, worktreeDisposition: "owned_temporary_worktrees", overlayIdentityVerified: false,
+    sidecarCollectionStatus: "not_started",
   };
 }
 
@@ -968,7 +1061,34 @@ async function runStartupDiagnostic() {
         delete env.CI_GITHUB_TOKEN;
         delete env.GITHUB_TOKEN;
         await appendSafeDriverEvent(sidecar, identityForSide, "test_started", { phase: "test", role: "test_worktree" });
-        const result = await runBoundedChild(process.execPath, ["--import", "tsx", "--test", STARTUP_DIAGNOSTIC_TEST_FILE], { cwd: target, env, shell: false, deadline });
+        summary.sides[side].testResultsCollectionStatus = "running";
+        await appendSafeDriverEvent(sidecar, identityForSide, "test_results_collection", { phase: "test", collectionStatus: "running" });
+        const result = await runBoundedChild(process.execPath, ["--import", "tsx", "--test", "--test-reporter=./scripts/ci-test-paired-startup-observer.mjs", STARTUP_DIAGNOSTIC_TEST_FILE], { cwd: target, env, shell: false, deadline, captureStdout: true, captureStdoutMaxBytes: 1_048_576 });
+        summary.sides[side].testProcessDiagnostics = result.processDiagnostics;
+        const reporterResult = parseStartupTestReporterOutput(result.stdout, { truncated: result.stdoutTruncated });
+        let resultCollectionStatus = reporterResult.status;
+        for (const caseResult of reporterResult.results) {
+          try {
+            await appendSafeDriverEvent(sidecar, identityForSide, "test_case_result", { phase: "test", ...caseResult });
+          } catch {
+            resultCollectionStatus = "failed";
+            break;
+          }
+        }
+        summary.sides[side].testResultsCollectionStatus = resultCollectionStatus;
+        try {
+          await appendSafeDriverEvent(sidecar, identityForSide, "test_results_collection", { phase: "test", collectionStatus: resultCollectionStatus });
+        } catch {
+          summary.sides[side].testResultsCollectionStatus = "failed";
+        }
+        if (result.timedOut) recordFailure("test", new Error("startup diagnostic test sample timed out"), "timeout");
+        else if (result.spawnError || result.exitCode !== 0) {
+          recordFailure("test", new Error("startup diagnostic test failed"), result.spawnError ? "test_spawn_failure" : "test_failure");
+        }
+        if (summary.sides[side].testResultsCollectionStatus !== "complete") {
+          recordFailure("test_results_collection", new Error("startup diagnostic test result collection was incomplete"), `test_results_${summary.sides[side].testResultsCollectionStatus}`);
+        }
+        await checkpoint();
         if (result.timedOut) {
           allOwnedProcessesClosed &&= result.treeTermination === "verified";
           if (result.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
@@ -1025,22 +1145,35 @@ async function runStartupDiagnostic() {
           } else {
             const sidecar = diagnosticEventPath(path.join(worktree, "ci-artifacts", "paired-startup-diagnostic"), "driver");
             try { await appendSafeDriverEvent(sidecar, { side, runId, sha: SIDE_IDENTITIES[side] }, "overlay_restored", { phase: "overlay_restore", outcome: "success" }); }
-            catch { recordFailure("sidecar", new Error("safe sidecar update failed"), "sidecar_invalid"); }
+            catch { recordFailure("sidecar", new Error("safe sidecar update failed"), "sidecar_failed"); }
           }
         }
       }
     }
     if (diagnosticWorktreesMayBeMutated({ preserveWorktrees, terminationUnverified })) {
+      const pendingSidecars = worktrees.filter(({ side }) => !sidecarsCollected.has(side) && overlaysBySide.has(side));
+      const collectionPriority = { complete: 0, missing: 1, invalid: 2, failed: 3 };
+      let aggregateSidecarStatus = pendingSidecars.length > 0 ? "complete" : "not_started";
+      if (pendingSidecars.length > 0) summary.sidecarCollectionStatus = "collecting";
       for (const { side, path: worktree } of worktrees) {
         if (sidecarsCollected.has(side) || !overlaysBySide.has(side)) continue;
         try {
           const collected = await restoreSidecars(worktree, artifactRoot, side, { side, runId, sha: SIDE_IDENTITIES[side] });
           summary.sides[side].eventCount = collected.eventCount;
           summary.sides[side].eventProducerCount = collected.producerCount;
+          summary.sides[side].sidecarCollectionStatus = collected.status;
+          if (collectionPriority[collected.status] > collectionPriority[aggregateSidecarStatus]) aggregateSidecarStatus = collected.status;
           sidecarsCollected.add(side);
-        } catch {
-          recordFailure("sidecar", new Error("safe sidecar unavailable"), "sidecar_invalid");
+        } catch (error) {
+          const sideStatus = error?.diagnosticClass === "sidecar_invalid" ? "invalid" : "failed";
+          summary.sides[side].sidecarCollectionStatus = sideStatus;
+          if (collectionPriority[sideStatus] > collectionPriority[aggregateSidecarStatus]) aggregateSidecarStatus = sideStatus;
+          recordFailure("sidecar", new Error("safe sidecar unavailable"), `sidecar_${sideStatus}`);
         }
+      }
+      summary.sidecarCollectionStatus = aggregateSidecarStatus;
+      if (aggregateSidecarStatus !== "complete" && aggregateSidecarStatus !== "not_started") {
+        recordFailure("sidecar", new Error("diagnostic sidecar collection was incomplete"), `sidecar_${aggregateSidecarStatus}`);
       }
     }
     if (diagnosticWorktreesMayBeMutated({ preserveWorktrees, terminationUnverified }) && allOwnedProcessesClosed) {
@@ -1056,6 +1189,10 @@ async function runStartupDiagnostic() {
         && path.basename(tempRoot).startsWith("rdmcp-r24-02-startup-diag-")) {
         await rm(tempRoot, { recursive: true, force: false }).catch(() => { preserveWorktrees = true; recordFailure("worktree_cleanup", new Error("temporary directory cleanup unverified"), "cleanup_unverified"); });
       }
+    }
+    for (const side of Object.values(summary.sides)) {
+      if (side.test === "running") side.test = "not_completed";
+      if (side.testResultsCollectionStatus === "running") side.testResultsCollectionStatus = "unavailable";
     }
     summary.worktreeDisposition = preserveWorktrees ? "preserved_for_manual_review" : "owned_worktrees_removed";
     summary.finishedAt = new Date().toISOString();

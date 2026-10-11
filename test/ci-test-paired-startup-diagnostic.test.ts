@@ -37,14 +37,16 @@ import {
   diagnosticWorktreesMayBeMutated,
   diagnosticBudgetRemaining,
   overlaySource,
+  parseStartupTestReporterOutput,
   readSafeDiagnosticEvents,
   restoreOverlayFiles,
+  restoreSidecars,
   retainPrimaryDiagnosticFailure,
   runBoundedChild,
   safeDiagnosticError,
   validateDiagnosticRow,
 } from "../scripts/ci-test-paired-startup-diagnostic.mjs";
-import { diagnosticEventPath, guardFixturePreparation, importEntryWithSafeDiagnosticMarkers } from "../scripts/ci-test-paired-startup-observer.mjs";
+import startupDiagnosticTestReporter, { diagnosticEventPath, guardFixturePreparation, importEntryWithSafeDiagnosticMarkers, STARTUP_DIAGNOSTIC_TEST_CASE_IDS } from "../scripts/ci-test-paired-startup-observer.mjs";
 
 test("startup diagnostic is bounded and separate from the 70-sample performance schedule", () => {
   assert.equal(STARTUP_DIAGNOSTIC_JOB_BUDGET_MS, 18 * 60 * 1000);
@@ -67,6 +69,10 @@ test("startup diagnostic is bounded and separate from the 70-sample performance 
   assert.equal(summary.npmCliResolution, "not_started");
   assert.equal(summary.npmCliSource, null);
   assert.equal(summary.npmCliVersion, null);
+  assert.equal(summary.sides.baseline.testProcessDiagnostics, null);
+  assert.equal(summary.sides.baseline.testResultsCollectionStatus, "not_started");
+  assert.equal(summary.sides.baseline.sidecarCollectionStatus, "not_started");
+  assert.equal(summary.sidecarCollectionStatus, "not_started");
   assert.equal(JSON.stringify(summary).includes("npm-cli.js"), false);
   assert.equal(diagnosticBudgetRemaining(10_000, 9_900), 100);
   assert.equal(diagnosticBudgetRemaining(10_000, 10_001), 0);
@@ -216,11 +222,135 @@ test("diagnostic errors and sidecars contain only allowlisted fields, never mess
   assert.equal(validateDiagnosticRow({ ...row, message: "secret=do-not-write C:\\Users\\someone" }, identity), false);
   assert.equal(validateDiagnosticRow({ ...row, path: "C:\\Users\\someone\\private" }, identity), false);
   assert.equal(validateDiagnosticRow({ ...row, event: "from-stderr-marker" }, identity), false);
+  assert.equal(validateDiagnosticRow({ ...row, errorClass: "AssertionError" }, identity), false);
+  assert.equal(validateDiagnosticRow({ ...row, errorCode: "ERR_ASSERTION" }, identity), false);
+  const caseResult = { ...identity, seq: 1, event: "test_case_result", phase: "test", caseId: "DR001_DOWNLOAD_SNAPSHOT", outcome: "failure", errorClass: "AssertionError", errorCode: "ERR_ASSERTION" };
+  assert.equal(validateDiagnosticRow(caseResult, identity), true);
+  assert.equal(validateDiagnosticRow({ ...caseResult, caseId: "PRIVATE_CASE_NAME" }, identity), false);
+  assert.equal(validateDiagnosticRow({ ...caseResult, errorClass: "PRIVATE_ERROR_CLASS" }, identity), false);
+  assert.equal(validateDiagnosticRow({ ...caseResult, errorCode: "PRIVATE_ERROR_CODE" }, identity), false);
+  assert.equal(validateDiagnosticRow({ ...caseResult, raw: "PRIVATE_ASSERTION" }, identity), false);
+  assert.equal(validateDiagnosticRow({ ...identity, seq: 1, event: "test_results_collection", phase: "test", collectionStatus: "complete", message: "PRIVATE" }, identity), false);
   const error = Object.assign(new Error("secret=hidden C:\\Users\\private\\file.mjs"), { code: "ENOENT" });
   const safe = safeDiagnosticError(error);
   assert.deepEqual(safe, { errorClass: "Error", errorCode: "ENOENT", classification: "spawn_failure" });
   assert.equal(JSON.stringify(safe).includes("hidden"), false);
   assert.equal(JSON.stringify(safe).includes("Users"), false);
+});
+
+test("test reporter records only fixed case IDs and allowlisted error identity", async () => {
+  const names = [
+    "DR001: downloads use one immutable multi-chunk snapshot and clean failed snapshots",
+    "DR002: no-replace commit preserves a winner and removes the losing temp",
+    "DR002: upload begin fails safely when the destination lacks atomic no-replace support",
+    "DR003: protected config aliases cannot be read, searched, or reached by a swapped upload temp",
+    "DR003: a config replacement during pin linking preserves known history and the final config",
+    "DR003: exact bigint identity keys distinguish adjacent unsafe ids while preserving ordinary reads",
+    "DR003: protected identity manifests accept safe legacy values and fail closed on unsafe numeric values",
+  ];
+  assert.equal(STARTUP_DIAGNOSTIC_TEST_CASE_IDS.length, 7);
+  const events = names.map((name, index) => ({
+    type: index === 0 ? "test:fail" : "test:pass",
+    data: {
+      nesting: 0,
+      name,
+      details: index === 0 ? { type: "test", error: { name: "Error", code: "ERR_TEST_FAILURE", cause: { name: "AssertionError", code: "ERR_ASSERTION", message: "PRIVATE_ASSERTION C:\\private\\path", stack: "PRIVATE_STACK" } } } : { type: "test" },
+    },
+  }));
+  events.push({ type: "test:summary", data: { success: false } });
+  const source = async function* () { for (const event of events) yield event; };
+  const chunks: string[] = [];
+  for await (const chunk of startupDiagnosticTestReporter(source())) chunks.push(chunk);
+  const output = chunks.join("");
+  assert.equal(output.includes("PRIVATE_ASSERTION"), false);
+  assert.equal(output.includes("PRIVATE_STACK"), false);
+  assert.equal(output.includes("C:\\private"), false);
+  const parsed = parseStartupTestReporterOutput(output);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.results.length, 7);
+  assert.deepEqual(parsed.results[0], {
+    caseId: "DR001_DOWNLOAD_SNAPSHOT",
+    outcome: "failure",
+    errorClass: "AssertionError",
+    errorCode: "ERR_ASSERTION",
+  });
+  assert.equal(validateDiagnosticRow({ side: "baseline", runId: "42", sha: BASELINE_COMMIT, seq: 1, event: "test_case_result", phase: "test", caseId: parsed.results[0].caseId, outcome: "failure", errorClass: "AssertionError", errorCode: "ERR_ASSERTION" }, { side: "baseline", runId: "42", sha: BASELINE_COMMIT }), true);
+  const suiteFailure = async function* () {
+    yield { type: "test:fail", data: { nesting: 0, name: "PRIVATE_FILE_OR_PATH", details: { type: "suite" } } };
+    yield { type: "test:summary", data: {} };
+  };
+  const suiteFailureChunks: string[] = [];
+  for await (const chunk of startupDiagnosticTestReporter(suiteFailure())) suiteFailureChunks.push(chunk);
+  assert.equal(suiteFailureChunks.join("").includes("PRIVATE_FILE_OR_PATH"), false);
+  assert.equal(parseStartupTestReporterOutput(suiteFailureChunks.join("")).status, "incomplete");
+});
+
+test("unknown test names and error values become invalid or unknown without being retained", async () => {
+  const unknownName = "PRIVATE_UNKNOWN_CASE_NAME";
+  const source = async function* () {
+    yield { type: "test:fail", data: { nesting: 0, name: unknownName, details: { type: "test", error: { name: "PrivateErrorType", code: "PRIVATE_ERROR_CODE", message: "PRIVATE_MESSAGE", stack: "PRIVATE_STACK" } } } };
+    yield { type: "test:summary", data: { success: false } };
+  };
+  const chunks: string[] = [];
+  for await (const chunk of startupDiagnosticTestReporter(source())) chunks.push(chunk);
+  const output = chunks.join("");
+  assert.equal(output.includes(unknownName), false);
+  assert.equal(output.includes("PRIVATE_ERROR_CODE"), false);
+  assert.deepEqual(parseStartupTestReporterOutput(output), { status: "invalid", results: [] });
+
+  const names = [
+    "DR001: downloads use one immutable multi-chunk snapshot and clean failed snapshots",
+    "DR002: no-replace commit preserves a winner and removes the losing temp",
+    "DR002: upload begin fails safely when the destination lacks atomic no-replace support",
+    "DR003: protected config aliases cannot be read, searched, or reached by a swapped upload temp",
+    "DR003: a config replacement during pin linking preserves known history and the final config",
+    "DR003: exact bigint identity keys distinguish adjacent unsafe ids while preserving ordinary reads",
+    "DR003: protected identity manifests accept safe legacy values and fail closed on unsafe numeric values",
+  ];
+  const unknownError = async function* () {
+    for (const [index, name] of names.entries()) {
+      yield { type: index === 6 ? "test:fail" : "test:pass", data: { nesting: 0, name, details: index === 6 ? { type: "test", error: { name: "Error", code: "ERR_TEST_FAILURE", cause: { name: "PRIVATE_ERROR_TYPE", code: "PRIVATE_ERROR_CODE", message: "PRIVATE_MESSAGE", stack: "PRIVATE_STACK" } } } : { type: "test" } } };
+    }
+    yield { type: "test:summary", data: { success: false } };
+  };
+  const unknownErrorChunks: string[] = [];
+  for await (const chunk of startupDiagnosticTestReporter(unknownError())) unknownErrorChunks.push(chunk);
+  const unknownErrorOutput = unknownErrorChunks.join("");
+  assert.equal(unknownErrorOutput.includes("PRIVATE_ERROR_TYPE"), false);
+  assert.equal(unknownErrorOutput.includes("PRIVATE_ERROR_CODE"), false);
+  const unknownErrorResult = parseStartupTestReporterOutput(unknownErrorOutput);
+  assert.equal(unknownErrorResult.status, "complete");
+  assert.deepEqual(unknownErrorResult.results[6], { caseId: "DR003_IDENTITY_MANIFEST_RANGE", outcome: "failure", errorClass: "unknown", errorCode: "unknown" });
+  assert.equal(parseStartupTestReporterOutput("", {}).status, "unavailable");
+  assert.equal(parseStartupTestReporterOutput("{\"kind\":\"collection\",\"collectionStatus\":\"complete\"}\n").status, "incomplete");
+  assert.equal(parseStartupTestReporterOutput(unknownErrorOutput, { truncated: true }).status, "incomplete");
+  assert.equal(parseStartupTestReporterOutput(`${unknownErrorOutput}{\"kind\":\"unexpected\",\"message\":\"PRIVATE\"}\n`).status, "invalid");
+  assert.equal(JSON.stringify(parseStartupTestReporterOutput(outputWithUnknownSafeFields())).includes("PRIVATE"), false);
+});
+
+function outputWithUnknownSafeFields() {
+  return "{\"kind\":\"case\",\"caseId\":\"PRIVATE_CASE\",\"outcome\":\"failure\",\"errorClass\":\"PRIVATE_CLASS\",\"errorCode\":\"PRIVATE_CODE\"}\n";
+}
+
+test("missing and invalid sidecars have distinct collection outcomes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paired-startup-sidecar-collection-test-"));
+  const target = path.join(root, "worktree");
+  const artifacts = path.join(root, "artifacts");
+  const identity = { side: "baseline", runId: "42", sha: BASELINE_COMMIT };
+  try {
+    await mkdir(artifacts, { recursive: true });
+    assert.deepEqual(await restoreSidecars(target, artifacts, "baseline", identity), { status: "missing", eventCount: 0, producerCount: 0 });
+    const sourceDirectory = path.join(target, "ci-artifacts", "paired-startup-diagnostic");
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(path.join(sourceDirectory, "events-driver.jsonl"), "{not-json}\n");
+    await assert.rejects(restoreSidecars(target, artifacts, "baseline", identity), (error: Error & { diagnosticClass?: string }) => {
+      assert.equal(error.diagnosticClass, "sidecar_invalid");
+      assert.equal(error.message.includes("not-json"), false);
+      return true;
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("producer sidecars remain independent under concurrent writes and validate each sequence", async () => {
@@ -388,6 +518,13 @@ test("bounded child diagnostics record safe spawn, exit, close, budget, and elap
   assert.equal(nonzero.processDiagnostics.exitObserved, true);
   assert.equal(nonzero.processDiagnostics.exitCode, 17);
   assert.equal(nonzero.processDiagnostics.closeObserved, true);
+  const persisted = createDiagnosticSummary("42", "1", "a".repeat(40));
+  persisted.sides.candidate.testProcessDiagnostics = nonzero.processDiagnostics;
+  const persistedDiagnostics = JSON.parse(JSON.stringify(persisted)).sides.candidate.testProcessDiagnostics;
+  assert.equal(persistedDiagnostics.exitObserved, true);
+  assert.equal(persistedDiagnostics.exitCode, 17);
+  assert.equal(persistedDiagnostics.closeObserved, true);
+  assert.equal(persistedDiagnostics.elapsedMs, nonzero.processDiagnostics.elapsedMs);
 
   const missingCommand = path.join(os.tmpdir(), `missing-startup-diagnostic-${randomUUID()}.exe`);
   const spawnFailure = await runBoundedChild(missingCommand, [], {
@@ -399,6 +536,15 @@ test("bounded child diagnostics record safe spawn, exit, close, budget, and elap
   assert.equal(spawnFailure.processDiagnostics.spawnErrorCode, "ENOENT");
   assert.equal(spawnFailure.processDiagnostics.exitObserved, false);
   assert.equal(JSON.stringify(spawnFailure.processDiagnostics).includes(missingCommand), false);
+
+  const capped = await runBoundedChild(process.execPath, ["-e", `process.stdout.write("${privateMarker.repeat(8)}")`], {
+    deadline: performance.now() + 10_000,
+    captureStdout: true,
+    captureStdoutMaxBytes: 16,
+  });
+  assert.equal(capped.stdout.length, 16);
+  assert.equal(capped.stdoutTruncated, true);
+  assert.equal(JSON.stringify(capped.processDiagnostics).includes(privateMarker), false);
 });
 
 test("bounded child timer uses the exact recorded remaining budget", async () => {
