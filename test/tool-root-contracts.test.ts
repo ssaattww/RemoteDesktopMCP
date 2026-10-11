@@ -31,10 +31,12 @@ test("Issue 13: published tool descriptions match session, file-root, transfer, 
   const api = await mcp(f.service);
   try {
     const tools = new Map((await api.listTools()).tools.map((tool) => [tool.name, tool.description ?? ""]));
-    const required = ["session_open", "node_list", "file_search", "content_search", "file_read", "file_patch", "file_transfer_download_begin", "file_transfer_download_chunk", "file_transfer_upload_begin", "file_transfer_upload_chunk", "file_transfer_upload_commit", "process_start", "process_output", "process_status", "process_kill"];
+    const required = ["session_open", "session_list", "session_update", "node_list", "file_search", "content_search", "file_read", "file_patch", "file_transfer_download_begin", "file_transfer_download_chunk", "file_transfer_upload_begin", "file_transfer_upload_chunk", "file_transfer_upload_commit", "process_start", "process_output", "process_status", "process_kill"];
     for (const name of required) assert.ok(tools.get(name)?.length, `${name} must have a useful published description`);
     assert.match(api.getInstructions() ?? "", /authenticated caller/i);
     assert.match(tools.get("session_open")!, /session_id/i);
+    assert.match(tools.get("session_update")!, /expected_version/i);
+    assert.match(tools.get("session_update")!, /session_list/i);
     for (const name of ["file_search", "content_search"]) assert.match(tools.get(name)!, /root_id/i);
     for (const name of ["file_read", "file_patch", "file_transfer_download_begin", "file_transfer_upload_begin"]) {
       assert.match(tools.get(name)!, /root_id/i);
