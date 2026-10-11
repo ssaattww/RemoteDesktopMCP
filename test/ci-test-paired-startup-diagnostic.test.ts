@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 import {
   BASELINE_COMMIT,
@@ -172,6 +173,24 @@ test("diagnostic timeout only confirms its owned direct child and never claims t
   });
   assert.equal(unknown.directChildTermination, "unknown");
   assert.equal(unknown.treeTermination, "unknown");
+});
+
+test("bounded child preserves exact stdout bytes when Git content is requested as a Buffer", async () => {
+  const expectedBytes = Buffer.from([0x7b, 0x0a]);
+  const script = "process.stdout.write(Buffer.from([0x7b, 0x0a]))";
+  const binary = await runBoundedChild(process.execPath, ["-e", script], {
+    deadline: performance.now() + 10_000,
+    captureStdout: "buffer",
+  });
+  assert.ok(Buffer.isBuffer(binary.stdout));
+  assert.deepEqual(binary.stdout, expectedBytes);
+  assert.equal(binary.stdout.at(-1), 0x0a, "git show lock bytes must retain the final LF");
+
+  const text = await runBoundedChild(process.execPath, ["-e", script], {
+    deadline: performance.now() + 10_000,
+    captureStdout: true,
+  });
+  assert.equal(text.stdout, "{\n", "ordinary text capture remains UTF-8 text for identifier trimming");
 });
 
 test("restore writes originals only when the exact overlay hash still matches", async () => {

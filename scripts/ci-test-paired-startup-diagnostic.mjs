@@ -272,7 +272,13 @@ async function childProcess(command, args, { cwd, env = process.env, shell = fal
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ ...result, stdout: captureStdout ? Buffer.concat(chunks).toString("utf8") : "", child, childClose });
+      const capturedStdout = captureStdout ? Buffer.concat(chunks) : null;
+      resolve({
+        ...result,
+        stdout: captureStdout === "buffer" ? capturedStdout : capturedStdout ? capturedStdout.toString("utf8") : "",
+        child,
+        childClose,
+      });
     };
     if (captureStdout) child.stdout?.on("data", (chunk) => chunks.push(chunk));
     else child.stdout?.on("data", () => undefined);
@@ -320,6 +326,10 @@ export async function runBoundedChild(command, args, options) {
 async function git(root, args, deadline, captureStdout = false) {
   const result = await runBoundedChild("git", args, { cwd: root, shell: false, deadline, captureStdout });
   if (result.timedOut || result.spawnError || result.exitCode !== 0 || result.treeTermination === "unknown") throw Object.assign(new Error("Git diagnostic command failed."), { diagnosticClass: "setup_failure" });
+  if (captureStdout === "buffer") {
+    if (!Buffer.isBuffer(result.stdout)) throw Object.assign(new Error("Git diagnostic did not preserve binary stdout."), { diagnosticClass: "setup_failure" });
+    return result.stdout;
+  }
   return result.stdout.trim();
 }
 
@@ -450,7 +460,7 @@ async function runStartupDiagnostic() {
     if (metadata.sourceCommit !== driverSha || Number(metadata.runId) !== Number(runId) || Number(metadata.runAttempt) !== Number(attempt)) {
       throw Object.assign(new Error("workflow metadata mismatch"), { diagnosticClass: "precondition_failure" });
     }
-    const expectedBytes = await Promise.all([BASELINE_COMMIT, CANDIDATE_COMMIT].map(async (commit) => Buffer.from(await git(root, ["show", `${commit}:package-lock.json`], deadline, true))));
+    const expectedBytes = await Promise.all([BASELINE_COMMIT, CANDIDATE_COMMIT].map((commit) => git(root, ["show", `${commit}:package-lock.json`], deadline, "buffer")));
     const lockBlobs = await Promise.all([BASELINE_COMMIT, CANDIDATE_COMMIT].map((commit) => git(root, ["rev-parse", `${commit}:package-lock.json`], deadline, true)));
     if (!expectedBytes[0].equals(expectedBytes[1]) || lockBlobs[0] !== lockBlobs[1]) throw Object.assign(new Error("pinned lock mismatch"), { diagnosticClass: "lock_guard_failure" });
     const identity = expectedIdentity(expectedBytes[0], lockBlobs[0]);
