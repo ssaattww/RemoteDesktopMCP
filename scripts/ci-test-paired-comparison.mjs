@@ -65,7 +65,35 @@ export function classifyPackageLockDiagnostics(expected, checkout, afterNpmCi) {
   };
 }
 
-export async function runNpmCiWithLockDiagnostics({ install, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic }) {
+export async function preparePinnedLockForNpmCi({ expectedBytes, expectedIdentity, writeBytes, readBytes, captureIdentity }) {
+  if (!Buffer.isBuffer(expectedBytes)
+    || expectedIdentity?.byteLength !== expectedBytes.length
+    || expectedIdentity?.rawBytesSha256 !== sha256(expectedBytes)
+    || expectedIdentity?.lineEndingNormalizedSha256 !== sha256(normalizePackageLockLineEndings(expectedBytes))) {
+    throw new Error("Pinned package-lock identity does not match its expected bytes.");
+  }
+  await writeBytes(Buffer.from(expectedBytes));
+  const actualBytes = await readBytes();
+  if (!Buffer.isBuffer(actualBytes) || !actualBytes.equals(expectedBytes)) {
+    throw new Error("Prepared worktree package-lock bytes differ from the pinned commit bytes.");
+  }
+  const identity = await captureIdentity();
+  if (identity.byteLength !== expectedIdentity.byteLength
+    || identity.rawBytesSha256 !== expectedIdentity.rawBytesSha256
+    || identity.lineEndingNormalizedSha256 !== expectedIdentity.lineEndingNormalizedSha256
+    || identity.normalizedGitBlob !== expectedIdentity.normalizedGitBlob) {
+    throw new Error("Prepared worktree package-lock identity differs from the pinned commit identity.");
+  }
+  return identity;
+}
+
+export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic }) {
+  const preparedForNpmCiIdentity = await preparePinnedLock();
+  Object.assign(diagnostic, {
+    preparedForNpmCiIdentity,
+    checkoutClassification: classifyLockfileDifference(expectedIdentity, checkoutIdentity),
+    preparationClassification: classifyLockfileDifference(checkoutIdentity, preparedForNpmCiIdentity),
+  });
   let installFailed = false;
   let installError;
   try {
@@ -75,10 +103,16 @@ export async function runNpmCiWithLockDiagnostics({ install, captureIdentity, ex
     installError = error;
   }
   try {
-    const afterNpmCi = await captureIdentity();
+    const afterNpmCiIdentity = await captureIdentity();
+    const npmCiClassification = classifyLockfileDifference(preparedForNpmCiIdentity, afterNpmCiIdentity);
+    const checkoutClassification = classifyLockfileDifference(expectedIdentity, checkoutIdentity);
+    const classification = npmCiClassification !== "unchanged"
+      ? `${npmCiClassification}-during-npm-ci`
+      : checkoutClassification !== "unchanged" ? `${checkoutClassification}-at-checkout` : "unchanged";
     Object.assign(diagnostic, {
-      afterNpmCi,
-      ...classifyPackageLockDiagnostics(expectedIdentity, checkoutIdentity, afterNpmCi),
+      afterNpmCiIdentity,
+      npmCiClassification,
+      classification,
     });
   } catch (error) {
     diagnostic.afterNpmCiCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
@@ -577,15 +611,22 @@ async function runPairedComparison() {
     const runId = Number(metadata.runId);
     const attempt = Number(metadata.runAttempt);
     const jobId = Number(metadata.workflowJobId);
-    for (const [label, target] of [["baseline", baselinePath], ["candidate", candidatePath]]) {
-      const checkout = await capturePackageLockIdentity(target);
-      const diagnostic = { checkout, afterNpmCi: null };
+    for (const [label, target, pinnedLockBytes] of [["baseline", baselinePath, baseLock], ["candidate", candidatePath, candidateLock]]) {
+      const checkoutIdentity = await capturePackageLockIdentity(target);
+      const diagnostic = { checkoutIdentity, preparedForNpmCiIdentity: null, afterNpmCiIdentity: null };
       summary.packageLockDiagnostics[label] = diagnostic;
       await runNpmCiWithLockDiagnostics({
+        preparePinnedLock: () => preparePinnedLockForNpmCi({
+          expectedBytes: pinnedLockBytes,
+          expectedIdentity: summary.packageLockIdentity,
+          writeBytes: (bytes) => writeFile(path.join(target, "package-lock.json"), bytes),
+          readBytes: () => readFile(path.join(target, "package-lock.json")),
+          captureIdentity: () => capturePackageLockIdentity(target),
+        }),
         install: () => runLogged("npm.cmd", ["ci"], { cwd: target, artifactRoot, shell: true, timeoutMs: 90 * 60 * 1000 }, `npm-ci-${label}`),
         captureIdentity: () => capturePackageLockIdentity(target),
         expectedIdentity: summary.packageLockIdentity,
-        checkoutIdentity: checkout,
+        checkoutIdentity,
         diagnostic,
       });
     }
