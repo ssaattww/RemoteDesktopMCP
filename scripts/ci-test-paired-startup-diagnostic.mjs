@@ -32,6 +32,47 @@ const observerModulePath = path.join(path.dirname(thisFile), "ci-test-paired-sta
 const observerTypesPath = path.join(path.dirname(thisFile), "ci-test-paired-startup-observer.d.mts");
 const SIDE_IDENTITIES = Object.freeze({ baseline: BASELINE_COMMIT, candidate: CANDIDATE_COMMIT });
 const NODE_ERROR_CODES = new Set(["ENOENT", "EACCES", "EPERM", "EISDIR", "ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_UNKNOWN_FILE_EXTENSION", "ERR_INVALID_MODULE_SPECIFIER", "ERR_UNSUPPORTED_DIR_IMPORT", "ERR_REQUIRE_ESM"]);
+const SAFE_PROCESS_SIGNALS = new Set(["SIGABRT", "SIGBREAK", "SIGFPE", "SIGILL", "SIGINT", "SIGSEGV", "SIGTERM", "SIGKILL"]);
+const SAFE_TERMINATION_REASONS = new Set([
+  "not_attempted", "not_applicable_no_child", "owned_child_handle_unavailable", "direct_child_already_closed",
+  "direct_child_signal_failed", "direct_child_close_observed", "direct_child_close_unconfirmed", "unknown",
+]);
+
+function safeProcessCode(code) {
+  return Number.isInteger(code) && code >= 0 && code <= 255 ? code : null;
+}
+
+function safeProcessSignal(signal) {
+  return signal === null ? null : SAFE_PROCESS_SIGNALS.has(signal) ? signal : "unknown";
+}
+
+export function createChildProcessDiagnostics(startedAt, timeoutMsApplied) {
+  const boundedTimeout = Number.isFinite(timeoutMsApplied) ? Math.max(0, timeoutMsApplied) : null;
+  return {
+    startedAt,
+    remainingBudgetMsAtStart: boundedTimeout,
+    timeoutMsApplied: boundedTimeout,
+    elapsedMs: null,
+    spawnedAt: null,
+    spawnOutcome: "not_started",
+    spawnErrorCode: null,
+    exitObserved: false,
+    exitAt: null,
+    exitCode: null,
+    exitSignal: null,
+    closeObserved: false,
+    closeAt: null,
+    closeExitCode: null,
+    closeSignal: null,
+    commandOutcome: "pending",
+    timeoutOutcome: "not_timed_out",
+    timeoutAt: null,
+    terminationReason: "not_attempted",
+    terminationWaitMs: null,
+    directChildTermination: "not_attempted",
+    treeTermination: "not_required",
+  };
+}
 
 export function safeDiagnosticError(error) {
   const errorClass = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "McpError", "SystemError"]).has(error?.name)
@@ -257,9 +298,33 @@ async function appendSafeDriverEvent(file, identity, event, fields = {}) {
 
 const spawnedDiagnosticChildren = new WeakSet();
 
-async function childProcess(command, args, { cwd, env = process.env, shell = false, deadline, captureStdout = false, allowPostDeadline = false } = {}) {
-  const remaining = diagnosticBudgetRemaining(deadline);
-  if (!allowPostDeadline && remaining <= 0) return { timedOut: true, exitCode: null, signal: null, errorCode: "unknown", child: null };
+async function childProcess(command, args, {
+  cwd,
+  env = process.env,
+  shell = false,
+  deadline,
+  captureStdout = false,
+  allowPostDeadline = false,
+  timeoutMsOverride,
+  processStartedAt,
+  processDiagnostics,
+} = {}) {
+  const remaining = Number.isFinite(timeoutMsOverride)
+    ? Math.max(0, timeoutMsOverride)
+    : diagnosticBudgetRemaining(deadline);
+  const startedAt = processStartedAt ?? new Date().toISOString();
+  const startedMono = performance.now();
+  const diagnostics = processDiagnostics ?? createChildProcessDiagnostics(startedAt, remaining);
+  Object.assign(diagnostics, createChildProcessDiagnostics(startedAt, remaining));
+  if (!allowPostDeadline && remaining <= 0) {
+    diagnostics.timeoutOutcome = "budget_exhausted_before_spawn";
+    diagnostics.timeoutAt = new Date().toISOString();
+    diagnostics.commandOutcome = "not_started_budget_exhausted";
+    diagnostics.elapsedMs = Math.max(0, Math.round(performance.now() - startedMono));
+    diagnostics.treeTermination = "not_applicable";
+    diagnostics.terminationReason = "not_applicable_no_child";
+    return { timedOut: true, exitCode: null, signal: null, errorCode: "unknown", child: null, processDiagnostics: diagnostics };
+  }
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd, env, shell, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     spawnedDiagnosticChildren.add(child);
@@ -272,20 +337,57 @@ async function childProcess(command, args, { cwd, env = process.env, shell = fal
       if (done) return;
       done = true;
       clearTimeout(timer);
+      if (result.timedOut && diagnostics.timeoutOutcome === "not_timed_out") {
+        diagnostics.timeoutOutcome = "deadline_expired";
+        diagnostics.timeoutAt = new Date().toISOString();
+      }
+      diagnostics.commandOutcome = result.timedOut
+        ? "timed_out"
+        : result.spawnError
+          ? diagnostics.spawnOutcome === "spawn_error" ? "spawn_failed" : "process_error"
+          : result.exitCode === 0 ? "completed_successfully"
+            : result.exitCode !== null ? "completed_nonzero" : "closed_without_exit_status";
+      diagnostics.elapsedMs ??= Math.max(0, Math.round(performance.now() - startedMono));
       const capturedStdout = captureStdout ? Buffer.concat(chunks) : null;
       resolve({
         ...result,
         stdout: captureStdout === "buffer" ? capturedStdout : capturedStdout ? capturedStdout.toString("utf8") : "",
         child,
         childClose,
+        processDiagnostics: diagnostics,
       });
     };
     if (captureStdout) child.stdout?.on("data", (chunk) => chunks.push(chunk));
     else child.stdout?.on("data", () => undefined);
     child.stderr?.on("data", () => undefined);
-    child.once("error", (error) => { resolveClosed({ kind: "spawn_error" }); finish({ spawnError: true, errorCode: NODE_ERROR_CODES.has(error.code) ? error.code : "unknown", exitCode: null, signal: null, timedOut: false }); });
-    child.once("close", (exitCode, signal) => { resolveClosed({ kind: "closed", exitCode, signal }); finish({ spawnError: false, errorCode: "unknown", exitCode, signal, timedOut: false }); });
+    child.once("spawn", () => {
+      diagnostics.spawnOutcome = "spawned";
+      diagnostics.spawnedAt = new Date().toISOString();
+    });
+    child.once("error", (error) => {
+      diagnostics.spawnOutcome = diagnostics.spawnedAt ? "process_error" : "spawn_error";
+      diagnostics.spawnErrorCode = NODE_ERROR_CODES.has(error.code) ? error.code : "unknown";
+      resolveClosed({ kind: "spawn_error" });
+      finish({ spawnError: true, errorCode: diagnostics.spawnErrorCode, exitCode: null, signal: null, timedOut: false });
+    });
+    child.once("exit", (exitCode, signal) => {
+      diagnostics.exitObserved = true;
+      diagnostics.exitAt = new Date().toISOString();
+      diagnostics.exitCode = safeProcessCode(exitCode);
+      diagnostics.exitSignal = safeProcessSignal(signal);
+    });
+    child.once("close", (exitCode, signal) => {
+      diagnostics.closeObserved = true;
+      diagnostics.closeAt = new Date().toISOString();
+      diagnostics.closeExitCode = safeProcessCode(exitCode);
+      diagnostics.closeSignal = safeProcessSignal(signal);
+      resolveClosed({ kind: "closed", exitCode: diagnostics.closeExitCode, signal: diagnostics.closeSignal });
+      finish({ spawnError: false, errorCode: "unknown", exitCode: diagnostics.closeExitCode, signal: diagnostics.closeSignal, timedOut: false });
+    });
     if (!allowPostDeadline) timer = setTimeout(() => {
+      diagnostics.timeoutOutcome = "deadline_expired";
+      diagnostics.timeoutAt = new Date().toISOString();
+      diagnostics.elapsedMs = Math.max(0, Math.round(performance.now() - startedMono));
       finish({ spawnError: false, errorCode: "unknown", exitCode: null, signal: null, timedOut: true });
     }, remaining);
   });
@@ -312,15 +414,35 @@ async function terminateOwnedChild(child, childClose, { waitMs = 5_000 } = {}) {
 
 export async function runBoundedChild(command, args, options) {
   const result = await (options?.runProcess ?? childProcess)(command, args, options);
-  if (!result.timedOut) return { ...result, treeTermination: "not_required", directChildTermination: "not_required" };
-  if (!result.child) return { ...result, treeTermination: "verified", directChildTermination: "not_applicable" };
+  const diagnostics = result.processDiagnostics ?? createChildProcessDiagnostics(
+    options?.processStartedAt ?? new Date().toISOString(),
+    options?.timeoutMsOverride ?? 0,
+  );
+  if (!result.timedOut) {
+    diagnostics.terminationReason = "not_attempted";
+    diagnostics.directChildTermination = result.spawnError ? "not_applicable" : "not_required";
+    diagnostics.treeTermination = result.spawnError ? "not_applicable" : "not_required";
+    return { ...result, processDiagnostics: diagnostics, treeTermination: "not_required", directChildTermination: "not_required" };
+  }
+  if (!result.child) {
+    diagnostics.terminationReason = "not_applicable_no_child";
+    diagnostics.directChildTermination = "not_applicable";
+    diagnostics.treeTermination = "not_applicable";
+    return { ...result, processDiagnostics: diagnostics, treeTermination: "verified", directChildTermination: "not_applicable", terminationReason: "not_applicable_no_child" };
+  }
+  const terminationStarted = performance.now();
   const termination = await (options?.terminateChild ?? terminateOwnedChild)(result.child, result.childClose, options?.terminationOptions);
+  const reason = SAFE_TERMINATION_REASONS.has(termination.reason) ? termination.reason : "unknown";
+  diagnostics.terminationReason = reason;
+  diagnostics.terminationWaitMs = Math.max(0, Math.round(performance.now() - terminationStarted));
+  diagnostics.directChildTermination = termination.verified ? "verified" : "unknown";
+  diagnostics.treeTermination = "unknown";
   if (!termination.verified) {
     result.child.stdout?.destroy();
     result.child.stderr?.destroy();
     result.child.unref();
   }
-  return { ...result, treeTermination: "unknown", directChildTermination: termination.verified ? "verified" : "unknown", terminationReason: termination.reason };
+  return { ...result, processDiagnostics: diagnostics, treeTermination: "unknown", directChildTermination: termination.verified ? "verified" : "unknown", terminationReason: reason };
 }
 
 async function git(root, args, deadline, captureStdout = false) {
@@ -419,7 +541,7 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
       runnerTransitionReserveMs: STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
     },
     sampleLimit: STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
-    testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", test: "not_started", overlay: "not_applied", packageLockDiagnostics: null }, candidate: { npmCi: "not_started", test: "not_started", overlay: "not_applied", packageLockDiagnostics: null } },
+    testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", overlay: "not_applied", packageLockDiagnostics: null }, candidate: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", overlay: "not_applied", packageLockDiagnostics: null } },
     primaryError: null, checkpointFailureCount: 0, worktreeDisposition: "owned_temporary_worktrees", overlayIdentityVerified: false,
   };
 }
@@ -533,7 +655,20 @@ async function runStartupDiagnostic() {
           install: async () => {
             sideSummary.npmCi = "running";
             await checkpoint();
-            const install = await runBoundedChild("npm.cmd", ["ci"], { cwd: target, shell: true, deadline });
+            const npmCiStartedAt = new Date().toISOString();
+            const npmCiProcessDiagnostics = createChildProcessDiagnostics(npmCiStartedAt, null);
+            sideSummary.npmCiProcessDiagnostics = npmCiProcessDiagnostics;
+            const installPromise = runBoundedChild("npm.cmd", ["ci"], {
+              cwd: target,
+              shell: true,
+              deadline,
+              processStartedAt: npmCiStartedAt,
+              processDiagnostics: npmCiProcessDiagnostics,
+            });
+            const launchCheckpoint = checkpoint();
+            const install = await installPromise;
+            await launchCheckpoint;
+            sideSummary.npmCiProcessDiagnostics = install.processDiagnostics;
             if (install.timedOut) {
               allOwnedProcessesClosed &&= install.treeTermination === "verified";
               if (install.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }

@@ -19,6 +19,7 @@ import {
   STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
   STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
   STARTUP_DIAGNOSTIC_TEST_FILE,
+  createChildProcessDiagnostics,
   createDiagnosticSummary,
   diagnosticOverlayIdentity,
   diagnosticOverlayPairMatches,
@@ -191,6 +192,127 @@ test("bounded child preserves exact stdout bytes when Git content is requested a
     captureStdout: true,
   });
   assert.equal(text.stdout, "{\n", "ordinary text capture remains UTF-8 text for identifier trimming");
+});
+
+test("bounded child diagnostics record safe spawn, exit, close, budget, and elapsed fields only", async () => {
+  const privateMarker = "PRIVATE_STDOUT_STDERR_SENTINEL";
+  const startedAt = new Date().toISOString();
+  const timeoutMsApplied = 5_000;
+  const outputScript = `process.stdout.write(Buffer.concat([Buffer.alloc(512 * 1024), Buffer.from(${JSON.stringify(privateMarker)})])); process.stderr.write(Buffer.concat([Buffer.alloc(512 * 1024), Buffer.from(${JSON.stringify(privateMarker)})]));`;
+  const successful = await runBoundedChild(process.execPath, ["-e", outputScript], {
+    deadline: performance.now() + 10_000,
+    processStartedAt: startedAt,
+    timeoutMsOverride: timeoutMsApplied,
+    processDiagnostics: createChildProcessDiagnostics(startedAt, timeoutMsApplied),
+  });
+  assert.equal(successful.processDiagnostics.startedAt, startedAt);
+  assert.equal(successful.processDiagnostics.remainingBudgetMsAtStart, timeoutMsApplied);
+  assert.equal(successful.processDiagnostics.timeoutMsApplied, timeoutMsApplied);
+  assert.equal(successful.processDiagnostics.spawnOutcome, "spawned");
+  assert.equal(successful.processDiagnostics.commandOutcome, "completed_successfully");
+  assert.equal(successful.processDiagnostics.exitObserved, true);
+  assert.equal(successful.processDiagnostics.exitCode, 0);
+  assert.equal(successful.processDiagnostics.closeObserved, true);
+  assert.equal(successful.processDiagnostics.closeExitCode, 0);
+  assert.equal(successful.processDiagnostics.treeTermination, "not_required");
+  assert.ok(Number.isInteger(successful.processDiagnostics.elapsedMs));
+  assert.equal(JSON.stringify(successful.processDiagnostics).includes(privateMarker), false);
+  assert.equal(successful.stdout, "", "stdout remains drained, not retained");
+  assert.equal(successful.processDiagnostics.timeoutOutcome, "not_timed_out");
+
+  const nonzero = await runBoundedChild(process.execPath, ["-e", "process.exit(17)"], {
+    deadline: performance.now() + 10_000,
+    timeoutMsOverride: timeoutMsApplied,
+  });
+  assert.equal(nonzero.processDiagnostics.commandOutcome, "completed_nonzero");
+  assert.equal(nonzero.processDiagnostics.exitObserved, true);
+  assert.equal(nonzero.processDiagnostics.exitCode, 17);
+  assert.equal(nonzero.processDiagnostics.closeObserved, true);
+
+  const missingCommand = path.join(os.tmpdir(), `missing-startup-diagnostic-${randomUUID()}.exe`);
+  const spawnFailure = await runBoundedChild(missingCommand, [], {
+    deadline: performance.now() + 10_000,
+    timeoutMsOverride: timeoutMsApplied,
+  });
+  assert.equal(spawnFailure.processDiagnostics.spawnOutcome, "spawn_error");
+  assert.equal(spawnFailure.processDiagnostics.commandOutcome, "spawn_failed");
+  assert.equal(spawnFailure.processDiagnostics.spawnErrorCode, "ENOENT");
+  assert.equal(spawnFailure.processDiagnostics.exitObserved, false);
+  assert.equal(JSON.stringify(spawnFailure.processDiagnostics).includes(missingCommand), false);
+});
+
+test("bounded child timer uses the exact recorded remaining budget", async () => {
+  const timeoutMsApplied = 40;
+  const timeout = await runBoundedChild(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    deadline: performance.now() + timeoutMsApplied,
+  });
+  assert.equal(timeout.processDiagnostics.remainingBudgetMsAtStart, timeout.processDiagnostics.timeoutMsApplied);
+  assert.ok(timeout.processDiagnostics.timeoutMsApplied <= timeoutMsApplied);
+  assert.ok(timeout.processDiagnostics.timeoutMsApplied > 0);
+  assert.equal(timeout.processDiagnostics.timeoutOutcome, "deadline_expired");
+  assert.equal(timeout.processDiagnostics.commandOutcome, "timed_out");
+  assert.equal(timeout.processDiagnostics.directChildTermination, "verified");
+  assert.equal(timeout.processDiagnostics.treeTermination, "unknown");
+  assert.ok(timeout.processDiagnostics.elapsedMs >= timeout.processDiagnostics.timeoutMsApplied);
+  assert.ok(timeout.processDiagnostics.elapsedMs < timeout.processDiagnostics.timeoutMsApplied + 1_000);
+});
+
+test("bounded child reports budget exhaustion before spawn as not started", async () => {
+  const notStarted = await runBoundedChild(process.execPath, ["-e", "process.exit(0)"], {
+    deadline: performance.now() - 1,
+  });
+  assert.equal(notStarted.child, null);
+  assert.equal(notStarted.processDiagnostics.spawnOutcome, "not_started");
+  assert.equal(notStarted.processDiagnostics.timeoutOutcome, "budget_exhausted_before_spawn");
+  assert.equal(notStarted.processDiagnostics.commandOutcome, "not_started_budget_exhausted");
+  assert.equal(notStarted.processDiagnostics.directChildTermination, "not_applicable");
+  assert.equal(notStarted.processDiagnostics.treeTermination, "not_applicable");
+});
+
+test("bounded child timeout records fixed termination reasons without claiming tree shutdown", async () => {
+  const makeTimeoutRun = async (terminationReason: string, verified: boolean, closeAfterDeadline = false) => {
+    const startedAt = new Date().toISOString();
+    const diagnostics = createChildProcessDiagnostics(startedAt, 25);
+    diagnostics.spawnOutcome = "spawned";
+    diagnostics.timeoutOutcome = "deadline_expired";
+    diagnostics.commandOutcome = "timed_out";
+    diagnostics.elapsedMs = 25;
+    diagnostics.timeoutAt = new Date().toISOString();
+    const child = { stdout: { destroy() {} }, stderr: { destroy() {} }, unref() {} };
+    return runBoundedChild("ignored", [], {
+      runProcess: async () => ({ timedOut: true, exitCode: null, signal: null, child, childClose: Promise.resolve({ kind: "closed" }), processDiagnostics: diagnostics }),
+      terminateChild: async () => {
+        if (closeAfterDeadline) {
+          diagnostics.exitObserved = true;
+          diagnostics.exitCode = 0;
+          diagnostics.exitAt = new Date().toISOString();
+          diagnostics.closeObserved = true;
+          diagnostics.closeExitCode = 0;
+          diagnostics.closeAt = new Date().toISOString();
+        }
+        return { verified, reason: terminationReason };
+      },
+    });
+  };
+
+  const closedAfterDeadline = await makeTimeoutRun("direct_child_close_observed", true, true);
+  assert.equal(closedAfterDeadline.processDiagnostics.closeObserved, true);
+  assert.equal(closedAfterDeadline.processDiagnostics.terminationReason, "direct_child_close_observed");
+  assert.equal(closedAfterDeadline.processDiagnostics.treeTermination, "unknown");
+
+  const killFailure = await makeTimeoutRun("direct_child_signal_failed", false);
+  assert.equal(killFailure.processDiagnostics.terminationReason, "direct_child_signal_failed");
+  assert.equal(killFailure.processDiagnostics.directChildTermination, "unknown");
+  assert.equal(killFailure.processDiagnostics.treeTermination, "unknown");
+  assert.equal(killFailure.treeTermination, "unknown", "a failed direct-child signal never implies tree shutdown");
+
+  const closeUnconfirmed = await makeTimeoutRun("direct_child_close_unconfirmed", false);
+  assert.equal(closeUnconfirmed.processDiagnostics.terminationReason, "direct_child_close_unconfirmed");
+  assert.equal(closeUnconfirmed.processDiagnostics.treeTermination, "unknown");
+
+  const unknownReason = await makeTimeoutRun("unsafe secret reason", false);
+  assert.equal(unknownReason.processDiagnostics.terminationReason, "unknown");
+  assert.equal(JSON.stringify(unknownReason.processDiagnostics).includes("unsafe secret reason"), false);
 });
 
 test("restore writes originals only when the exact overlay hash still matches", async () => {
