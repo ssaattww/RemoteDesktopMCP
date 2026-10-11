@@ -28,6 +28,33 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const ordinal = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const DOCUMENTATION_ROOTS = ["doc/", "reports/", "tasks/"];
 
+function normalizeLineEndings(content) {
+  return Buffer.from(content.toString("utf8").replace(/\r\n?/gu, "\n"), "utf8");
+}
+
+function classifyLockfileDifference(before, after) {
+  if (before.rawBytesSha256 === after.rawBytesSha256) return "unchanged";
+  if (before.lineEndingNormalizedSha256 === after.lineEndingNormalizedSha256) return "line-ending-only";
+  if (before.normalizedGitBlob === after.normalizedGitBlob) return "git-normalized-equivalent";
+  return "content-changed";
+}
+
+export function classifyPackageLockDiagnostics(expected, checkout, afterNpmCi) {
+  const checkoutClassification = classifyLockfileDifference(expected, checkout);
+  const npmCiClassification = classifyLockfileDifference(checkout, afterNpmCi);
+  let classification = "unchanged";
+  if (npmCiClassification !== "unchanged") {
+    classification = `${npmCiClassification}-during-npm-ci`;
+  } else if (checkoutClassification !== "unchanged") {
+    classification = `${checkoutClassification}-at-checkout`;
+  }
+  return {
+    checkout: checkoutClassification,
+    npmCi: npmCiClassification,
+    classification,
+  };
+}
+
 export function formatSummaryError(value) {
   return String(value ?? "")
     .replace(/\u001b\[[0-9;]*m/gu, "")
@@ -289,6 +316,17 @@ async function gitText(root, args) {
   return result;
 }
 
+export async function capturePackageLockIdentity(cwd) {
+  const content = await readFile(path.join(cwd, "package-lock.json"));
+  const normalizedGitBlob = (await gitText(cwd, ["hash-object", "--path=package-lock.json", "package-lock.json"])).trim();
+  return {
+    byteLength: content.length,
+    rawBytesSha256: sha256(content),
+    lineEndingNormalizedSha256: sha256(normalizeLineEndings(content)),
+    normalizedGitBlob,
+  };
+}
+
 async function trackedTests(root, commit) {
   const output = await gitText(root, ["ls-tree", "-r", "--name-only", commit, "--", "test"]);
   return output.split(/\r?\n/u).filter((file) => file.endsWith(".test.ts")).sort(ordinal);
@@ -327,7 +365,7 @@ async function npmVersion(cwd, artifactRoot) {
 }
 
 async function environmentFor(cwd, artifactRoot) {
-  const lock = await readFile(path.join(cwd, "package-lock.json"));
+  const lock = await capturePackageLockIdentity(cwd);
   return {
     runnerOS: process.env.RUNNER_OS ?? "unknown",
     runnerLabel: process.env.CI_RUNNER_LABEL ?? "windows-latest",
@@ -336,7 +374,8 @@ async function environmentFor(cwd, artifactRoot) {
     osRelease: os.release(),
     nodeVersion: process.version,
     npmVersion: await npmVersion(cwd, artifactRoot),
-    packageLockSha256: sha256(lock),
+    packageLockSha256: lock.rawBytesSha256,
+    packageLockGitBlob: lock.normalizedGitBlob,
   };
 }
 
@@ -465,7 +504,11 @@ async function runPairedComparison() {
     for (const file of inventory.excluded) if (baseBlobs.get(file)?.object === candidateBlobs.get(file)?.object) throw new Error(`Expected excluded difference is absent: ${file}`);
     const baseLock = await hashAt(root, BASELINE_COMMIT, "package-lock.json");
     const candidateLock = await hashAt(root, CANDIDATE_COMMIT, "package-lock.json");
-    if (!Buffer.from(baseLock).equals(Buffer.from(candidateLock))) throw new Error("Pinned commits have different package-lock.json bytes.");
+    const baseLockBlob = (await gitText(root, ["rev-parse", `${BASELINE_COMMIT}:package-lock.json`])).trim();
+    const candidateLockBlob = (await gitText(root, ["rev-parse", `${CANDIDATE_COMMIT}:package-lock.json`])).trim();
+    if (!Buffer.from(baseLock).equals(Buffer.from(candidateLock)) || baseLockBlob !== candidateLockBlob) {
+      throw new Error("Pinned commits have different package-lock.json bytes or Git blobs.");
+    }
     summary.inventory = inventory;
     summary.screening = {
       mode: "screening_only",
@@ -479,6 +522,13 @@ async function runPairedComparison() {
       manifestApplied: false,
     };
     summary.packageLockSha256 = sha256(baseLock);
+    summary.packageLockIdentity = {
+      byteLength: baseLock.length,
+      rawBytesSha256: sha256(baseLock),
+      lineEndingNormalizedSha256: sha256(normalizeLineEndings(baseLock)),
+      normalizedGitBlob: baseLockBlob,
+    };
+    summary.packageLockDiagnostics = {};
     summary.changedRepositoryPaths = changedRepositoryPaths;
     summary.runtimeChangedPaths = runtimeChangedPaths;
     summary.changedTestPaths = changed;
@@ -496,14 +546,30 @@ async function runPairedComparison() {
     const attempt = Number(metadata.runAttempt);
     const jobId = Number(metadata.workflowJobId);
     for (const [label, target] of [["baseline", baselinePath], ["candidate", candidatePath]]) {
-      await runLogged("npm.cmd", ["ci"], { cwd: target, artifactRoot, shell: true, timeoutMs: 90 * 60 * 1000 }, `npm-ci-${label}`);
+      const checkout = await capturePackageLockIdentity(target);
+      const diagnostic = { checkout, afterNpmCi: null };
+      summary.packageLockDiagnostics[label] = diagnostic;
+      try {
+        await runLogged("npm.cmd", ["ci"], { cwd: target, artifactRoot, shell: true, timeoutMs: 90 * 60 * 1000 }, `npm-ci-${label}`);
+      } finally {
+        const afterNpmCi = await capturePackageLockIdentity(target);
+        Object.assign(diagnostic, {
+          afterNpmCi,
+          ...classifyPackageLockDiagnostics(summary.packageLockIdentity, checkout, afterNpmCi),
+        });
+      }
     }
     const baselineEnvironment = await environmentFor(baselinePath, artifactRoot);
     const candidateEnvironment = await environmentFor(candidatePath, artifactRoot);
     summary.environments = { baseline: baselineEnvironment, candidate: candidateEnvironment };
     if (baselineEnvironment.runnerOS !== "Windows" || baselineEnvironment.platform !== "win32"
       || !sameEnvironment(baselineEnvironment, candidateEnvironment)) throw new Error("Baseline/candidate execution environments differ or are not Windows.");
-    if (baselineEnvironment.packageLockSha256 !== summary.packageLockSha256) throw new Error("Installed worktree lock bytes differ from the pinned commit lock.");
+    if (baselineEnvironment.packageLockSha256 !== summary.packageLockSha256) {
+      const diagnoses = ["baseline", "candidate"]
+        .map((side) => `${side}=${summary.packageLockDiagnostics[side]?.classification ?? "unavailable"}`)
+        .join(", ");
+      throw new Error(`Installed worktree lock bytes differ from the pinned commit lock (${diagnoses}).`);
+    }
     summary.environment = baselineEnvironment;
     const driverFile = await readFile(fileURLToPath(import.meta.url));
     summary.driverSha256 = sha256(driverFile);

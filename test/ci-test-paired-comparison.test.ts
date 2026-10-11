@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +11,8 @@ import {
   CANDIDATE_COMMIT,
   PREDECLARED_CONTROL_FILES,
   buildPairedSchedule,
+  capturePackageLockIdentity,
+  classifyPackageLockDiagnostics,
   compareRepositoryChanges,
   compareInventories,
   comparePredeclaredControlBlobs,
@@ -23,6 +27,59 @@ const targetFiles = [
   "test/config-transfer-integrity.test.ts",
   "test/session-filesystem-lifecycle.test.ts",
 ];
+
+test("package lock diagnostics distinguish unchanged bytes, line endings, and content by stage", () => {
+  const identity = (content: Buffer, normalizedGitBlob: string) => ({
+    rawBytesSha256: createHash("sha256").update(content).digest("hex"),
+    lineEndingNormalizedSha256: createHash("sha256")
+      .update(content.toString("utf8").replace(/\r\n?/gu, "\n"), "utf8").digest("hex"),
+    normalizedGitBlob,
+  });
+  const expected = identity(Buffer.from('{"lockfileVersion":3}\n'), "expected-blob");
+  const unchanged = { ...expected };
+  const lineEndingOnly = identity(Buffer.from('{"lockfileVersion":3}\r\n'), "expected-blob");
+  const contentChanged = identity(Buffer.from('{"lockfileVersion":3,"changed":true}\n'), "changed-blob");
+
+  assert.deepEqual(classifyPackageLockDiagnostics(expected, unchanged, unchanged), {
+    checkout: "unchanged",
+    npmCi: "unchanged",
+    classification: "unchanged",
+  });
+  assert.deepEqual(classifyPackageLockDiagnostics(expected, lineEndingOnly, lineEndingOnly), {
+    checkout: "line-ending-only",
+    npmCi: "unchanged",
+    classification: "line-ending-only-at-checkout",
+  });
+  assert.deepEqual(classifyPackageLockDiagnostics(expected, unchanged, lineEndingOnly), {
+    checkout: "unchanged",
+    npmCi: "line-ending-only",
+    classification: "line-ending-only-during-npm-ci",
+  });
+  assert.deepEqual(classifyPackageLockDiagnostics(expected, unchanged, contentChanged), {
+    checkout: "unchanged",
+    npmCi: "content-changed",
+    classification: "content-changed-during-npm-ci",
+  });
+  assert.deepEqual(classifyPackageLockDiagnostics(expected, contentChanged, contentChanged), {
+    checkout: "content-changed",
+    npmCi: "unchanged",
+    classification: "content-changed-at-checkout",
+  });
+});
+
+test("package lock identity records raw bytes and Git's path-normalized blob", async () => {
+  const repositoryRoot = path.resolve(here, "..");
+  const lockBytes = await readFile(path.join(repositoryRoot, "package-lock.json"));
+  const expectedGitBlob = execFileSync("git", ["rev-parse", "HEAD:package-lock.json"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  }).trim();
+  const identity = await capturePackageLockIdentity(repositoryRoot);
+  assert.equal(identity.byteLength, lockBytes.length);
+  assert.equal(identity.rawBytesSha256, createHash("sha256").update(lockBytes).digest("hex"));
+  assert.equal(identity.normalizedGitBlob, expectedGitBlob);
+  assert.match(identity.lineEndingNormalizedSha256, /^[a-f0-9]{64}$/u);
+});
 test("paired source identities use the PR creation base and fixed candidate", () => {
   assert.equal(BASELINE_COMMIT, "5dac2528e80cba3e3ff5c855f14420075b2da717");
   assert.equal(CANDIDATE_COMMIT, "6ea1ca5636d909b32fad6199c034b9b1894fef34");
