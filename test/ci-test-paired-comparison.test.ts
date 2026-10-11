@@ -220,6 +220,7 @@ test("lock guard failure checkpoints its classification before stopping npm ci",
 
     const saved = JSON.parse(await readFile(summaryPath, "utf8")) as typeof summary;
     assert.equal(saved.packageLockDiagnostics.baseline.checkoutClassification, "content-changed");
+    assert.equal(saved.packageLockDiagnostics.baseline.classification, "content-changed-at-checkout");
     assert.equal(installCalled, false);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });

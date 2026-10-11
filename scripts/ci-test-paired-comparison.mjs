@@ -109,9 +109,15 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
   const checkoutClassification = hasCompleteLockIdentity(expectedIdentity) && hasCompleteLockIdentity(checkoutIdentity)
     ? classifyLockfileDifference(expectedIdentity, checkoutIdentity)
     : "unavailable";
-  Object.assign(diagnostic, { checkoutClassification });
+  Object.assign(diagnostic, {
+    checkoutClassification,
+    classification: checkoutClassification === "unavailable" ? "unavailable" : checkoutClassification,
+  });
   await onDiagnosticUpdate?.();
   if (checkoutClassification !== "unchanged" && checkoutClassification !== "line-ending-only") {
+    diagnostic.classification = checkoutClassification === "unavailable"
+      ? "unavailable"
+      : `${checkoutClassification}-at-checkout`;
     diagnostic.checkoutGuardError = checkoutClassification === "unavailable"
       ? "Pinned or checkout package-lock identity is missing or incomplete."
       : `Checkout package-lock differs from pinned content: ${checkoutClassification}.`;
@@ -145,6 +151,8 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
     });
   } catch (error) {
     diagnostic.afterNpmCiCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
+    diagnostic.npmCiClassification = "unavailable";
+    diagnostic.classification = "unavailable";
     await onDiagnosticUpdate?.();
     if (!installFailed) throw error;
   }
@@ -661,6 +669,7 @@ async function runPairedComparison() {
       } catch (error) {
         diagnostic.checkoutIdentityCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
         diagnostic.checkoutClassification = "unavailable";
+        diagnostic.classification = "unavailable";
         await checkpoint();
         throw new Error(`Could not capture ${label} checkout package-lock identity.`);
       }
