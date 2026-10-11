@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/bootstrap.js",
     "dev": "tsx watch src/bootstrap.ts",
+    "preview:issue70": "tsx scripts/issue70-ui-fixture.ts --write-html artifacts/issue70-todo-preview.html",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "benchmark:transfer": "tsx scripts/benchmark-file-transfer.ts",

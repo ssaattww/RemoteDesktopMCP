@@ -786,11 +786,52 @@ test("clock rollback and unavailable monotonic time fail closed and record the a
 test("session detail renders the Todo panel before session metadata", async () => {
   const h = await consoleHarness();
   try {
-    const response = await fetch(`${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`, { headers: { cookie: h.cookie } });
+    const detailUrl = `${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`;
+    const first = await fetch(detailUrl, { headers: { cookie: h.cookie } });
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await first.text())?.[1]; assert.ok(csrf);
+    const update = await fetch(`${h.baseUrl}/api/sessions/${encodeURIComponent(h.sessionId)}/todo`, { method: "PUT", headers: { cookie: h.cookie, origin: "http://127.0.0.1", "x-csrf-token": csrf, "content-type": "application/json" }, body: JSON.stringify({ expected_version: 0, changes: [{ op: "add", text: "複数行\n作業" }] }) });
+    assert.equal(update.status, 200);
+    const response = await fetch(detailUrl, { headers: { cookie: h.cookie } });
     const html = await response.text();
     assert.equal(response.status, 200);
     assert.ok(html.includes('id="session-todo"'));
     assert.ok(html.indexOf('id="session-todo"') < html.indexOf("セッションの内容"));
+    assert.ok(html.includes('<textarea rows="2" data-todo-text="true" maxlength="1000"'));
+    assert.ok(html.includes('aria-label="作業項目"'));
+    assert.doesNotMatch(html, /<label class="todo-text-label">|<span>作業項目<\/span>/, "item text must not have a repeated visible title");
+    assert.ok(html.includes('class="todo-controls"'));
+    assert.ok(html.includes('class="todo-enforcement"'));
+    assert.ok(html.includes('class="todo-enforcement-toggle"'));
+    assert.ok(html.includes('class="todo-status"'));
+    assert.ok(html.includes('<details class="todo-add" data-todo-add-details><summary>作業を追加</summary>'));
+    assert.ok(html.includes('aria-label="作業を追加"'));
+    assert.doesNotMatch(html, /<details class="todo-add" data-todo-add-details open/);
+    assert.ok(html.includes('data-todo-latest-text'));
+    assert.ok(html.includes('data-todo-updated'));
+    assert.ok(html.includes('#session-todo .todo-controls select{box-sizing:border-box;min-width:0;flex:1;min-height:44px}'));
+    assert.ok(html.includes('#session-todo .todo-controls .todo-status{display:flex;align-items:center;flex:1;min-width:0;gap:6px;margin:0}'));
+    assert.ok(html.includes('#session-todo .todo-actions button{flex:none;min-width:44px;padding:2px 8px;font:inherit}'));
+    assert.ok(html.includes('#session-todo .todo-enforcement{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:7px 0}'));
+    assert.ok(html.includes('#session-todo .todo-controls{display:flex;align-items:center;gap:6px;width:100%;min-width:0}'));
+    assert.ok(html.includes('#session-todo .todo-controls .todo-status{flex:1 1 0%;min-width:0;margin:0}'));
+    assert.ok(html.includes('max-height:12.5em'));
+    assert.ok(html.includes('data-todo-op="save"'));
+    assert.ok(html.includes('data-todo-op="delete"'));
+    assert.doesNotMatch(html, /<input[^>]+name="text"[^>]+aria-label="作業項目"/);
+  } finally { await h.close(); }
+});
+
+test("the Todo JSON update contract preserves multiline text", async () => {
+  const h = await consoleHarness();
+  try {
+    const endpoint = `${h.baseUrl}/api/sessions/${encodeURIComponent(h.sessionId)}/todo`;
+    const detail = await fetch(`${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`, { headers: { cookie: h.cookie } });
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; assert.ok(csrf);
+    const text = "first line\nsecond line";
+    const updated = await fetch(endpoint, { method: "PUT", headers: { cookie: h.cookie, origin: "http://127.0.0.1", "x-csrf-token": csrf, "content-type": "application/json" }, body: JSON.stringify({ expected_version: 0, changes: [{ op: "add", text }] }) });
+    assert.equal(updated.status, 200);
+    const snapshot = await updated.json() as { items: Array<{ text: string }> };
+    assert.equal(snapshot.items[0]?.text, text);
   } finally { await h.close(); }
 });
 

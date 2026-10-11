@@ -28,6 +28,7 @@ class FakeElement {
   id = "";
   dateTime = "";
   focusOptions?: { preventScroll?: boolean };
+  style = { height: "", lineHeight: "" };
   colSpan = 1;
   children: FakeElement[] = [];
   parentElement: FakeElement | null = null;
@@ -39,18 +40,29 @@ class FakeElement {
   classList = { toggle: (name: string, force?: boolean) => Boolean(name && force !== false) };
   constructor(tagName = "div") { this.tagName = tagName.toLowerCase(); }
   checked = false;
-  value = "";
+  private storedValue = "";
+  get value() { return this.storedValue; }
+  set value(value: string) { this.storedValue = value; this.selectionStart = value.length; this.selectionEnd = value.length; this.selectionDirection = "none"; }
   name = "";
   type = "";
   required = false;
+  ariaLabel = "";
+  setAttribute(name: string, value: string) { if (name === "aria-label") this.ariaLabel = value; }
   maxLength = 0;
+  rows = 0;
+  scrollHeight = 80;
+  selectionStart = 0;
+  selectionEnd = 0;
+  selectionDirection: "forward" | "backward" | "none" = "none";
   innerHTML = "";
   focus(options?: { preventScroll?: boolean }) { FakeElement.activeElement = this; this.focusOptions = options; }
   addEventListener(name: string, listener: (event?: unknown) => void) { this.listeners.set(name, listener); }
-  click(name = "click") { this.listeners.get(name)?.({ target: this }); }
+  click(name = "click") { if (this.disabled) return; this.listeners.get(name)?.({ target: this }); }
   replaceChildren(...children: FakeElement[]) { this.onReplaceChildren?.(this.children); for (const child of this.children) child.parentElement = null; this.children = []; for (const child of children) this.append(child); }
-  append(child: FakeElement) { child.parentElement?.remove(child); this.children.push(child); child.parentElement = this; }
-  remove(child: FakeElement) { this.children = this.children.filter((candidate) => candidate !== child); child.parentElement = null; }
+  append(...children: FakeElement[]) { for (const child of children) { if (child.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); this.children.push(child); child.parentElement = this; } }
+  insertBefore(child: FakeElement, reference: FakeElement | null) { if (child === reference) return child; if (child.contains(FakeElement.activeElement)) FakeElement.activeElement = null; child.parentElement?.remove(child); const index = reference ? this.children.indexOf(reference) : -1; if (index < 0) this.children.push(child); else this.children.splice(index, 0, child); child.parentElement = this; return child; }
+  setSelectionRange(start: number, end: number, direction: "forward" | "backward" | "none" = "none") { this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction; }
+  remove(child?: FakeElement) { if (!child) { this.parentElement?.remove(this); return; } this.children = this.children.filter((candidate) => candidate !== child); child.parentElement = null; }
   get parent() { return this.parentElement; }
   insertRow() { const row = new FakeElement("tr"); this.append(row); return row; }
   insertCell() { const cell = new FakeElement("td"); this.append(cell); return cell; }
@@ -62,6 +74,9 @@ class FakeElement {
     if (selector.startsWith("tr[data-event-json]")) return this.children.filter((child) => child.tagName === "tr" && child.dataset.eventJson !== undefined) as T[];
     if (selector === "tr[data-session-id]") return this.children.filter((child) => child.tagName === "tr" && child.dataset.sessionId !== undefined) as T[];
     const descendants = this.allDescendants();
+    if (selector === "li[data-todo-id]") return descendants.filter((child) => child.tagName === "li" && child.dataset.todoId !== undefined) as T[];
+    if (selector === "button[data-todo-op]") return descendants.filter((child) => child.tagName === "button" && child.dataset.todoOp !== undefined) as T[];
+    if (selector === "textarea,select") return descendants.filter((child) => child.tagName === "textarea" || child.tagName === "select") as T[];
     if (selector === "form[data-session-edit]" || selector === "[data-session-edit]") return descendants.filter((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) as T[];
     if (selector === "details[data-session-time]") return descendants.filter((child) => child.tagName === "details" && child.dataset.sessionTime !== undefined) as T[];
     if (selector === "time[data-session-relative]") return descendants.filter((child) => child.tagName === "time" && child.dataset.sessionRelative !== undefined) as T[];
@@ -70,6 +85,9 @@ class FakeElement {
   querySelector<T extends FakeElement>(selector: string) {
     const override = this.queries.get(selector);
     if (override) return override as T;
+    const attribute = selector.match(/^\[data-([a-z-]+)(?:="([^"]+)")?\]$/);
+    if (attribute) { const key = attribute[1]!.replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase()); return (this.allDescendants().find((child) => child.dataset[key] === (attribute[2] ?? "true")) ?? null) as T | null; }
+    if (selector.startsWith(".")) return (this.allDescendants().find((child) => child.className.split(/\s+/).includes(selector.slice(1))) ?? null) as T | null;
     if (selector === "form[data-session-edit]") return (this.allDescendants().find((child) => child.tagName === "form" && child.dataset.sessionEdit !== undefined) ?? null) as T | null;
     if (selector === "h2") return (this.children.find((child) => child.tagName === "h2") ?? null) as T | null;
     if (selector === "h3") return (this.children.find((child) => child.tagName === "h3") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
@@ -78,7 +96,7 @@ class FakeElement {
     if (selector === "details") return (this.children.find((child) => child.tagName === "details") ?? this.children.map((child) => child.querySelector<FakeElement>(selector)).find(Boolean) ?? null) as T | null;
     return null;
   }
-  closest<T extends FakeElement>(selector: string) { let current: FakeElement | null = this; while (current) { if ((selector === "tr" && current.tagName === "tr") || (selector === "tr[data-session-id]" && current.tagName === "tr" && current.dataset.sessionId !== undefined) || (selector === "td" && current.tagName === "td") || (selector === "form[data-session-edit]" && current.tagName === "form" && current.dataset.sessionEdit !== undefined)) return current as T; if (current.closestNodes.has(selector)) return current.closestNodes.get(selector) as T; current = current.parentElement; } return null; }
+  closest<T extends FakeElement>(selector: string) { let current: FakeElement | null = this; while (current) { if ((selector === "li[data-todo-id]" && current.tagName === "li" && current.dataset.todoId !== undefined) || (selector === "tr" && current.tagName === "tr") || (selector === "tr[data-session-id]" && current.tagName === "tr" && current.dataset.sessionId !== undefined) || (selector === "td" && current.tagName === "td") || (selector === "form[data-session-edit]" && current.tagName === "form" && current.dataset.sessionEdit !== undefined)) return current as T; if (current.closestNodes.has(selector)) return current.closestNodes.get(selector) as T; current = current.parentElement; } return null; }
   contains(node: FakeElement | null) { let current = node; while (current) { if (current === this) return true; current = current.parentElement; } return false; }
   getBoundingClientRect() { return this.rect; }
   get cells() { return this.children.filter((child) => child.tagName === "td"); }
@@ -138,6 +156,76 @@ class FakeClock {
 
 function response(status: number, body: unknown) {
   return { status, ok: status >= 200 && status < 300, json: async () => body };
+}
+
+function todoFixture(sessionId = "todo-session", version = 1, text = "server text") {
+  const panel = new FakeElement("section"); panel.dataset = { sessionId, version: String(version), csrf: "csrf-value" };
+  const summary = new FakeElement("p");
+  const notice = new FakeElement("p");
+  const list = new FakeElement("ul");
+  const row = new FakeElement("li"); row.dataset = { todoId: "todo-1", baseText: text, baseStatus: "not_started", baseVersion: String(version) };
+  const textarea = new FakeElement("textarea"); textarea.value = text;
+  const status = new FakeElement("select"); status.value = "not_started";
+  const save = new FakeElement("button");
+  const remove = new FakeElement("button");
+  save.dataset.todoOp = "save"; remove.dataset.todoOp = "delete";
+  const conflict = new FakeElement("div"); conflict.hidden = true;
+  const latest = new FakeElement("p");
+  const latestStatus = new FakeElement("p");
+  const useLatest = new FakeElement("button");
+  const keepDraft = new FakeElement("button");
+  const deletedNotice = new FakeElement("div"); deletedNotice.hidden = true;
+  const deletedActions = new FakeElement("div"); deletedActions.hidden = true;
+  const discardDeleted = new FakeElement("button"); discardDeleted.dataset.todoOp = "discard-deleted";
+  const readdDeleted = new FakeElement("button"); readdDeleted.dataset.todoOp = "readd-deleted";
+  const readdConfirm = new FakeElement("div"); readdConfirm.hidden = true;
+  const replaceAddDraft = new FakeElement("button"); replaceAddDraft.dataset.todoOp = "replace-add-draft";
+  const keepAddDraft = new FakeElement("button"); keepAddDraft.dataset.todoOp = "keep-add-draft";
+  row.queries.set("[data-todo-text]", textarea);
+  row.queries.set("[data-todo-status]", status);
+  row.queries.set('[data-todo-op="save"]', save);
+  row.queries.set('[data-todo-op="delete"]', remove);
+  row.queries.set("[data-todo-conflict]", conflict);
+  row.queries.set("[data-todo-latest]", latest);
+  row.queries.set("[data-todo-latest-text]", latest);
+  row.queries.set("[data-todo-latest-status]", latestStatus);
+  row.queries.set('[data-todo-op="use-latest"]', useLatest);
+  row.queries.set('[data-todo-op="keep-draft"]', keepDraft);
+  row.queries.set("[data-todo-deleted-notice]", deletedNotice);
+  row.queries.set("[data-todo-deleted-actions]", deletedActions);
+  row.queries.set("[data-todo-readd-confirm]", readdConfirm);
+  deletedActions.append(discardDeleted, readdDeleted); readdConfirm.append(replaceAddDraft, keepAddDraft);
+  conflict.append(latest); conflict.append(latestStatus); conflict.append(useLatest); conflict.append(keepDraft);
+  row.append(textarea); row.append(status); row.append(save); row.append(remove); row.append(conflict); row.append(deletedNotice); row.append(deletedActions); row.append(readdConfirm);
+  list.append(row);
+  const addDetails = new FakeElement("details"); addDetails.dataset.todoAddDetails = "true";
+  const addSummary = new FakeElement("summary"); addSummary.textContent = "作業を追加";
+  const addText = new FakeElement("textarea");
+  const addButton = new FakeElement("button");
+  const addConflict = new FakeElement("div"); addConflict.hidden = true;
+  const addLatest = new FakeElement("p");
+  const useLatestAdd = new FakeElement("button");
+  const keepDraftAdd = new FakeElement("button");
+  useLatestAdd.dataset.todoOp = "use-latest-add"; keepDraftAdd.dataset.todoOp = "keep-draft-add";
+  addConflict.append(addLatest, useLatestAdd, keepDraftAdd);
+  addButton.dataset.todoOp = "add";
+  panel.queries.set("[data-todo-summary]", summary);
+  panel.queries.set("[data-todo-summary-count]", summary);
+  panel.queries.set("[data-todo-status]", notice);
+  panel.queries.set("[data-todo-status-message]", notice);
+  panel.queries.set("[data-todo-updated]", new FakeElement("time"));
+  panel.queries.set("[data-todo-enforcement-state]", new FakeElement("span"));
+  panel.queries.set("[data-todo-enforcement]", new FakeElement("button"));
+  panel.queries.set("[data-todo-items]", list);
+  panel.queries.set("[data-todo-add-text]", addText);
+  panel.queries.set("[data-todo-add-conflict]", addConflict);
+  panel.queries.set("[data-todo-add-latest]", addLatest);
+  panel.queries.set('[data-todo-op="use-latest-add"]', useLatestAdd);
+  panel.queries.set('[data-todo-op="keep-draft-add"]', keepDraftAdd);
+  panel.queries.set('[data-todo-op="add"]', addButton);
+  addDetails.append(addSummary, addText, addButton, addConflict);
+  panel.append(summary); panel.append(notice); panel.append(list); panel.append(addDetails);
+  return { panel, summary, notice, list, row, textarea, status, save, remove, conflict, latest, useLatest, keepDraft, addDetails, addSummary, addText, addButton, addConflict, addLatest, useLatestAdd, keepDraftAdd, discardDeleted, readdDeleted, readdConfirm, replaceAddDraft, keepAddDraft };
 }
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
@@ -204,6 +292,603 @@ test("browser bootstrap treats SSE as a notice, pages logs, and restarts from th
     restartedSource.dispatch("logs-available", JSON.stringify({ addedCount: 1, latestCursor: "c4", overflow: false }));
   }
   assert.equal(ui.newest.textContent, "↻ 更新（新着 1件）", "each reconnect's first count replaces the previous connection's count");
+});
+
+test("a successful detail refresh fetches Todo when the log page has no new rows", async () => {
+  const calls: Array<{ url: URL; init?: RequestInit }> = [];
+  let releaseTodo!: (value: ReturnType<typeof response>) => void;
+  const fixture = todoFixture();
+  const fetchImpl = async (url: string, init?: RequestInit) => {
+    const request = { url: new URL(url, "http://local.test"), init };
+    calls.push(request);
+    if (request.url.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (request.url.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (request.url.pathname === "/api/sessions/todo-session/todo") return await new Promise<ReturnType<typeof response>>((resolve) => { releaseTodo = resolve; });
+    throw new Error("unexpected request " + request.url.href);
+  };
+  const ui = boot(fetchImpl, [], { "session-todo": fixture.panel }, "todo-session");
+  await settle();
+  ui.newest.click();
+  await settle();
+  await settle();
+  const todoRead = calls.find((request) => request.url.pathname === "/api/sessions/todo-session/todo");
+  assert.ok(todoRead, "manual detail refresh reads the Todo even if the log response is empty");
+  assert.equal(todoRead.init?.credentials, "same-origin");
+  releaseTodo(response(200, { session_id: "todo-session", version: 2, items: [], total: 0, completed: 0, last_updated_at: "2026-10-01T00:00:01Z", enforcement_enabled: true }));
+  await settle();
+  assert.equal(fixture.panel.dataset.version, "2");
+});
+
+test("typing made while a Todo PUT is pending survives its successful response", async () => {
+  const fixture = todoFixture();
+  let release!: (value: ReturnType<typeof response>) => void;
+  let request: { url: URL; init?: RequestInit } | undefined;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/sessions/todo-session/todo" && init?.method === "PUT") {
+      request = { url: parsed, init };
+      return await new Promise<ReturnType<typeof response>>((resolve) => { release = resolve; });
+    }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  await settle();
+  fixture.save.click();
+  await settle();
+  assert.equal(request?.init?.method, "PUT");
+  assert.deepEqual(JSON.parse(String(request?.init?.body)), { expected_version: 1, changes: [{ op: "edit", id: "todo-1", text: "server text" }, { op: "status", id: "todo-1", status: "not_started" }] });
+  fixture.textarea.value = "typed after pressing update";
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  release(response(200, { session_id: "todo-session", version: 2, items: [{ id: "todo-1", text: "server text", status: "not_started", order: 0 }], total: 1, completed: 0, last_updated_at: "2026-10-01T00:00:01Z", enforcement_enabled: true }));
+  await settle();
+  assert.equal(fixture.textarea.value, "typed after pressing update");
+  assert.equal(fixture.panel.dataset.version, "2");
+});
+
+test("adding and deleting a Todo use versioned JSON updates and reconcile the visible list", async () => {
+  const fixture = todoFixture();
+  fixture.addText.value = "new task";
+  const requests: Array<{ body: { expected_version: number; changes: Array<{ op: string }> } }> = [];
+  let version = 1;
+  let items: Array<{ id: string; text: string; status: string }> = [{ id: "todo-1", text: "server text", status: "not_started" }];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") {
+      const body = JSON.parse(String(init.body)) as { expected_version: number; changes: Array<{ op: string; id?: string; text?: string }> };
+      requests.push({ body });
+      if (body.changes[0]?.op === "add") items = [...items, { id: "todo-2", text: body.changes[0].text ?? "", status: "not_started" }];
+      else items = items.filter((item) => item.id !== body.changes[0]?.id);
+      version += 1;
+      return response(200, { session_id: "todo-session", version, items, total: items.length, completed: 0, last_updated_at: "2026-10-01T00:00:01Z", enforcement_enabled: true });
+    }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  await settle();
+  fixture.addButton.click();
+  await settle();
+  assert.equal(requests[0]?.body.expected_version, 1);
+  assert.equal(requests[0]?.body.changes[0]?.op, "add");
+  const added = fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").find((row) => row.dataset.todoId === "todo-2");
+  assert.ok(added);
+  assert.equal(added.children[0]?.tagName, "textarea", "the dynamic row must omit the visible item label wrapper");
+  assert.equal(added.querySelector<FakeElement>("[data-todo-text]")?.ariaLabel, "作業項目", "the textarea keeps its accessible name");
+  const addedControls = added.children.find((child) => child.className === "todo-controls");
+  assert.equal(addedControls?.children[0]?.className, "todo-status");
+  assert.equal(addedControls?.children[0]?.children[0]?.tagName, "span");
+  assert.equal(addedControls?.children[0]?.children[0]?.textContent, "状態");
+  assert.equal(addedControls?.children[0]?.children[1]?.dataset.todoStatus, "true");
+  assert.equal(addedControls?.children[1]?.className, "todo-actions");
+  assert.equal(addedControls?.children[1]?.children.map((button) => button.dataset.todoOp).join(","), "save,delete");
+  added.querySelector<FakeElement>('[data-todo-op="delete"]')?.click();
+  await settle();
+  assert.equal(requests[1]?.body.expected_version, 2);
+  assert.equal(requests[1]?.body.changes[0]?.op, "delete");
+  assert.equal(fixture.list.querySelectorAll("li[data-todo-id]").some((row) => row.dataset.todoId === "todo-2"), false);
+  void ui;
+});
+
+test("Todo version conflicts preserve drafts until the user chooses how to continue", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "my draft";
+  let requests = 0;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") { requests += 1; return response(409, { version: 2, items: [{ id: "todo-1", text: "latest server value", status: "in_progress" }], total: 1, completed: 0, conflict: true }); }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  await settle(); fixture.save.click(); await settle();
+  assert.equal(fixture.textarea.value, "my draft");
+  assert.equal(fixture.panel.dataset.version, "2", "global server version can advance while the dirty row keeps its old base");
+  assert.equal(fixture.conflict.hidden, false);
+  fixture.keepDraft.click();
+  assert.equal(fixture.panel.dataset.version, "2");
+  assert.equal(fixture.textarea.value, "my draft");
+  assert.equal(fixture.status.value, "in_progress");
+  assert.equal(requests, 1, "conflict recovery does not resubmit automatically");
+  void ui;
+});
+
+test("a refresh keeps dirty text as a deleted draft instead of restoring a removed item", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "unsaved work";
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [], total: 0, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  await settle(); ui.newest.click(); await settle(); await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "2", "successful log refresh also requests the Todo snapshot");
+  assert.equal(fixture.row.dataset.deletedDraft, "true");
+  assert.equal(fixture.textarea.value, "unsaved work");
+  assert.equal(fixture.save.disabled, true);
+  void ui;
+});
+
+test("authentication expiry during a Todo refresh disables further Todo actions", async () => {
+  const fixture = todoFixture();
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(401, {});
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.save.disabled, true);
+  assert.equal(fixture.addButton.disabled, true);
+  assert.equal(ui.newest.disabled, true);
+});
+
+test("remote Todo refresh keeps the original dirty baseline until explicit conflict resolution", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "local B";
+  const requests: Array<{ expected_version: number; changes: Array<{ text?: string }> }> = [];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") { requests.push(JSON.parse(String(init.body)) as typeof requests[number]); return response(200, { version: 3, items: [{ id: "todo-1", text: "local B", status: "not_started" }], total: 1, completed: 0, last_updated_at: "t3", enforcement_enabled: true }); }
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-1", text: "remote C", status: "in_progress" }], total: 1, completed: 0, last_updated_at: "t2", enforcement_enabled: true });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "2");
+  assert.equal(fixture.row.dataset.baseText, "server text", "GET must not silently rebase a dirty draft");
+  assert.equal(fixture.textarea.value, "local B");
+  assert.equal(fixture.save.disabled, true, "stale dirty row cannot submit before a choice");
+  fixture.keepDraft.click();
+  assert.equal(fixture.row.dataset.baseText, "remote C");
+  assert.equal(fixture.textarea.value, "local B");
+  assert.equal(fixture.save.disabled, false);
+  fixture.save.click(); await settle();
+  assert.equal(requests[0]?.expected_version, 2);
+  assert.equal(requests[0]?.changes[0]?.text, "local B");
+});
+
+test("typing back to the old value while a Todo save is pending survives the response", async () => {
+  const fixture = todoFixture();
+  let release!: (value: ReturnType<typeof response>) => void;
+  const bodies: Array<{ expected_version: number; changes: Array<{ text?: string }> }> = [];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") { bodies.push(JSON.parse(String(init.body)) as typeof bodies[number]); return await new Promise<ReturnType<typeof response>>((resolve) => { release = resolve; }); }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.value = "B"; fixture.textarea.listeners.get("input")?.({ target: fixture.textarea }); fixture.save.click(); await settle();
+  fixture.textarea.value = "server text"; fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  fixture.status.value = "in_progress"; fixture.status.listeners.get("change")?.({ target: fixture.status }); fixture.status.value = "not_started"; fixture.status.listeners.get("change")?.({ target: fixture.status });
+  release(response(200, { version: 2, items: [{ id: "todo-1", text: "B", status: "in_progress" }], total: 1, completed: 0, last_updated_at: "t2", enforcement_enabled: true }));
+  await settle();
+  assert.equal(fixture.textarea.value, "server text");
+  assert.equal(fixture.row.dataset.baseText, "B");
+  assert.equal(fixture.status.value, "not_started");
+  assert.equal(fixture.row.dataset.baseStatus, "in_progress");
+  assert.equal(fixture.save.disabled, false);
+  fixture.save.click(); await settle();
+  assert.equal(bodies[1]?.expected_version, 2);
+  assert.equal(bodies[1]?.changes[0]?.text, "server text");
+  void ui;
+});
+
+test("a dynamically rendered row has its own latest-value conflict controls", async () => {
+  const fixture = todoFixture(); let puts = 0;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") {
+      puts += 1;
+      return puts === 1
+        ? response(409, { version: 2, items: [{ id: "todo-1", text: "server text", status: "not_started" }, { id: "todo-2", text: "from other client", status: "in_progress" }], total: 2, completed: 0, last_updated_at: "t2", enforcement_enabled: true })
+        : response(409, { version: 3, items: [{ id: "todo-1", text: "server text", status: "not_started" }, { id: "todo-2", text: "latest row text", status: "completed" }], total: 2, completed: 1, last_updated_at: "t3", enforcement_enabled: true });
+    }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.save.click(); await settle();
+  const newRow = fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").find((row) => row.dataset.todoId === "todo-2"); assert.ok(newRow);
+  const refreshedControls = newRow.children.find((child) => child.className === "todo-controls");
+  assert.equal(refreshedControls?.children[0]?.className, "todo-status");
+  assert.equal(refreshedControls?.children[0]?.children[0]?.tagName, "span");
+  assert.equal(refreshedControls?.children[0]?.children[0]?.textContent, "状態");
+  assert.equal(refreshedControls?.children[0]?.children[1]?.dataset.todoStatus, "true");
+  assert.equal(refreshedControls?.children[1]?.className, "todo-actions");
+  assert.equal(refreshedControls?.children[1]?.children.map((button) => button.dataset.todoOp).join(","), "save,delete");
+  assert.equal(newRow.querySelector<FakeElement>("[data-todo-text]")?.rows, 2);
+  assert.notEqual(newRow.querySelector<FakeElement>("[data-todo-text]")?.style.height, "");
+  assert.equal(newRow.querySelector<FakeElement>("[data-todo-conflict]")?.hidden, true);
+  newRow.querySelector<FakeElement>('[data-todo-op="save"]')?.click(); await settle();
+  const latestText = newRow.querySelector<FakeElement>("[data-todo-latest-text]");
+  assert.equal(newRow.querySelector<FakeElement>("[data-todo-conflict]")?.hidden, false);
+  assert.equal(latestText?.textContent, "latest row text");
+  newRow.querySelector<FakeElement>('[data-todo-op="keep-draft"]')?.click();
+  assert.equal(newRow.dataset.baseText, "latest row text");
+  assert.equal(newRow.querySelector<FakeElement>('[data-todo-op="save"]')?.disabled, false);
+  void ui;
+});
+
+test("an add conflict keeps its independent draft and requires an explicit retry", async () => {
+  const fixture = todoFixture(); fixture.addText.value = "new local task";
+  const requests: Array<{ expected_version: number; changes: Array<{ text?: string }> }> = [];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") {
+      const body = JSON.parse(String(init.body)) as typeof requests[number]; requests.push(body);
+      return requests.length === 1 ? response(409, { version: 2, items: [{ id: "todo-1", text: "remote", status: "completed" }], total: 1, completed: 1, last_updated_at: "t2", enforcement_enabled: true }) : response(200, { version: 3, items: [{ id: "todo-1", text: "remote", status: "completed" }, { id: "todo-2", text: "new local task", status: "not_started" }], total: 2, completed: 1, last_updated_at: "t3", enforcement_enabled: true });
+    }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.addText.listeners.get("input")?.({ target: fixture.addText }); fixture.addButton.click(); await settle();
+  assert.equal(fixture.panel.dataset.version, "2");
+  assert.equal(fixture.addText.value, "new local task");
+  assert.equal(fixture.addConflict.hidden, false);
+  assert.equal(fixture.addButton.disabled, true);
+  fixture.keepDraftAdd.click();
+  assert.equal(fixture.addText.value, "new local task");
+  assert.equal(fixture.addButton.disabled, false);
+  assert.equal(requests.length, 1, "conflict resolution does not replay the add request");
+  fixture.addButton.click(); await settle();
+  assert.equal(requests[1]?.expected_version, 2);
+  void ui;
+});
+
+test("an add conflict blocks only add retries and does not disable other rows", async () => {
+  const fixture = todoFixture(); fixture.addText.value = "draft to add";
+  let puts = 0; const rowOperations: string[] = [];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") {
+      puts += 1;
+      const body = JSON.parse(String(init.body)) as { changes: Array<{ op: string }> };
+      if (puts > 1) rowOperations.push(body.changes[0]!.op);
+      if (puts === 1) return response(409, { version: 2, items: [{ id: "todo-1", text: "server text", status: "not_started" }], total: 1, completed: 0, conflict: true });
+      if (puts === 2) return response(200, { version: 3, items: [{ id: "todo-1", text: "edited existing row", status: "not_started" }], total: 1, completed: 0 });
+      return response(200, { version: 4, items: [], total: 0, completed: 0 });
+    }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.addText.listeners.get("input")?.({ target: fixture.addText }); fixture.addButton.click(); await settle();
+  assert.equal(fixture.addButton.disabled, true);
+  assert.equal(fixture.save.disabled, false, "row controls are independent of an add-field conflict");
+  fixture.textarea.value = "edited existing row";
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  fixture.save.click(); await settle();
+  fixture.remove.click(); await settle();
+  assert.equal(puts, 3, "non-conflicting existing row can still be saved and deleted");
+  assert.deepEqual(rowOperations, ["edit", "delete"]);
+  assert.equal(fixture.panel.dataset.version, "4");
+  void ui;
+});
+
+test("Todo snapshots reorder rows and refresh summary, timestamp, and enforcement state at the same version", async () => {
+  const fixture = todoFixture();
+  const updated = new FakeElement("time"); const enforcementText = new FakeElement("span"); const enforcementButton = new FakeElement("button");
+  fixture.panel.queries.set("[data-todo-updated]", updated); fixture.panel.queries.set("[data-todo-enforcement-state]", enforcementText); fixture.panel.queries.set("[data-todo-enforcement]", enforcementButton);
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 1, items: [{ id: "todo-2", text: "second", status: "completed", order: 0 }, { id: "todo-1", text: "server text", status: "not_started", order: 1 }], total: 2, completed: 1, last_updated_at: "2026-10-01T00:00:00Z", enforcement_enabled: false });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle();
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-2", "todo-1"]);
+  assert.equal(fixture.summary.textContent, "進捗: 1 / 2");
+  assert.notEqual(updated.textContent, "");
+  assert.equal(enforcementText.textContent, "無効");
+  assert.equal(enforcementButton.value, "true");
+});
+
+test("Todo snapshot reordering preserves focused textarea selection on a moved row", async () => {
+  const fixture = todoFixture();
+  const second = new FakeElement("li"); second.dataset = { todoId: "todo-2", baseText: "second", baseStatus: "not_started", baseVersion: "1" };
+  const secondText = new FakeElement("textarea"); secondText.value = "second"; secondText.dataset.todoText = "true"; second.queries.set("[data-todo-text]", secondText); second.append(secondText); fixture.list.append(second);
+  const third = new FakeElement("li"); third.dataset = { todoId: "todo-3", baseText: "third", baseStatus: "not_started", baseVersion: "1" };
+  const thirdText = new FakeElement("textarea"); thirdText.value = "third"; thirdText.dataset.todoText = "true"; third.queries.set("[data-todo-text]", thirdText); third.append(thirdText); fixture.list.append(third);
+  secondText.setSelectionRange(2, 5, "backward");
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-3", text: "third", status: "not_started", order: 0 }, { id: "todo-2", text: "second", status: "not_started", order: 1 }, { id: "todo-1", text: "server text", status: "not_started", order: 2 }], total: 3, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  secondText.focus();
+  ui.newest.click(); await settle(); await settle();
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-3", "todo-2", "todo-1"]);
+  assert.equal(FakeElement.activeElement, secondText, "a middle row may be moved during reorder even when its final index is unchanged");
+  assert.equal(secondText.selectionStart, 2);
+  assert.equal(secondText.selectionEnd, 5);
+  assert.equal(secondText.selectionDirection, "backward");
+  assert.equal(secondText.focusOptions?.preventScroll, true);
+  void ui;
+});
+
+test("Todo snapshot text changes preserve an active textarea selection without reordering", async () => {
+  const fixture = todoFixture();
+  let finishSnapshot!: (value: unknown) => void;
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return { status: 200, ok: true, json: async () => await new Promise((resolve) => { finishSnapshot = resolve; }) } as ReturnType<typeof response>;
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle();
+  fixture.textarea.focus(); fixture.textarea.setSelectionRange(3, 8, "backward");
+  finishSnapshot({ version: 2, items: [{ id: "todo-1", text: "server text updated by another client", status: "not_started", order: 0 }], total: 1, completed: 0 });
+  await settle(); await settle();
+  assert.equal(fixture.textarea.value, "server text updated by another client");
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-1"], "the snapshot keeps the existing row order");
+  assert.equal(FakeElement.activeElement, fixture.textarea);
+  assert.equal(fixture.textarea.selectionStart, 3);
+  assert.equal(fixture.textarea.selectionEnd, 8);
+  assert.equal(fixture.textarea.selectionDirection, "backward");
+  void ui;
+});
+
+test("ordinary Todo refresh preserves an open add disclosure and its unfinished draft", async () => {
+  const fixture = todoFixture();
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-1", text: "server text", status: "not_started" }], total: 1, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.addDetails.open = true;
+  fixture.addText.value = "unfinished add draft";
+  fixture.addText.listeners.get("input")?.({ target: fixture.addText });
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.addDetails.open, true, "a detail refresh must not close the user's open disclosure");
+  assert.equal(fixture.addText.value, "unfinished add draft");
+  assert.equal(fixture.addConflict.hidden, false, "the pending draft remains available for explicit conflict resolution");
+  void ui;
+});
+
+test("a successful 409 log resync still refreshes Todo exactly once", async () => {
+  const fixture = todoFixture(); let todoReads = 0;
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs" && parsed.searchParams.has("after")) return response(409, {});
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c1", oldestCursor: "c1", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) { todoReads += 1; return response(200, { session_id: "todo-session", version: 2, items: [], total: 0, completed: 0, enforcement_enabled: false }); }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle(); await settle();
+  assert.equal(todoReads, 1);
+  assert.equal(fixture.panel.dataset.version, "2");
+});
+
+test("a Todo 404 ends session reads while preserving rendered values", async () => {
+  const fixture = todoFixture(); let todoReads = 0;
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) { todoReads += 1; return response(404, {}); }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.textarea.value, "server text");
+  assert.equal(fixture.save.disabled, true);
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(todoReads, 1);
+});
+
+test("late Todo JSON after page departure and BFCache return cannot update the detail", async () => {
+  const fixture = todoFixture(); let finishJson!: (value: unknown) => void;
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return { status: 200, ok: true, json: async () => await new Promise((resolve) => { finishJson = resolve; }) } as ReturnType<typeof response>;
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  ui.newest.click(); await settle(); await settle();
+  ui.windowListeners.get("pagehide")?.();
+  ui.windowListeners.get("pageshow")?.({ persisted: true });
+  finishJson({ version: 2, items: [], total: 0, completed: 0, enforcement_enabled: false });
+  await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "1");
+  assert.equal(fixture.textarea.value, "server text");
+  assert.equal(ui.newest.disabled, false);
+});
+
+test("late Todo mutation JSON after page departure cannot repaint, and BFCache return restores controls", async () => {
+  const fixture = todoFixture(); let finishJson!: (value: unknown) => void;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") return { status: 200, ok: true, json: async () => await new Promise((resolve) => { finishJson = resolve; }) } as ReturnType<typeof response>;
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.save.click(); await settle();
+  ui.windowListeners.get("pagehide")?.(); ui.windowListeners.get("pageshow")?.({ persisted: true });
+  finishJson({ version: 2, items: [{ id: "todo-1", text: "stale response", status: "completed" }], total: 1, completed: 1 });
+  await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "1");
+  assert.equal(fixture.textarea.value, "server text");
+  assert.equal(fixture.save.disabled, false);
+});
+
+test("a deleted draft stays disabled after a concurrent save settles and preserves add input", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "unsaved row"; fixture.addText.value = "keep this add draft";
+  let release!: (value: ReturnType<typeof response>) => void;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") return await new Promise<ReturnType<typeof response>>((resolve) => { release = resolve; });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [], total: 0, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea }); fixture.save.click(); await settle();
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.row.dataset.deletedDraft, "true");
+  release(response(409, { version: 2, items: [], total: 0, completed: 0, conflict: true })); await settle();
+  assert.equal(fixture.save.disabled, true);
+  fixture.readdDeleted.click();
+  assert.equal(fixture.addText.value, "keep this add draft");
+  assert.equal(fixture.row.parentElement !== null, true, "collision requires explicit replace-or-keep choice");
+  assert.equal(fixture.readdConfirm.hidden, false);
+  assert.equal(fixture.replaceAddDraft.disabled, false, "deleted-draft replacement choice is enabled");
+  assert.equal(fixture.keepAddDraft.disabled, false, "deleted-draft preservation choice is enabled");
+  fixture.keepAddDraft.click();
+  assert.equal(fixture.addText.value, "keep this add draft");
+  assert.equal(fixture.readdConfirm.hidden, true, "keep choice is dispatched by the button");
+  assert.equal(fixture.addDetails.open, false, "ordinary refresh and keeping the existing add draft do not open the disclosure");
+});
+
+test("explicitly readding a deleted draft opens the add disclosure, resizes, and focuses the field", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "unsaved row";
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [], total: 0, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  ui.newest.click(); await settle(); await settle(); await settle();
+  assert.equal(fixture.addDetails.open, false, "a normal refresh leaves the collapsed disclosure closed");
+  fixture.readdDeleted.click();
+  assert.equal(fixture.addText.value, "unsaved row");
+  assert.equal(fixture.addDetails.open, true);
+  assert.equal(fixture.addText.style.height, "80px");
+  assert.equal(FakeElement.activeElement, fixture.addText);
+  assert.equal(fixture.row.parentElement, null);
+  void ui;
+});
+
+test("confirming replacement of an add draft opens and focuses the add disclosure", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "deleted draft"; fixture.addText.value = "existing add draft";
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [], total: 0, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea });
+  ui.newest.click(); await settle(); await settle(); await settle();
+  fixture.readdDeleted.click();
+  assert.equal(fixture.readdConfirm.hidden, false);
+  assert.equal(fixture.addDetails.open, false, "the collision prompt alone does not open the disclosure");
+  fixture.replaceAddDraft.click();
+  assert.equal(fixture.addDetails.open, true);
+  assert.equal(fixture.addText.value, "deleted draft");
+  assert.equal(fixture.addText.style.height, "80px");
+  assert.equal(FakeElement.activeElement, fixture.addText);
+  assert.equal(fixture.row.parentElement, null);
+  void ui;
+});
+
+test("a delayed stale row 409 cannot replace or resolve a newer snapshot", async () => {
+  const fixture = todoFixture(); fixture.textarea.value = "local draft";
+  let finishJson!: (value: unknown) => void;
+  const requests: Array<{ expected_version: number; changes: Array<{ text?: string }> }> = [];
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") {
+      requests.push(JSON.parse(String(init.body)) as typeof requests[number]);
+      return { status: 409, ok: false, json: async () => await new Promise((resolve) => { finishJson = resolve; }) } as ReturnType<typeof response>;
+    }
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 3, items: [{ id: "todo-1", text: "newer server value", status: "completed" }], total: 1, completed: 1, last_updated_at: "t3" });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.listeners.get("input")?.({ target: fixture.textarea }); fixture.save.click(); await settle();
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "3");
+  finishJson({ version: 2, items: [{ id: "todo-1", text: "old 409 value", status: "in_progress" }], total: 1, completed: 0, conflict: true }); await settle();
+  assert.equal(fixture.panel.dataset.version, "3");
+  assert.equal(fixture.latest.textContent, "newer server value");
+  fixture.keepDraft.click();
+  assert.equal(fixture.panel.dataset.version, "3", "resolving a stale conflict cannot roll back the current version");
+  assert.equal(fixture.row.dataset.baseText, "newer server value");
+  fixture.save.click(); await settle();
+  assert.equal(requests[1]?.expected_version, 3);
+  void ui;
+});
+
+test("a delayed stale add 409 cannot replace the newer full snapshot", async () => {
+  const fixture = todoFixture(); fixture.addText.value = "local add draft";
+  let finishJson!: (value: unknown) => void;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") return { status: 409, ok: false, json: async () => await new Promise((resolve) => { finishJson = resolve; }) } as ReturnType<typeof response>;
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 3, items: [{ id: "todo-1", text: "new row one", status: "not_started" }, { id: "todo-2", text: "new row two", status: "completed" }], total: 2, completed: 1 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.addText.listeners.get("input")?.({ target: fixture.addText }); fixture.addButton.click(); await settle();
+  ui.newest.click(); await settle(); await settle();
+  assert.equal(fixture.panel.dataset.version, "3");
+  finishJson({ version: 2, items: [{ id: "todo-1", text: "stale row one", status: "in_progress" }], total: 1, completed: 0, conflict: true }); await settle();
+  fixture.keepDraftAdd.click();
+  assert.equal(fixture.panel.dataset.version, "3");
+  assert.deepEqual(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").map((row) => row.dataset.todoId), ["todo-1", "todo-2"]);
+  assert.equal(fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]")[0]?.dataset.baseText, "new row one");
+  assert.equal(fixture.addText.value, "local add draft");
+  void ui;
+});
+
+test("removing the focused Todo row moves focus forward without scrolling", async () => {
+  const fixture = todoFixture();
+  const next = new FakeElement("li"); next.dataset = { todoId: "todo-2", baseText: "next", baseStatus: "not_started", baseVersion: "1" };
+  const nextText = new FakeElement("textarea"); nextText.dataset.todoText = "true"; nextText.value = "next"; next.queries.set("[data-todo-text]", nextText); next.append(nextText); fixture.list.append(next);
+  const ui = boot(async (url) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (parsed.pathname.endsWith("/todo")) return response(200, { version: 2, items: [{ id: "todo-2", text: "next", status: "not_started", order: 0 }], total: 1, completed: 0 });
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.textarea.focus(); ui.newest.click(); await settle(); await settle();
+  assert.equal(FakeElement.activeElement, nextText);
+  assert.equal(nextText.focusOptions?.preventScroll, true);
+  assert.equal(ui.scrollTargets.at(-1), 0);
+});
+
+test("applied audit warnings are displayed without resending the Todo update", async () => {
+  const fixture = todoFixture(); let requests = 0;
+  const ui = boot(async (url, init) => {
+    const parsed = new URL(url, "http://local.test");
+    if (parsed.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-10-01T00:00:00Z" });
+    if (parsed.pathname.endsWith("/todo") && init?.method === "PUT") { requests += 1; return response(200, { version: 2, items: [{ id: "todo-1", text: "server text", status: "not_started" }], total: 1, completed: 0, audit_warning: true, applied: true }); }
+    throw new Error("unexpected request " + parsed.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  fixture.save.click(); await settle();
+  assert.match(fixture.notice.textContent, /適用済み/);
+  assert.equal(requests, 1);
+  void ui;
 });
 
 test("operation detail keeps its open state when unrelated new logs redraw the table", async () => {
