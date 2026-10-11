@@ -11,7 +11,12 @@ import {
 } from "../scripts/ci-test-paired-comparison.mjs";
 import {
   STARTUP_DIAGNOSTIC_JOB_BUDGET_MS,
+  STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS,
+  STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS,
   STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS,
+  STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS,
+  STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS,
+  STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
   STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
   STARTUP_DIAGNOSTIC_TEST_FILE,
   createDiagnosticSummary,
@@ -25,10 +30,12 @@ import {
   safeDiagnosticError,
   validateDiagnosticRow,
 } from "../scripts/ci-test-paired-startup-diagnostic.mjs";
+import { guardFixturePreparation, importEntryWithSafeDiagnosticMarkers } from "../scripts/ci-test-paired-startup-observer.mjs";
 
 test("startup diagnostic is bounded and separate from the 70-sample performance schedule", () => {
   assert.equal(STARTUP_DIAGNOSTIC_JOB_BUDGET_MS, 10 * 60 * 1000);
-  assert.ok(STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS < STARTUP_DIAGNOSTIC_JOB_BUDGET_MS);
+  assert.equal(STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS + STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS + STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS + STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS, STARTUP_DIAGNOSTIC_JOB_BUDGET_MS);
+  assert.equal(STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS + STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS, STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS);
   assert.equal(STARTUP_DIAGNOSTIC_SAMPLE_COUNT, 2);
   assert.equal(STARTUP_DIAGNOSTIC_TEST_FILE, "test/config-transfer-integrity.test.ts");
   assert.equal(diagnosticBudgetRemaining(10_000, 9_900), 100);
@@ -62,6 +69,13 @@ test("sidecar reader rejects unknown event properties and accepts fixed identity
     await writeFile(file, `${JSON.stringify({ ...identity, seq: 1, event: "bootstrap_entry_import_succeeded", phase: "entry_import", outcome: "success", rawstderr: "unsafe-field-fixture" })}\n`);
     await assert.rejects(readSafeDiagnosticEvents(file, identity), /unsafe record/);
     assert.equal((await readFile(file, "utf8")).includes("unsafe-field-fixture"), true);
+    const safe = (seq: number) => JSON.stringify({ ...identity, seq, event: "bootstrap_entry_import_succeeded", phase: "entry_import", outcome: "success" });
+    await writeFile(file, `${safe(8)}\n${safe(9)}\n`);
+    assert.equal((await readSafeDiagnosticEvents(file, identity)).length, 2);
+    await writeFile(file, `${safe(8)}\n${safe(8)}\n`);
+    await assert.rejects(readSafeDiagnosticEvents(file, identity), /unsafe record/);
+    await writeFile(file, `${safe(8)}\n${safe(7)}\n`);
+    await assert.rejects(readSafeDiagnosticEvents(file, identity), /unsafe record/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -78,10 +92,60 @@ test("overlay generation instruments the same fixed-source launch without privat
     assert.doesNotMatch(left, /\._process\b/);
   }
   const entry = overlaySource("scripts/desktop-commander-bootstrap.mjs", Buffer.from(execFileSync("git", ["show", `${BASELINE_COMMIT}:scripts/desktop-commander-bootstrap.mjs`], { encoding: "utf8" })));
-  assert.match(entry.toString("utf8"), /bootstrap_entry_import_failed/);
+  assert.match(entry.toString("utf8"), /importEntryWithSafeDiagnosticMarkers/);
   assert.match(entry.toString("utf8"), /exitCode: null, signal: "unknown"/);
   const service = overlaySource("src/index.ts", Buffer.from(execFileSync("git", ["show", `${BASELINE_COMMIT}:src/index.ts`], { encoding: "utf8" })));
   assert.match(service.toString("utf8"), /dc_connect_failed.*exitCode: null, signal: "unknown"/);
+  const fixture = overlaySource("test/fixture.ts", Buffer.from(execFileSync("git", ["show", `${BASELINE_COMMIT}:test/fixture.ts`], { encoding: "utf8" })));
+  assert.match(fixture.toString("utf8"), /guardFixturePreparation/);
+  assert.match(fixture.toString("utf8"), /setPhase\("fixture_private_storage"\)/);
+});
+
+test("best-effort entry and fixture diagnostics preserve the primary failure and release the keep-alive timer", async () => {
+  const primaryImportError = new Error("original entry import failure");
+  await assert.rejects(
+    importEntryWithSafeDiagnosticMarkers(async () => { throw primaryImportError; }, () => { throw new Error("marker failure"); }),
+    (error: unknown) => error === primaryImportError,
+  );
+  assert.equal(await importEntryWithSafeDiagnosticMarkers(async () => "loaded", () => { throw new Error("success marker failure"); }), "loaded");
+
+  const primaryFixtureError = Object.assign(new Error("fixture setup failure"), { code: "EACCES" });
+  const observed: Array<{ event: string; phase?: string; errorCode?: string }> = [];
+  const keepAlive = {} as ReturnType<typeof setInterval>;
+  let timerReleased = false;
+  let cleanupCalled = false;
+  await assert.rejects(guardFixturePreparation(async (setPhase) => {
+    setPhase("fixture_private_storage");
+    throw primaryFixtureError;
+  }, {
+    keepAlive,
+    clearTimer: (timer) => { assert.equal(timer, keepAlive); timerReleased = true; },
+    emit: (event, fields) => { observed.push({ event, phase: fields?.phase as string, errorCode: fields?.errorCode as string }); throw new Error("observer failure"); },
+    cleanup: () => { cleanupCalled = true; },
+  }), (error: unknown) => error === primaryFixtureError);
+  assert.equal(timerReleased, true);
+  assert.equal(cleanupCalled, true);
+  assert.ok(observed.some((item) => item.event === "fixture_prepare_failed" && item.phase === "fixture_private_storage" && item.errorCode === "EACCES"));
+});
+
+test("diagnostic timeout only confirms its owned direct child and never claims the process tree stopped", async () => {
+  const source = await readFile(path.resolve("scripts/ci-test-paired-startup-diagnostic.mjs"), "utf8");
+  assert.doesNotMatch(source, /taskkill\.exe|Win32_Process/u);
+  const child = { stdout: { destroy() {} }, stderr: { destroy() {} }, unref() {} };
+  const timeout = await runBoundedChild("ignored", [], {
+    runProcess: async () => ({ timedOut: true, child, childClose: Promise.resolve({ kind: "closed" }) }),
+    terminateChild: async () => ({ verified: true, reason: "direct_child_close_observed" }),
+  });
+  assert.equal(timeout.directChildTermination, "verified");
+  assert.equal(timeout.treeTermination, "unknown");
+  assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: false, terminationUnverified: true }), false);
+
+  const unknown = await runBoundedChild("ignored", [], {
+    runProcess: async () => ({ timedOut: true, child, childClose: Promise.resolve({ kind: "closed" }) }),
+    terminateChild: async () => ({ verified: false, reason: "owned_child_handle_unavailable" }),
+  });
+  assert.equal(unknown.directChildTermination, "unknown");
+  assert.equal(unknown.treeTermination, "unknown");
 });
 
 test("restore writes originals only when the exact overlay hash still matches", async () => {

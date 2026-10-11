@@ -14,7 +14,12 @@ import {
 import { fileURLToPath } from "node:url";
 
 export const STARTUP_DIAGNOSTIC_JOB_BUDGET_MS = 10 * 60 * 1000;
-export const STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS = 9 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS = 4 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS = 4 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS = 3 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS = 1 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS = 1 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS = 1 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_TEST_FILE = "test/config-transfer-integrity.test.ts";
 export const STARTUP_DIAGNOSTIC_SAMPLE_COUNT = 2;
 
@@ -53,15 +58,15 @@ export function validateDiagnosticRow(row, expectedIdentity, previousSequence = 
   const allowedKeys = new Set(["side", "runId", "sha", "seq", "event", "phase", "classification", "errorClass", "errorCode", "role", "present", "outcome", "exitCode", "signal", "argsShape", "cwdRole", "envPolicy", "shell"]);
   const allowedEvents = new Set([
     "driver_started", "npm_ci_started", "npm_ci_completed", "overlay_applied", "overlay_restored", "overlay_restore_skipped",
-    "fixture_prepare_started", "fixture_prepare_ready", "fixture_initialize_started", "fixture_initialize_failed", "fixture_cleanup_started", "fixture_cleanup_completed",
+    "fixture_prepare_started", "fixture_prepare_ready", "fixture_prepare_failed", "fixture_initialize_started", "fixture_initialize_failed", "fixture_cleanup_started", "fixture_cleanup_completed",
     "dc_transport_configured", "dc_connect_started", "dc_connect_completed", "dc_connect_failed", "dc_list_tools_started", "dc_list_tools_completed", "dc_list_tools_failed",
     "dc_roots_started", "dc_roots_completed", "dc_roots_failed", "dc_ready", "dc_transport_closed", "dc_transport_error", "bootstrap_started", "diagnostic_timeout", "tree_termination_verified", "tree_termination_unknown",
-    "bootstrap_entry_import_started", "bootstrap_entry_import_succeeded", "bootstrap_entry_import_failed", "bootstrap_failed", "test_started", "test_completed",
+    "bootstrap_entry_import_started", "bootstrap_entry_import_succeeded", "bootstrap_entry_import_failed", "bootstrap_failed", "direct_child_termination_verified", "test_started", "test_completed",
   ]);
   if (!row || typeof row !== "object" || Array.isArray(row) || Object.keys(row).some((key) => !allowedKeys.has(key))) return false;
   if (row.side !== expectedIdentity.side || row.runId !== expectedIdentity.runId || row.sha !== expectedIdentity.sha
     || !Number.isSafeInteger(row.seq) || row.seq <= previousSequence || !allowedEvents.has(row.event)) return false;
-  if (row.phase !== undefined && !new Set(["fixture", "initialize", "transport_connect", "list_tools", "root_verification", "bootstrap", "config_manager", "ownership_bridge", "terminal_manager", "entry_import", "cleanup", "npm_ci", "test", "overlay_restore"]).has(row.phase)) return false;
+  if (row.phase !== undefined && !new Set(["fixture", "fixture_workspace", "fixture_validation_directory", "fixture_validation_path_validation", "fixture_base_directory", "fixture_base_path_validation", "fixture_root_data_directories", "fixture_private_storage", "fixture_service_construction", "initialize", "transport_connect", "list_tools", "root_verification", "bootstrap", "config_manager", "ownership_bridge", "terminal_manager", "entry_import", "cleanup", "npm_ci", "test", "overlay_restore"]).has(row.phase)) return false;
   if (row.classification !== undefined && !new Set(["spawn_failure", "entry_import_failure", "initialize_disconnect", "other", "unknown"]).has(row.classification)) return false;
   if (row.errorClass !== undefined && !new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "McpError", "SystemError", "unknown"]).has(row.errorClass)) return false;
   if (row.errorCode !== undefined && row.errorCode !== "unknown" && !NODE_ERROR_CODES.has(row.errorCode)) return false;
@@ -131,7 +136,7 @@ export function overlaySource(file, original) {
   } else if (file === "scripts/desktop-commander-bootstrap.mjs") {
     text = replaceOnce(text,
       'import { prepareWindowsJobLauncher } from "./windows-job-launcher.mjs";\n',
-      'import { prepareWindowsJobLauncher } from "./windows-job-launcher.mjs";\nimport { emitStartupDiagnostic, safeStartupError } from "./ci-test-paired-startup-observer.mjs";\n',
+      'import { prepareWindowsJobLauncher } from "./windows-job-launcher.mjs";\nimport { emitStartupDiagnostic, importEntryWithSafeDiagnosticMarkers, safeStartupError } from "./ci-test-paired-startup-observer.mjs";\n',
       "bootstrap observer import");
     text = replaceOnce(text,
       'try {\n  const configModule =',
@@ -152,27 +157,42 @@ export function overlaySource(file, original) {
       '  bootstrapPhase = "entry_import";\n'
       + '  try { emitStartupDiagnostic("bootstrap_entry_import_started", { phase: "entry_import" }); } catch { /* safe diagnostic is best effort */ }\n'
       + '  process.argv = [process.argv[0], entry, ...forwardedArguments];\n'
-      + '  try { await import(pathToFileURL(entry).href); emitStartupDiagnostic("bootstrap_entry_import_succeeded", { phase: "entry_import", outcome: "success" }); }\n'
-      + '  catch (error) { const safe = safeStartupError(error); try { emitStartupDiagnostic("bootstrap_entry_import_failed", { phase: "entry_import", classification: "entry_import_failure", errorClass: safe.errorClass, errorCode: safe.errorCode, outcome: "failure", exitCode: null, signal: "unknown" }); } catch { /* preserve import error */ } throw error; }\n'
+      + '  await importEntryWithSafeDiagnosticMarkers(() => import(pathToFileURL(entry).href));\n'
       + '} catch (error) { const safe = safeStartupError(error); try { emitStartupDiagnostic("bootstrap_failed", { phase: bootstrapPhase === "entry_import" ? "entry_import" : bootstrapPhase, classification: bootstrapPhase === "entry_import" ? "entry_import_failure" : safe.classification, errorClass: safe.errorClass, errorCode: safe.errorCode, outcome: "failure", exitCode: null, signal: "unknown" }); } catch { /* preserve bootstrap error */ } throw error;\n} finally {',
       "bootstrap entry import and failure");
   } else if (file === "test/fixture.ts") {
     text = replaceOnce(text,
       'import { protectPrivateDirectory } from "../src/private-storage.js";\n',
-      'import { protectPrivateDirectory } from "../src/private-storage.js";\nimport { emitStartupDiagnostic, safeStartupError } from "../scripts/ci-test-paired-startup-observer.mjs";\n',
+      'import { protectPrivateDirectory } from "../src/private-storage.js";\nimport { emitStartupDiagnostic, guardFixturePreparation } from "../scripts/ci-test-paired-startup-observer.mjs";\n',
       "fixture observer import");
     text = replaceOnce(text,
-      'export async function fixture(options: { initializeService?: boolean } = {}): Promise<Fixture> {\n  // Node 22 does not keep the test process alive for an in-memory MCP handshake.\n',
-      'export async function fixture(options: { initializeService?: boolean } = {}): Promise<Fixture> {\n  const diagnostic = (event: Parameters<typeof emitStartupDiagnostic>[0], fields: Record<string, unknown> = {}) => { try { emitStartupDiagnostic(event, fields); } catch { /* diagnostic failures do not change fixture behavior */ } };\n  diagnostic("fixture_prepare_started", { phase: "fixture" });\n  // Node 22 does not keep the test process alive for an in-memory MCP handshake.\n',
+      'export async function fixture(options: { initializeService?: boolean } = {}): Promise<Fixture> {\n  // Node 22 does not keep the test process alive for an in-memory MCP handshake.\n  // This referenced timer belongs to the fixture and is always cleared by cleanup.\n  const keepAlive = setInterval(() => undefined, 1_000);\n  const workspace = path.resolve(process.cwd());\n',
+      'export async function fixture(options: { initializeService?: boolean } = {}): Promise<Fixture> {\n  const diagnostic = (event: Parameters<typeof emitStartupDiagnostic>[0], fields: Record<string, unknown> = {}) => { try { emitStartupDiagnostic(event, fields); } catch { /* diagnostic failures do not change fixture behavior */ } };\n  const keepAlive = setInterval(() => undefined, 1_000);\n  diagnostic("fixture_prepare_started", { phase: "fixture" });\n  let baseDirectory: string | undefined;\n  let serviceForCleanup: RemoteDesktopService | undefined;\n  return guardFixturePreparation(async (setPhase) => {\n    setPhase("fixture_workspace");\n    const workspace = path.resolve(process.cwd());\n',
       "fixture preparation start");
     text = replaceOnce(text,
-      '    try { await service.initialize(); }\n    catch (error) {\n',
-      '    diagnostic("fixture_initialize_started", { phase: "initialize" });\n    try { await service.initialize(); }\n    catch (error) {\n      diagnostic("fixture_initialize_failed", { phase: "initialize", ...safeStartupError(error) });\n',
-      "fixture initialize phase");
+      '  const relativeValidation = path.relative(workspace, validation);\n  if (!relativeValidation',
+      '  const relativeValidation = path.relative(workspace, validation);\n  setPhase("fixture_validation_path_validation");\n  if (!relativeValidation',
+      "fixture validation path stage");
     text = replaceOnce(text,
-      '      clearInterval(keepAlive);\n      throw error;\n    }\n  }\n  return { service, root, data, base, cleanup: async () => { try { await service.close(); await rm(base, { recursive: true, force: true, maxRetries: 3 }); } finally { clearInterval(keepAlive); } } };\n',
-      '      clearInterval(keepAlive);\n      throw error;\n    }\n  }\n  diagnostic("fixture_prepare_ready", { phase: "fixture", outcome: "success" });\n'
-      + '  return { service, root, data, base, cleanup: async () => { diagnostic("fixture_cleanup_started", { phase: "cleanup" }); try { await service.close(); await rm(base, { recursive: true, force: true, maxRetries: 3 }); diagnostic("fixture_cleanup_completed", { phase: "cleanup", outcome: "success" }); } finally { clearInterval(keepAlive); } } };\n',
+      '  await mkdir(validation, { recursive: true });\n  const base = await mkdtemp(path.join(validation, "rdmcp-regression-"));\n',
+      '  setPhase("fixture_validation_directory");\n  await mkdir(validation, { recursive: true });\n  setPhase("fixture_base_directory");\n  const base = await mkdtemp(path.join(validation, "rdmcp-regression-"));\n  baseDirectory = base;\n',
+      "fixture directories stage");
+    text = replaceOnce(text,
+      '  const relativeBase = path.relative(validation, base);\n  if (!relativeBase',
+      '  const relativeBase = path.relative(validation, base);\n  setPhase("fixture_base_path_validation");\n  if (!relativeBase',
+      "fixture base path stage");
+    text = replaceOnce(text,
+      '  const data = path.join(base, "data");\n  await Promise.all([mkdir(root), mkdir(data)]);\n  await protectPrivateDirectory(data);\n',
+      '  const data = path.join(base, "data");\n  setPhase("fixture_root_data_directories");\n  await Promise.all([mkdir(root), mkdir(data)]);\n  setPhase("fixture_private_storage");\n  await protectPrivateDirectory(data);\n',
+      "fixture storage stages");
+    text = replaceOnce(text,
+      '  const service = new RemoteDesktopService(cfg);\n  if (options.initializeService !== false) {\n',
+      '  setPhase("fixture_service_construction");\n  const service = new RemoteDesktopService(cfg);\n  serviceForCleanup = service;\n  if (options.initializeService !== false) {\n',
+      "fixture service construction stage");
+    text = replaceOnce(text,
+      '    try { await service.initialize(); }\n    catch (error) {\n      await service.close().catch(() => undefined);\n      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);\n      clearInterval(keepAlive);\n      throw error;\n    }\n  }\n  return { service, root, data, base, cleanup: async () => { try { await service.close(); await rm(base, { recursive: true, force: true, maxRetries: 3 }); } finally { clearInterval(keepAlive); } } };\n',
+      '    setPhase("initialize");\n    diagnostic("fixture_initialize_started", { phase: "initialize" });\n    await service.initialize();\n  }\n  return { service, root, data, base, cleanup: async () => { diagnostic("fixture_cleanup_started", { phase: "cleanup" }); try { await service.close(); await rm(base, { recursive: true, force: true, maxRetries: 3 }); diagnostic("fixture_cleanup_completed", { phase: "cleanup", outcome: "success" }); } finally { clearInterval(keepAlive); } } };\n'
+      + '  }, { keepAlive, emit: diagnostic, cleanup: async () => { if (serviceForCleanup) await serviceForCleanup.close().catch(() => undefined); if (baseDirectory) await rm(baseDirectory, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined); } });\n',
       "fixture cleanup and completion");
   } else {
     throw new Error("Unsupported diagnostic overlay target.");
@@ -210,17 +230,19 @@ export async function restoreOverlayFiles(overlays, { read = readFile, write = w
 
 export async function readSafeDiagnosticEvents(file, identity) {
   const text = await readFile(file, "utf8");
-  let sequence = 0;
+  let previousSequence = 0;
   const rows = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  if (rows.some((row) => !validateDiagnosticRow(row, identity, sequence++))) throw new Error("Diagnostic sidecar contains an unknown or unsafe record.");
+  for (const row of rows) {
+    if (!validateDiagnosticRow(row, identity, previousSequence)) throw new Error("Diagnostic sidecar contains an unknown or unsafe record.");
+    previousSequence = row.seq;
+  }
   return rows;
 }
 
 async function appendSafeDriverEvent(file, identity, event, fields = {}) {
   let seq = 1;
   try {
-    const text = await readFile(file, "utf8");
-    const rows = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const rows = await readSafeDiagnosticEvents(file, identity);
     seq = (rows.at(-1)?.seq ?? 0) + 1;
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
@@ -230,11 +252,16 @@ async function appendSafeDriverEvent(file, identity, event, fields = {}) {
   await writeFile(file, `${JSON.stringify(row)}\n`, { flag: "a" });
 }
 
-async function childProcess(command, args, { cwd, env = process.env, shell = false, deadline, captureStdout = false, allowPostDeadline = false, killDirectOnTimeout = false } = {}) {
+const spawnedDiagnosticChildren = new WeakSet();
+
+async function childProcess(command, args, { cwd, env = process.env, shell = false, deadline, captureStdout = false, allowPostDeadline = false } = {}) {
   const remaining = diagnosticBudgetRemaining(deadline);
   if (!allowPostDeadline && remaining <= 0) return { timedOut: true, exitCode: null, signal: null, errorCode: "unknown", child: null };
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd, env, shell, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    spawnedDiagnosticChildren.add(child);
+    let resolveClosed;
+    const childClose = new Promise((resolveClose) => { resolveClosed = resolveClose; });
     const chunks = [];
     let done = false;
     let timer;
@@ -242,68 +269,49 @@ async function childProcess(command, args, { cwd, env = process.env, shell = fal
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ ...result, stdout: captureStdout ? Buffer.concat(chunks).toString("utf8") : "", child });
+      resolve({ ...result, stdout: captureStdout ? Buffer.concat(chunks).toString("utf8") : "", child, childClose });
     };
     if (captureStdout) child.stdout?.on("data", (chunk) => chunks.push(chunk));
     else child.stdout?.on("data", () => undefined);
     child.stderr?.on("data", () => undefined);
-    child.once("error", (error) => finish({ spawnError: true, errorCode: NODE_ERROR_CODES.has(error.code) ? error.code : "unknown", exitCode: null, signal: null, timedOut: false }));
-    child.once("close", (exitCode, signal) => finish({ spawnError: false, errorCode: "unknown", exitCode, signal, timedOut: false }));
+    child.once("error", (error) => { resolveClosed({ kind: "spawn_error" }); finish({ spawnError: true, errorCode: NODE_ERROR_CODES.has(error.code) ? error.code : "unknown", exitCode: null, signal: null, timedOut: false }); });
+    child.once("close", (exitCode, signal) => { resolveClosed({ kind: "closed", exitCode, signal }); finish({ spawnError: false, errorCode: "unknown", exitCode, signal, timedOut: false }); });
     if (!allowPostDeadline) timer = setTimeout(() => {
-      if (killDirectOnTimeout) child.kill();
       finish({ spawnError: false, errorCode: "unknown", exitCode: null, signal: null, timedOut: true });
     }, remaining);
   });
 }
 
-async function runPowerShell(command, args, timeoutMs = 10_000) {
-  const deadline = performance.now() + timeoutMs;
-  return childProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command, ...args], { cwd: process.cwd(), deadline, captureStdout: true, killDirectOnTimeout: true });
-}
-
-function processTreeSnapshotScript() {
-  return "$ErrorActionPreference='Stop'; $root=[int]$args[0]; $owner=[int]$args[1]; $all=@(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate); $r=@($all | Where-Object { $_.ProcessId -eq $root }); if($r.Count -ne 1 -or $r[0].ParentProcessId -ne $owner){ exit 23 }; $ids=@($root); $rows=@($r[0]); do { $before=$ids.Count; foreach($p in $all){ if($ids -contains [int]$p.ParentProcessId -and $ids -notcontains [int]$p.ProcessId){ $ids+=([int]$p.ProcessId); $rows+=($p) } } } while($ids.Count -gt $before); @($rows | ForEach-Object { [pscustomobject]@{ processId=[int]$_.ProcessId; creationDate=[string]$_.CreationDate } } | ConvertTo-Json -Compress)";
-}
-
-export async function terminateOwnedProcessTree(child, { ownerPid = process.pid, query = runPowerShell, spawnUtility = childProcess, pollMs = 250, verifyMs = 8_000 } = {}) {
-  if (process.platform !== "win32" || !Number.isInteger(child?.pid) || child.pid <= 0) return { verified: false, reason: "ownership_unavailable" };
-  const snapshot = await query(processTreeSnapshotScript(), [String(child.pid), String(ownerPid)]);
-  if (snapshot.spawnError || snapshot.timedOut || snapshot.exitCode !== 0) return { verified: false, reason: "tree_snapshot_failed" };
-  let tree;
-  try { tree = JSON.parse(snapshot.stdout); if (!Array.isArray(tree)) tree = [tree]; }
-  catch { return { verified: false, reason: "tree_snapshot_invalid" }; }
-  if (!tree.length || tree[0]?.processId !== child.pid || !tree[0]?.creationDate || tree.some((entry) => !Number.isInteger(entry?.processId) || typeof entry.creationDate !== "string")) {
-    return { verified: false, reason: "tree_identity_unverified" };
+async function terminateOwnedChild(child, childClose, { waitMs = 5_000 } = {}) {
+  // Target only this runner's live ChildProcess handle; process-tree termination remains unverified.
+  if (!child || !spawnedDiagnosticChildren.has(child) || !Number.isInteger(child.pid) || child.pid <= 0 || typeof child.kill !== "function") {
+    return { verified: false, reason: "owned_child_handle_unavailable" };
   }
-  const killed = await spawnUtility("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-    cwd: process.cwd(), deadline: performance.now() + 15_000, shell: false,
-  });
-  if (killed.spawnError || killed.timedOut) return { verified: false, reason: "tree_termination_command_unverified" };
-  const end = performance.now() + verifyMs;
-  while (performance.now() < end) {
-    const check = await query(`$ErrorActionPreference='Stop'; $wanted=ConvertFrom-Json '${JSON.stringify(tree)}'; $all=@(Get-CimInstance Win32_Process -Property ProcessId,CreationDate); $alive=@(); foreach($w in $wanted){ if(@($all | Where-Object { $_.ProcessId -eq $w.processId -and [string]$_.CreationDate -eq $w.creationDate }).Count -gt 0){ $alive+=([int]$w.processId) } }; ConvertTo-Json -Compress -InputObject @($alive)`, []);
-    if (!check.spawnError && !check.timedOut && check.exitCode === 0) {
-      try {
-        const alive = JSON.parse(check.stdout || "[]");
-        if (Array.isArray(alive) && alive.length === 0) return { verified: true, reason: "tree_members_absent" };
-      } catch { /* continue verification until the bounded verification window ends */ }
-    }
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return { verified: false, reason: "tree_members_remain_or_unknown" };
+  if (child.exitCode !== null || child.signalCode !== null) return { verified: true, reason: "direct_child_already_closed" };
+  try { child.kill(); }
+  catch { return { verified: false, reason: "direct_child_signal_failed" }; }
+  let timeout;
+  const closed = await Promise.race([
+    childClose.then((result) => result.kind === "closed"),
+    new Promise((resolve) => { timeout = setTimeout(() => resolve(false), waitMs); }),
+  ]);
+  clearTimeout(timeout);
+  return closed
+    ? { verified: true, reason: "direct_child_close_observed" }
+    : { verified: false, reason: "direct_child_close_unconfirmed" };
 }
 
 export async function runBoundedChild(command, args, options) {
   const result = await (options?.runProcess ?? childProcess)(command, args, options);
-  if (!result.timedOut) return { ...result, treeTermination: "not_required" };
-  if (!result.child) return { ...result, treeTermination: "verified" };
-  const termination = await (options?.terminateTree ?? terminateOwnedProcessTree)(result.child, options?.treeOptions);
+  if (!result.timedOut) return { ...result, treeTermination: "not_required", directChildTermination: "not_required" };
+  if (!result.child) return { ...result, treeTermination: "verified", directChildTermination: "not_applicable" };
+  const termination = await (options?.terminateChild ?? terminateOwnedChild)(result.child, result.childClose, options?.terminationOptions);
   if (!termination.verified) {
     result.child.stdout?.destroy();
     result.child.stderr?.destroy();
     result.child.unref();
   }
-  return { ...result, treeTermination: termination.verified ? "verified" : "unknown", terminationReason: termination.reason };
+  return { ...result, treeTermination: "unknown", directChildTermination: termination.verified ? "verified" : "unknown", terminationReason: termination.reason };
 }
 
 async function git(root, args, deadline, captureStdout = false) {
@@ -368,7 +376,17 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
   return {
     schemaVersion: 1, mode: "startup_diagnostic_only", status: "in_progress", startedAt: new Date().toISOString(),
     runId, runAttempt: attempt, driverSha, baselineCommit: BASELINE_COMMIT, candidateCommit: CANDIDATE_COMMIT,
-    budgetMs: STARTUP_DIAGNOSTIC_JOB_BUDGET_MS, sampleLimit: STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
+    budgetMs: STARTUP_DIAGNOSTIC_JOB_BUDGET_MS,
+    budgetPlan: {
+      origin: "script_entry_after_timeout_capped_checkout_node_setup_and_metadata",
+      preparationMaxMs: STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS,
+      scriptStepMaxMs: STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS,
+      scriptWorkMaxMs: STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS,
+      checkpointCleanupReserveMs: STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS,
+      artifactUploadMaxMs: STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS,
+      runnerTransitionReserveMs: STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
+    },
+    sampleLimit: STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
     testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", test: "not_started", overlay: "not_applied" }, candidate: { npmCi: "not_started", test: "not_started", overlay: "not_applied" } },
     primaryError: null, checkpointFailureCount: 0, worktreeDisposition: "owned_temporary_worktrees",
   };
@@ -377,6 +395,7 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
 async function runStartupDiagnostic() {
   const startedMono = performance.now();
   const deadline = startedMono + STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS;
+  const finalizationDeadline = deadline + STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS;
   const root = process.cwd();
   const artifactRoot = path.join(root, "ci-artifacts", "paired-startup-diagnostic");
   await mkdir(artifactRoot, { recursive: true });
@@ -450,6 +469,7 @@ async function runStartupDiagnostic() {
       if (install.timedOut) {
         allOwnedProcessesClosed &&= install.treeTermination === "verified";
         if (install.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
+        summary.sides[side].directChildTermination = install.directChildTermination;
         summary.sides[side].npmCi = install.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
         throw Object.assign(new Error("npm ci timed out"), { diagnosticClass: install.treeTermination === "verified" ? "timeout" : "termination_unverified" });
       }
@@ -509,7 +529,11 @@ async function runStartupDiagnostic() {
         summary.sides[side].test = result.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
         summary.sides[side].testExitCode = null;
         await appendSafeDriverEvent(sidecar, identityForSide, "diagnostic_timeout", { phase: "test", outcome: "timeout" });
+        if (result.directChildTermination === "verified") {
+          await appendSafeDriverEvent(sidecar, identityForSide, "direct_child_termination_verified", { phase: "test", outcome: "success" });
+        }
         await appendSafeDriverEvent(sidecar, identityForSide, result.treeTermination === "verified" ? "tree_termination_verified" : "tree_termination_unknown", { phase: "test", outcome: result.treeTermination === "verified" ? "success" : "unknown" });
+        summary.sides[side].directChildTermination = result.directChildTermination;
         recordFailure("test", new Error("test sample timed out"), result.treeTermination === "verified" ? "timeout" : "termination_unverified");
         await checkpoint();
         if (result.treeTermination !== "verified") break;
@@ -562,7 +586,7 @@ async function runStartupDiagnostic() {
     }
     if (diagnosticWorktreesMayBeMutated({ preserveWorktrees, terminationUnverified }) && allOwnedProcessesClosed) {
       for (const { path: worktree } of [...worktrees].reverse()) {
-        const removed = await runBoundedChild("git", ["worktree", "remove", "--force", worktree], { cwd: root, shell: false, deadline });
+        const removed = await runBoundedChild("git", ["worktree", "remove", "--force", worktree], { cwd: root, shell: false, deadline: finalizationDeadline });
         if (removed.timedOut || removed.spawnError || removed.exitCode !== 0 || removed.treeTermination === "unknown") {
           preserveWorktrees = true;
           recordFailure("worktree_cleanup", new Error("owned worktree cleanup unverified"), "cleanup_unverified");

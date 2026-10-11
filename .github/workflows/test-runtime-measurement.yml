@@ -45,15 +45,24 @@ jobs:
 
       - name: Checkout full history for paired comparison
         if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic')
+        timeout-minutes: ${{ inputs.mode == 'paired-startup-diagnostic' && 2 || 360 }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'paired-startup-diagnostic'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
+      - name: Set up Node.js for startup diagnostic
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-startup-diagnostic'
+        timeout-minutes: 1
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Skip an already successful measurement for this PR head
         id: measurement-gate
@@ -77,6 +86,7 @@ jobs:
 
       - name: Resolve workflow metadata
         if: steps.measurement-gate.outcome != 'failure' && steps.measurement-gate.outputs.skip != 'true'
+        timeout-minutes: ${{ inputs.mode == 'paired-startup-diagnostic' && 1 || 360 }}
         shell: pwsh
         env:
           CI_GITHUB_TOKEN: ${{ github.token }}
@@ -111,6 +121,7 @@ jobs:
 
       - name: Run bounded paired startup diagnostic
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-startup-diagnostic'
+        timeout-minutes: 4
         shell: pwsh
         env:
           CI_RUNNER_LABEL: windows-latest
@@ -135,10 +146,20 @@ jobs:
           retention-days: 14
 
       - name: Upload paired comparison evidence
-        if: always() && github.event_name == 'workflow_dispatch' && (inputs.mode == 'paired-comparison' || inputs.mode == 'paired-startup-diagnostic')
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-comparison'
         uses: actions/upload-artifact@v4
         with:
-          name: test-runtime-paired-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          name: test-runtime-paired-comparison-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           path: ci-artifacts/paired-comparison
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload paired startup diagnostic evidence
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-startup-diagnostic'
+        timeout-minutes: 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runtime-paired-startup-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ci-artifacts/paired-startup-diagnostic
           if-no-files-found: warn
           retention-days: 14

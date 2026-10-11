@@ -3,18 +3,18 @@ import path from "node:path";
 
 const EVENTS = new Set([
   "driver_started", "npm_ci_started", "npm_ci_completed", "overlay_applied", "overlay_restored",
-  "overlay_restore_skipped", "fixture_prepare_started", "fixture_prepare_ready", "fixture_initialize_started",
+  "overlay_restore_skipped", "fixture_prepare_started", "fixture_prepare_ready", "fixture_prepare_failed", "fixture_initialize_started",
   "fixture_initialize_failed", "fixture_cleanup_started", "fixture_cleanup_completed", "dc_transport_configured",
   "dc_connect_started", "dc_connect_completed", "dc_connect_failed", "dc_list_tools_started",
   "dc_list_tools_completed", "dc_list_tools_failed", "dc_roots_started", "dc_roots_completed",
   "dc_roots_failed", "dc_ready", "dc_transport_closed", "dc_transport_error", "bootstrap_started",
   "bootstrap_entry_import_started", "bootstrap_entry_import_succeeded", "bootstrap_entry_import_failed",
   "bootstrap_failed", "test_started", "test_completed", "diagnostic_timeout", "tree_termination_verified",
-  "tree_termination_unknown",
+  "tree_termination_unknown", "direct_child_termination_verified",
 ]);
 const FIELD_NAMES = new Set(["phase", "classification", "errorClass", "errorCode", "role", "present", "outcome", "exitCode", "signal", "argsShape", "cwdRole", "envPolicy", "shell"]);
 const ENUMS = {
-  phase: new Set(["fixture", "initialize", "transport_connect", "list_tools", "root_verification", "bootstrap", "config_manager", "ownership_bridge", "terminal_manager", "entry_import", "cleanup", "npm_ci", "test", "overlay_restore"]),
+  phase: new Set(["fixture", "fixture_workspace", "fixture_validation_directory", "fixture_validation_path_validation", "fixture_base_directory", "fixture_base_path_validation", "fixture_root_data_directories", "fixture_private_storage", "fixture_service_construction", "initialize", "transport_connect", "list_tools", "root_verification", "bootstrap", "config_manager", "ownership_bridge", "terminal_manager", "entry_import", "cleanup", "npm_ci", "test", "overlay_restore"]),
   classification: new Set(["spawn_failure", "entry_import_failure", "initialize_disconnect", "other", "unknown"]),
   errorClass: new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "McpError", "SystemError", "unknown"]),
   errorCode: new Set(["ENOENT", "EACCES", "EPERM", "EISDIR", "ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_UNKNOWN_FILE_EXTENSION", "ERR_INVALID_MODULE_SPECIFIER", "ERR_UNSUPPORTED_DIR_IMPORT", "ERR_REQUIRE_ESM", "unknown"]),
@@ -68,12 +68,49 @@ export function emitStartupDiagnostic(event, fields = {}) {
   let seq = 1;
   try {
     const prior = readFileSync(eventsPath, "utf8");
-    seq = prior.split("\n").filter(Boolean).length + 1;
+    const rows = prior.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    seq = (rows.at(-1)?.seq ?? 0) + 1;
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
   const row = { side: current.side, runId: current.runId, sha: current.sha, seq, event, ...safeFields(fields) };
   appendFileSync(eventsPath, `${JSON.stringify(row)}\n`, { flag: "a" });
+}
+
+function emitBestEffort(emit, event, fields) {
+  try { emit(event, fields); } catch { /* diagnostics must never change startup behavior */ }
+}
+
+export async function importEntryWithSafeDiagnosticMarkers(importEntry, emit = emitStartupDiagnostic) {
+  let result;
+  try { result = await importEntry(); }
+  catch (error) {
+    const safe = safeStartupError(error);
+    emitBestEffort(emit, "bootstrap_entry_import_failed", {
+      phase: "entry_import", classification: "entry_import_failure", errorClass: safe.errorClass,
+      errorCode: safe.errorCode, outcome: "failure", exitCode: null, signal: "unknown",
+    });
+    throw error;
+  }
+  emitBestEffort(emit, "bootstrap_entry_import_succeeded", { phase: "entry_import", outcome: "success" });
+  return result;
+}
+
+export async function guardFixturePreparation(prepare, { keepAlive, clearTimer = clearInterval, emit = emitStartupDiagnostic, cleanup = async () => undefined } = {}) {
+  let phase = "fixture_workspace";
+  try {
+    const fixture = await prepare((nextPhase) => { phase = nextPhase; });
+    emitBestEffort(emit, "fixture_prepare_ready", { phase: "fixture", outcome: "success" });
+    return fixture;
+  } catch (error) {
+    try { clearTimer(keepAlive); } catch { /* preserve the preparation error */ }
+    const safe = safeStartupError(error);
+    const fields = { phase, classification: safe.classification, errorClass: safe.errorClass, errorCode: safe.errorCode };
+    emitBestEffort(emit, "fixture_prepare_failed", fields);
+    if (phase === "initialize") emitBestEffort(emit, "fixture_initialize_failed", fields);
+    try { await cleanup(); } catch { /* preserve the preparation error */ }
+    throw error;
+  }
 }
 
 export function safeStartupError(error) {
