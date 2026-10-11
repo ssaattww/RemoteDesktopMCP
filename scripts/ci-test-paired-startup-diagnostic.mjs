@@ -923,8 +923,6 @@ async function runStartupDiagnostic() {
         sideSummary.npmCi = "lock_changed";
         throw Object.assign(new Error("post-install lock guard failed"), { diagnosticClass: "lock_guard_failure", diagnosticStage: "post_install_lock_guard" });
       }
-      finishBudgetStage("lockAndSetup", side === "candidate");
-      beginBudgetStage(side === "baseline" ? "initializeBaseline" : "initializeCandidate");
       const npmVersionLaunch = createNpmVersionLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, target, deadline);
       const npmVersionRun = await runBoundedChild(npmVersionLaunch.command, npmVersionLaunch.args, npmVersionLaunch.options);
       if (npmVersionRun.timedOut || npmVersionRun.treeTermination === "unknown" || npmVersionRun.spawnError
@@ -943,64 +941,65 @@ async function runStartupDiagnostic() {
         throw Object.assign(new Error("installed diagnostic dependencies differ from pinned inputs"), { diagnosticClass: "dependency_identity_mismatch" });
       }
       await checkpoint();
-      finishBudgetStage(side === "baseline" ? "initializeBaseline" : "initializeCandidate");
+      finishBudgetStage("lockAndSetup", side === "candidate");
     }
     if (summary.sides.baseline.npmVersion !== summary.sides.candidate.npmVersion) throw Object.assign(new Error("npm versions differ between diagnostic sides"), { diagnosticClass: "environment_mismatch" });
     let baselineOverlayRecords;
     for (const side of ["baseline", "candidate"]) {
-      const target = targets[side];
-      const identityForSide = { side, runId, sha: SIDE_IDENTITIES[side] };
-      const sidecar = diagnosticEventPath(path.join(target, "ci-artifacts", "paired-startup-diagnostic"), "driver");
-      await applyOverlay(target, side, runId, (files) => overlaysBySide.set(side, files));
-      const applied = overlaysBySide.get(side);
-      if (side === "baseline") baselineOverlayRecords = applied;
-      else if (!diagnosticOverlayPairMatches(targets.baseline, baselineOverlayRecords, target, applied)) {
-        throw Object.assign(new Error("fixed-pair startup diagnostic overlays differ"), { diagnosticClass: "overlay_mismatch" });
-      }
-      await appendSafeDriverEvent(sidecar, identityForSide, "overlay_applied", { phase: "overlay_restore", outcome: "success" });
-      summary.sides[side].overlay = "applied";
-      if (side === "candidate") summary.overlayIdentityVerified = true;
-      await checkpoint();
-    }
-    for (const side of ["baseline", "candidate"]) {
-      const target = targets[side];
-      summary.sides[side].test = "running";
-      await checkpoint();
-      const env = { ...process.env };
-      delete env.CI_GITHUB_TOKEN;
-      delete env.GITHUB_TOKEN;
-      const sidecar = diagnosticEventPath(path.join(target, "ci-artifacts", "paired-startup-diagnostic"), "driver");
-      const identityForSide = { side, runId, sha: SIDE_IDENTITIES[side] };
-      await appendSafeDriverEvent(sidecar, identityForSide, "test_started", { phase: "test", role: "test_worktree" });
-      const result = await runBoundedChild(process.execPath, ["--import", "tsx", "--test", STARTUP_DIAGNOSTIC_TEST_FILE], { cwd: target, env, shell: false, deadline });
-      if (result.timedOut) {
-        allOwnedProcessesClosed &&= result.treeTermination === "verified";
-        if (result.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
-        summary.sides[side].test = result.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
-        summary.sides[side].testExitCode = null;
-        await appendSafeDriverEvent(sidecar, identityForSide, "diagnostic_timeout", { phase: "test", outcome: "timeout" });
-        if (result.directChildTermination === "verified") {
-          await appendSafeDriverEvent(sidecar, identityForSide, "direct_child_termination_verified", { phase: "test", outcome: "success" });
+      const initializeStage = side === "baseline" ? "initializeBaseline" : "initializeCandidate";
+      beginBudgetStage(initializeStage);
+      try {
+        const target = targets[side];
+        const identityForSide = { side, runId, sha: SIDE_IDENTITIES[side] };
+        const sidecar = diagnosticEventPath(path.join(target, "ci-artifacts", "paired-startup-diagnostic"), "driver");
+        await applyOverlay(target, side, runId, (files) => overlaysBySide.set(side, files));
+        const applied = overlaysBySide.get(side);
+        if (side === "baseline") baselineOverlayRecords = applied;
+        else if (!diagnosticOverlayPairMatches(targets.baseline, baselineOverlayRecords, target, applied)) {
+          throw Object.assign(new Error("fixed-pair startup diagnostic overlays differ"), { diagnosticClass: "overlay_mismatch" });
         }
-        await appendSafeDriverEvent(sidecar, identityForSide, result.treeTermination === "verified" ? "tree_termination_verified" : "tree_termination_unknown", { phase: "test", outcome: result.treeTermination === "verified" ? "success" : "unknown" });
-        summary.sides[side].directChildTermination = result.directChildTermination;
-        recordFailure("test", new Error("test sample timed out"), result.treeTermination === "verified" ? "timeout" : "termination_unverified");
+        await appendSafeDriverEvent(sidecar, identityForSide, "overlay_applied", { phase: "overlay_restore", outcome: "success" });
+        summary.sides[side].overlay = "applied";
+        if (side === "candidate") summary.overlayIdentityVerified = true;
         await checkpoint();
-        if (result.treeTermination !== "verified") break;
-        continue;
-      }
-      if (result.spawnError || result.exitCode !== 0) {
-        summary.sides[side].test = "failure";
+        summary.sides[side].test = "running";
+        await checkpoint();
+        const env = { ...process.env };
+        delete env.CI_GITHUB_TOKEN;
+        delete env.GITHUB_TOKEN;
+        await appendSafeDriverEvent(sidecar, identityForSide, "test_started", { phase: "test", role: "test_worktree" });
+        const result = await runBoundedChild(process.execPath, ["--import", "tsx", "--test", STARTUP_DIAGNOSTIC_TEST_FILE], { cwd: target, env, shell: false, deadline });
+        if (result.timedOut) {
+          allOwnedProcessesClosed &&= result.treeTermination === "verified";
+          if (result.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
+          summary.sides[side].test = result.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
+          summary.sides[side].testExitCode = null;
+          await appendSafeDriverEvent(sidecar, identityForSide, "diagnostic_timeout", { phase: "test", outcome: "timeout" });
+          if (result.directChildTermination === "verified") {
+            await appendSafeDriverEvent(sidecar, identityForSide, "direct_child_termination_verified", { phase: "test", outcome: "success" });
+          }
+          await appendSafeDriverEvent(sidecar, identityForSide, result.treeTermination === "verified" ? "tree_termination_verified" : "tree_termination_unknown", { phase: "test", outcome: result.treeTermination === "verified" ? "success" : "unknown" });
+          summary.sides[side].directChildTermination = result.directChildTermination;
+          recordFailure("test", new Error("test sample timed out"), result.treeTermination === "verified" ? "timeout" : "termination_unverified");
+          await checkpoint();
+          if (result.treeTermination !== "verified") break;
+          continue;
+        }
+        if (result.spawnError || result.exitCode !== 0) {
+          summary.sides[side].test = "failure";
+          summary.sides[side].testExitCode = result.exitCode;
+          await appendSafeDriverEvent(sidecar, identityForSide, "test_completed", { phase: "test", outcome: "failure", exitCode: result.exitCode });
+          recordFailure("test", new Error("startup diagnostic test failed"), "test_failure");
+          await checkpoint();
+          continue;
+        }
+        summary.sides[side].test = "success";
         summary.sides[side].testExitCode = result.exitCode;
-        await appendSafeDriverEvent(sidecar, identityForSide, "test_completed", { phase: "test", outcome: "failure", exitCode: result.exitCode });
-        recordFailure("test", new Error("startup diagnostic test failed"), "test_failure");
+        await appendSafeDriverEvent(sidecar, identityForSide, "test_completed", { phase: "test", outcome: "success", exitCode: result.exitCode });
         await checkpoint();
-        continue;
+      } finally {
+        finishBudgetStage(initializeStage);
       }
-      summary.sides[side].test = "success";
-      summary.sides[side].testExitCode = result.exitCode;
-      await appendSafeDriverEvent(sidecar, identityForSide, "test_completed", { phase: "test", outcome: "success", exitCode: result.exitCode });
-      await checkpoint();
     }
   } catch (error) {
     if (activeBudgetStage) {

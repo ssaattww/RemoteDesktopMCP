@@ -544,7 +544,7 @@ test("manual paired mode is opt-in and existing manual measurement remains the d
   assert.ok(workflow.on.workflow_dispatch.inputs.mode.options.includes("paired-comparison"));
   assert.ok(workflow.on.workflow_dispatch.inputs.mode.options.includes("paired-startup-diagnostic"));
   const job = workflow.jobs.measure;
-  assert.match(job["timeout-minutes"], /paired-startup-diagnostic.*10.*360/);
+  assert.match(job["timeout-minutes"], /paired-startup-diagnostic.*18.*360/);
   assert.deepEqual(job.permissions, { contents: "read", actions: "read" });
   const steps = job.steps;
   const pairedCheckout = steps.find((step: any) => step.name === "Checkout full history for paired comparison");
@@ -561,7 +561,7 @@ test("manual paired mode is opt-in and existing manual measurement remains the d
   const diagnosticRunner = steps.find((step: any) => step.name === "Run bounded paired startup diagnostic");
   assert.match(diagnosticRunner.if, /workflow_dispatch.*paired-startup-diagnostic/);
   assert.match(diagnosticRunner.run, /ci-test-paired-startup-diagnostic\.mjs/);
-  assert.equal(diagnosticRunner["timeout-minutes"], 4);
+  assert.equal(diagnosticRunner["timeout-minutes"], 12);
   const install = steps.find((step: any) => step.name === "Install dependencies");
   assert.match(install.if, /paired-startup-diagnostic/);
   assert.match(install.if, /paired-comparison/);
@@ -575,5 +575,5 @@ test("manual paired mode is opt-in and existing manual measurement remains the d
   assert.equal(diagnosticUpload["timeout-minutes"], 1);
   const checkoutDiagnosticTimeout = Number(pairedCheckout["timeout-minutes"].match(/&& (\d+)/)?.[1]);
   const metadataDiagnosticTimeout = Number(metadata["timeout-minutes"].match(/&& (\d+)/)?.[1]);
-  assert.equal(checkoutDiagnosticTimeout + setupNodeDiagnostic["timeout-minutes"] + metadataDiagnosticTimeout + diagnosticRunner["timeout-minutes"] + diagnosticUpload["timeout-minutes"], 9);
+  assert.equal(checkoutDiagnosticTimeout + setupNodeDiagnostic["timeout-minutes"] + metadataDiagnosticTimeout + diagnosticRunner["timeout-minutes"] + diagnosticUpload["timeout-minutes"], 17);
 });

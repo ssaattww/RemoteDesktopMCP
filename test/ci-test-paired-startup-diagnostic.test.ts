@@ -80,6 +80,9 @@ test("startup diagnostic phase budgets preserve cleanup and release unused reser
   assert.equal(budget.workDeadline, 100 + 11 * 60_000);
   assert.equal(budget.cleanupDeadline, 100 + 12 * 60_000);
   assert.equal(budget.deadlineFor("lockAndSetup", 100), 100 + 60_000);
+  const baselineInitializationDeadline = budget.deadlineFor("initializeBaseline", 100);
+  assert.equal(baselineInitializationDeadline, 100 + 60_000);
+  assert.equal(childDeadlineWithinStage(baselineInitializationDeadline), 100 + 54_000);
   const setup = budget.recordElapsed("lockAndSetup", 100, 100 + 35_000);
   assert.equal(setup.stageBudgetExceeded, false);
   assert.equal(budget.remainingMs("lockAndSetup"), 25_000);
