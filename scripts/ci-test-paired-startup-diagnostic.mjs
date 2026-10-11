@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -37,6 +37,91 @@ const SAFE_TERMINATION_REASONS = new Set([
   "not_attempted", "not_applicable_no_child", "owned_child_handle_unavailable", "direct_child_already_closed",
   "direct_child_signal_failed", "direct_child_close_observed", "direct_child_close_unconfirmed", "unknown",
 ]);
+
+async function isRegularFile(filePath) {
+  try { return (await stat(filePath)).isFile(); }
+  catch { return false; }
+}
+
+export function npmCliPathsForNodeExecutable(nodeExecutable) {
+  const nodeDirectory = path.dirname(nodeExecutable);
+  const npmBinDirectory = path.join(nodeDirectory, "node_modules", "npm", "bin");
+  return {
+    bundledCliPath: path.join(npmBinDirectory, "npm-cli.js"),
+    prefixResolverPath: path.join(npmBinDirectory, "npm-prefix.js"),
+  };
+}
+
+export async function resolveBundledNpmCli({
+  nodeExecutable = process.execPath,
+  cwd = process.cwd(),
+  deadline,
+  runPrefixResolver = runBoundedChild,
+  isFile = isRegularFile,
+  readFileImpl = readFile,
+} = {}) {
+  if (typeof nodeExecutable !== "string" || !path.isAbsolute(nodeExecutable)) {
+    throw Object.assign(new Error("Node executable is unavailable"), { diagnosticClass: "precondition_failure" });
+  }
+  const { bundledCliPath, prefixResolverPath } = npmCliPathsForNodeExecutable(nodeExecutable);
+  let npmCliPath = bundledCliPath;
+  let npmCliSource = "node_runtime_bundle";
+
+  if (await isFile(prefixResolverPath)) {
+    const prefix = await runPrefixResolver(nodeExecutable, [prefixResolverPath], {
+      cwd,
+      shell: false,
+      deadline,
+      captureStdout: "buffer",
+    });
+    if (prefix.timedOut && (prefix.treeTermination === "unknown" || prefix.directChildTermination === "unknown")) {
+      throw Object.assign(new Error("npm CLI prefix resolution timed out"), {
+        diagnosticClass: "termination_unverified",
+        terminationUnverified: true,
+      });
+    }
+    if (!prefix.timedOut && !prefix.spawnError && prefix.exitCode === 0 && Buffer.isBuffer(prefix.stdout)) {
+      const lines = prefix.stdout.toString("utf8").split(/\r?\n/u).filter(Boolean);
+      if (lines.length === 1 && path.isAbsolute(lines[0])) {
+        const prefixedCliPath = path.join(lines[0], "node_modules", "npm", "bin", "npm-cli.js");
+        if (await isFile(prefixedCliPath)) {
+          npmCliPath = prefixedCliPath;
+          npmCliSource = "configured_prefix";
+        }
+      }
+    }
+  }
+
+  if (!(await isFile(npmCliPath))) {
+    throw Object.assign(new Error("bundled npm CLI is unavailable"), { diagnosticClass: "npm_cli_unavailable" });
+  }
+  let npmPackage;
+  try {
+    npmPackage = JSON.parse(await readFileImpl(path.join(path.dirname(path.dirname(npmCliPath)), "package.json"), "utf8"));
+  } catch {
+    throw Object.assign(new Error("bundled npm CLI identity is unavailable"), { diagnosticClass: "npm_cli_unavailable" });
+  }
+  if (typeof npmPackage.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(npmPackage.version)) {
+    throw Object.assign(new Error("bundled npm CLI identity is unavailable"), { diagnosticClass: "npm_cli_unavailable" });
+  }
+  return { nodeExecutable, npmCliPath, npmCliSource, npmCliVersion: npmPackage.version };
+}
+
+export function createNpmCiLaunchSpec(nodeExecutable, npmCliPath, cwd, deadline) {
+  return {
+    command: nodeExecutable,
+    args: [npmCliPath, "ci"],
+    options: { cwd, shell: false, deadline },
+  };
+}
+
+export function createNpmVersionLaunchSpec(nodeExecutable, npmCliPath, cwd, deadline) {
+  return {
+    command: nodeExecutable,
+    args: [npmCliPath, "--version"],
+    options: { cwd, shell: false, deadline, captureStdout: true },
+  };
+}
 
 function safeProcessCode(code) {
   return Number.isInteger(code) && code >= 0 && code <= 255 ? code : null;
@@ -541,6 +626,7 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
       runnerTransitionReserveMs: STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
     },
     sampleLimit: STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
+    npmCliResolution: "not_started", npmCliSource: null, npmCliVersion: null,
     testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", overlay: "not_applied", packageLockDiagnostics: null }, candidate: { npmCi: "not_started", npmCiProcessDiagnostics: null, test: "not_started", overlay: "not_applied", packageLockDiagnostics: null } },
     primaryError: null, checkpointFailureCount: 0, worktreeDisposition: "owned_temporary_worktrees", overlayIdentityVerified: false,
   };
@@ -581,6 +667,21 @@ async function runStartupDiagnostic() {
     const metadata = JSON.parse(await readFile(path.join(root, "ci-artifacts", "workflow-metadata.json"), "utf8"));
     if (metadata.sourceCommit !== driverSha || Number(metadata.runId) !== Number(runId) || Number(metadata.runAttempt) !== Number(attempt)) {
       throw Object.assign(new Error("workflow metadata mismatch"), { diagnosticClass: "precondition_failure" });
+    }
+    const npmNodeExecutable = process.execPath;
+    let npmCli;
+    try {
+      npmCli = await resolveBundledNpmCli({ nodeExecutable: npmNodeExecutable, cwd: root, deadline });
+      summary.npmCliResolution = "verified";
+      summary.npmCliSource = npmCli.npmCliSource;
+      summary.npmCliVersion = npmCli.npmCliVersion;
+    } catch (error) {
+      summary.npmCliResolution = "failed";
+      if (error?.terminationUnverified) {
+        terminationUnverified = true;
+        preserveWorktrees = true;
+      }
+      throw Object.assign(new Error("npm CLI resolution failed"), { diagnosticClass: error?.diagnosticClass ?? "npm_cli_unavailable" });
     }
     const expectedBytes = await Promise.all([BASELINE_COMMIT, CANDIDATE_COMMIT].map((commit) => git(root, ["show", `${commit}:package-lock.json`], deadline, "buffer")));
     const lockBlobs = await Promise.all([BASELINE_COMMIT, CANDIDATE_COMMIT].map((commit) => git(root, ["rev-parse", `${commit}:package-lock.json`], deadline, true)));
@@ -658,10 +759,9 @@ async function runStartupDiagnostic() {
             const npmCiStartedAt = new Date().toISOString();
             const npmCiProcessDiagnostics = createChildProcessDiagnostics(npmCiStartedAt, null);
             sideSummary.npmCiProcessDiagnostics = npmCiProcessDiagnostics;
-            const installPromise = runBoundedChild("npm.cmd", ["ci"], {
-              cwd: target,
-              shell: true,
-              deadline,
+            const npmCiLaunch = createNpmCiLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, target, deadline);
+            const installPromise = runBoundedChild(npmCiLaunch.command, npmCiLaunch.args, {
+              ...npmCiLaunch.options,
               processStartedAt: npmCiStartedAt,
               processDiagnostics: npmCiProcessDiagnostics,
             });
@@ -710,7 +810,8 @@ async function runStartupDiagnostic() {
         sideSummary.npmCi = "lock_changed";
         throw Object.assign(new Error("post-install lock guard failed"), { diagnosticClass: "lock_guard_failure", diagnosticStage: "post_install_lock_guard" });
       }
-      const npmVersionRun = await runBoundedChild("npm.cmd", ["--version"], { cwd: target, shell: true, deadline, captureStdout: true });
+      const npmVersionLaunch = createNpmVersionLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, target, deadline);
+      const npmVersionRun = await runBoundedChild(npmVersionLaunch.command, npmVersionLaunch.args, npmVersionLaunch.options);
       if (npmVersionRun.timedOut || npmVersionRun.treeTermination === "unknown" || npmVersionRun.spawnError
         || npmVersionRun.exitCode !== 0 || !/^\d+\.\d+\.\d+(?:[-+].*)?\s*$/u.test(npmVersionRun.stdout)) {
         if (npmVersionRun.timedOut && npmVersionRun.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }

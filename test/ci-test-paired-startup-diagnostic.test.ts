@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,6 +10,8 @@ import {
   CANDIDATE_COMMIT,
 } from "../scripts/ci-test-paired-comparison.mjs";
 import {
+  createNpmCiLaunchSpec,
+  createNpmVersionLaunchSpec,
   STARTUP_DIAGNOSTIC_JOB_BUDGET_MS,
   STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS,
   STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS,
@@ -19,6 +21,8 @@ import {
   STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
   STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
   STARTUP_DIAGNOSTIC_TEST_FILE,
+  npmCliPathsForNodeExecutable,
+  resolveBundledNpmCli,
   createChildProcessDiagnostics,
   createDiagnosticSummary,
   diagnosticOverlayIdentity,
@@ -42,11 +46,131 @@ test("startup diagnostic is bounded and separate from the 70-sample performance 
   assert.equal(STARTUP_DIAGNOSTIC_SAMPLE_COUNT, 2);
   assert.equal(STARTUP_DIAGNOSTIC_TEST_FILE, "test/config-transfer-integrity.test.ts");
   assert.equal(createDiagnosticSummary("123", "1", "a".repeat(40)).overlayIdentityVerified, false);
+  const summary = createDiagnosticSummary("123", "1", "a".repeat(40));
+  assert.equal(summary.npmCliResolution, "not_started");
+  assert.equal(summary.npmCliSource, null);
+  assert.equal(summary.npmCliVersion, null);
+  assert.equal(JSON.stringify(summary).includes("npm-cli.js"), false);
   assert.equal(diagnosticBudgetRemaining(10_000, 9_900), 100);
   assert.equal(diagnosticBudgetRemaining(10_000, 10_001), 0);
   assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: false, terminationUnverified: false }), true);
   assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: false, terminationUnverified: true }), false);
   assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: true, terminationUnverified: false }), false);
+});
+
+test("bundled npm CLI resolver uses one Node runtime and fails safely when no CLI exists", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paired-startup-npm-cli-resolver-test-"));
+  try {
+    const nodeExecutable = path.join(root, "node.exe");
+    const paths = npmCliPathsForNodeExecutable(nodeExecutable);
+    let prefixResolverCalls = 0;
+    await assert.rejects(resolveBundledNpmCli({
+      nodeExecutable,
+      cwd: root,
+      deadline: performance.now() + 1_000,
+      runPrefixResolver: async () => { prefixResolverCalls++; throw new Error("unexpected resolver launch"); },
+    }), (error: Error) => {
+      assert.equal(error.message, "bundled npm CLI is unavailable");
+      assert.equal(error.message.includes(root), false);
+      return true;
+    });
+    assert.equal(prefixResolverCalls, 0);
+
+    await mkdir(path.dirname(paths.bundledCliPath), { recursive: true });
+    await writeFile(paths.bundledCliPath, "// fixed runtime npm cli fixture\n");
+    await writeFile(path.join(path.dirname(path.dirname(paths.bundledCliPath)), "package.json"), JSON.stringify({ version: "10.9.4" }));
+    await mkdir(path.dirname(paths.prefixResolverPath), { recursive: true });
+    await writeFile(paths.prefixResolverPath, "// npm prefix resolver fixture\n");
+    const configuredPrefix = path.join(root, "configured-prefix");
+    const configuredCli = path.join(configuredPrefix, "node_modules", "npm", "bin", "npm-cli.js");
+    await mkdir(path.dirname(configuredCli), { recursive: true });
+    await writeFile(configuredCli, "// configured npm cli fixture\n");
+    await writeFile(path.join(path.dirname(path.dirname(configuredCli)), "package.json"), JSON.stringify({ version: "11.19.0" }));
+    const calls: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
+    const resolved = await resolveBundledNpmCli({
+      nodeExecutable,
+      cwd: root,
+      deadline: performance.now() + 1_000,
+      runPrefixResolver: async (command, args, options) => {
+        calls.push({ command, args, options });
+        return { timedOut: false, spawnError: false, exitCode: 0, stdout: Buffer.from(`${configuredPrefix}\n`) };
+      },
+    });
+    assert.equal(resolved.nodeExecutable, nodeExecutable);
+    assert.equal(resolved.npmCliPath, configuredCli);
+    assert.equal(resolved.npmCliSource, "configured_prefix");
+    assert.equal(resolved.npmCliVersion, "11.19.0");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].command, nodeExecutable);
+    assert.deepEqual(calls[0].args, [paths.prefixResolverPath]);
+    assert.equal(calls[0].options.shell, false);
+    assert.equal(calls[0].options.cwd, root);
+    assert.equal(calls[0].options.captureStdout, "buffer");
+
+    const deadline = performance.now() + 5_000;
+    const baseline = createNpmCiLaunchSpec(resolved.nodeExecutable, resolved.npmCliPath, path.join(root, "baseline"), deadline);
+    const candidate = createNpmCiLaunchSpec(resolved.nodeExecutable, resolved.npmCliPath, path.join(root, "candidate"), deadline);
+    assert.equal(baseline.command, candidate.command);
+    assert.deepEqual(baseline.args, candidate.args);
+    assert.deepEqual(baseline.args, [configuredCli, "ci"]);
+    assert.equal(baseline.options.shell, false);
+    assert.equal(candidate.options.shell, false);
+    assert.equal(baseline.options.deadline, candidate.options.deadline);
+    assert.notEqual(baseline.options.cwd, candidate.options.cwd);
+    const baselineVersion = createNpmVersionLaunchSpec(resolved.nodeExecutable, resolved.npmCliPath, path.join(root, "baseline"), deadline);
+    const candidateVersion = createNpmVersionLaunchSpec(resolved.nodeExecutable, resolved.npmCliPath, path.join(root, "candidate"), deadline);
+    assert.equal(baselineVersion.command, candidateVersion.command);
+    assert.deepEqual(baselineVersion.args, candidateVersion.args);
+    assert.deepEqual(baselineVersion.args, [configuredCli, "--version"]);
+    assert.equal(baselineVersion.options.shell, false);
+    assert.equal(candidateVersion.options.shell, false);
+    assert.equal(baselineVersion.options.deadline, candidateVersion.options.deadline);
+    assert.notEqual(baselineVersion.options.cwd, candidateVersion.options.cwd);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bundled Node npm CLI runs npm ci and the root lifecycle in a dependency-free fixture", { skip: process.platform !== "win32" }, async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "paired-startup-npm-cli-fixture-"));
+  try {
+    const npmCli = await resolveBundledNpmCli({
+      nodeExecutable: process.execPath,
+      cwd: fixture,
+      deadline: performance.now() + 60_000,
+    });
+    const name = "paired-startup-npm-cli-fixture";
+    await writeFile(path.join(fixture, "package.json"), JSON.stringify({
+      name,
+      version: "1.0.0",
+      private: true,
+      scripts: { preinstall: "node -e \"require('node:fs').writeFileSync('lifecycle-marker.txt','ran')\"" },
+    }, null, 2));
+    await writeFile(path.join(fixture, "package-lock.json"), `${JSON.stringify({
+      name,
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": { name, version: "1.0.0" } },
+    }, null, 2)}\n`);
+    const deadline = performance.now() + 60_000;
+    const launch = createNpmCiLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, fixture, deadline);
+    assert.equal(launch.command, process.execPath);
+    assert.deepEqual(launch.args, [npmCli.npmCliPath, "ci"]);
+    assert.equal(launch.options.shell, false);
+    const install = await runBoundedChild(launch.command, launch.args, launch.options);
+    assert.equal(install.timedOut, false);
+    assert.equal(install.spawnError, false);
+    assert.equal(install.exitCode, 0);
+    assert.equal(await readFile(path.join(fixture, "lifecycle-marker.txt"), "utf8"), "ran");
+    const versionLaunch = createNpmVersionLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, fixture, deadline);
+    const version = await runBoundedChild(versionLaunch.command, versionLaunch.args, versionLaunch.options);
+    assert.equal(version.timedOut, false);
+    assert.equal(version.exitCode, 0);
+    assert.equal(version.stdout.trim(), npmCli.npmCliVersion);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 test("diagnostic errors and sidecars contain only allowlisted fields, never messages or paths", () => {
@@ -313,6 +437,39 @@ test("bounded child timeout records fixed termination reasons without claiming t
   const unknownReason = await makeTimeoutRun("unsafe secret reason", false);
   assert.equal(unknownReason.processDiagnostics.terminationReason, "unknown");
   assert.equal(JSON.stringify(unknownReason.processDiagnostics).includes("unsafe secret reason"), false);
+});
+
+test("a close observed after the termination wait does not retroactively verify direct-child shutdown", async () => {
+  const diagnostics = createChildProcessDiagnostics(new Date().toISOString(), 25);
+  diagnostics.spawnOutcome = "spawned";
+  diagnostics.timeoutOutcome = "deadline_expired";
+  diagnostics.commandOutcome = "timed_out";
+  diagnostics.exitObserved = true;
+  diagnostics.exitSignal = "SIGTERM";
+  diagnostics.exitAt = new Date().toISOString();
+  let resolveClose: (value: { kind: string }) => void = () => {};
+  const childClose = new Promise<{ kind: string }>((resolve) => { resolveClose = resolve; });
+  const child = { stdout: { destroy() {} }, stderr: { destroy() {} }, unref() {} };
+  const result = await runBoundedChild("ignored", [], {
+    runProcess: async () => ({ timedOut: true, exitCode: null, signal: null, child, childClose, processDiagnostics: diagnostics }),
+    terminateChild: async () => {
+      setTimeout(() => {
+        diagnostics.closeObserved = true;
+        diagnostics.closeSignal = "SIGTERM";
+        diagnostics.closeAt = new Date().toISOString();
+        resolveClose({ kind: "closed" });
+      }, 20);
+      return { verified: false, reason: "direct_child_close_unconfirmed" };
+    },
+  });
+  assert.equal(result.directChildTermination, "unknown");
+  assert.equal(result.treeTermination, "unknown");
+  assert.equal(result.processDiagnostics.exitObserved, true);
+  assert.equal(result.processDiagnostics.closeObserved, false);
+  await childClose;
+  assert.equal(result.processDiagnostics.closeObserved, true);
+  assert.equal(result.directChildTermination, "unknown");
+  assert.equal(result.treeTermination, "unknown");
 });
 
 test("restore writes originals only when the exact overlay hash still matches", async () => {
