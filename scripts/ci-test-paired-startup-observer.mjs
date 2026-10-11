@@ -190,17 +190,41 @@ function safeTestReporterError(error) {
 export default async function* startupDiagnosticTestReporter(source) {
   const observed = new Set();
   let summaryObserved = false;
+  let summaryValid = false;
+  let passed = 0;
+  let failed = 0;
   let invalid = false;
   for await (const event of source) {
-    if (event?.type === "test:summary") summaryObserved = true;
+    if (event?.type === "test:summary") {
+      const data = event.data;
+      const counts = data?.counts;
+      const countKeys = ["passed", "failed", "cancelled", "skipped"];
+      const validCounts = counts && typeof counts === "object" && !Array.isArray(counts)
+        && countKeys.every((key) => Object.hasOwn(counts, key) && Number.isSafeInteger(counts[key]) && counts[key] >= 0);
+      if (summaryObserved || !data || typeof data !== "object" || Array.isArray(data)
+        || !Object.hasOwn(data, "success") || typeof data.success !== "boolean"
+        || !Object.hasOwn(data, "counts") || !validCounts) {
+        invalid = true;
+      } else {
+        summaryObserved = true;
+        summaryValid = data.success === (failed === 0) && counts.passed === passed && counts.failed === failed
+          && counts.cancelled === 0 && counts.skipped === 0 && passed + failed === TEST_CASES.length;
+        if (!summaryValid) invalid = true;
+      }
+      continue;
+    }
     if (event?.type !== "test:pass" && event?.type !== "test:fail") continue;
+    if (summaryObserved) invalid = true;
     const data = event.data;
     if (!data || typeof data !== "object" || typeof data.nesting !== "number" || typeof data.name !== "string"
       || !data.details || typeof data.details !== "object" || typeof data.details.type !== "string") {
       invalid = true;
       continue;
     }
-    if (data.details.type !== "test") continue;
+    if (data.details.type !== "test") {
+      if (event.type === "test:fail") invalid = true;
+      continue;
+    }
     const caseId = TEST_CASES_BY_NAME.get(data.name);
     if (data.nesting !== 0) {
       invalid = true;
@@ -212,10 +236,12 @@ export default async function* startupDiagnosticTestReporter(source) {
     }
     observed.add(caseId);
     const outcome = event.type === "test:pass" ? "success" : "failure";
+    if (outcome === "success") passed++;
+    else failed++;
     const result = { kind: "case", caseId, outcome };
     if (outcome === "failure") Object.assign(result, safeTestReporterError(data.details?.error));
     yield `${JSON.stringify(result)}\n`;
   }
-  const collectionStatus = invalid ? "invalid" : summaryObserved && observed.size === TEST_CASES.length ? "complete" : "incomplete";
+  const collectionStatus = invalid ? "invalid" : summaryObserved && summaryValid && observed.size === TEST_CASES.length ? "complete" : "incomplete";
   yield `${JSON.stringify({ kind: "collection", collectionStatus })}\n`;
 }

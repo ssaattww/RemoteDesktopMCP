@@ -27,7 +27,18 @@ export const STARTUP_DIAGNOSTIC_NPM_CI_SIDE_BUDGET_MS = 4 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_INITIALIZE_SIDE_BUDGET_MS = 1 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_CHILD_TERMINATION_RESERVE_MS = 6 * 1000;
 export const STARTUP_DIAGNOSTIC_TEST_FILE = "test/config-transfer-integrity.test.ts";
+export const STARTUP_DIAGNOSTIC_TEST_REPORTER_ID = "paired_startup_observer";
 export const STARTUP_DIAGNOSTIC_SAMPLE_COUNT = 2;
+
+export function createStartupDiagnosticTestLaunchSummary() {
+  return {
+    commandRole: "process.execPath",
+    args: ["--import", "tsx", "--test", `--test-reporter=<${STARTUP_DIAGNOSTIC_TEST_REPORTER_ID}>`, STARTUP_DIAGNOSTIC_TEST_FILE],
+    reporterId: STARTUP_DIAGNOSTIC_TEST_REPORTER_ID,
+    cwdRole: "test_worktree",
+    envPolicy: "process_env_minus_CI_GITHUB_TOKEN_and_GITHUB_TOKEN",
+  };
+}
 
 export const STARTUP_DIAGNOSTIC_STAGE_BUDGETS = Object.freeze({
   lockAndSetup: STARTUP_DIAGNOSTIC_LOCK_AND_SETUP_BUDGET_MS,
@@ -872,7 +883,7 @@ async function runStartupDiagnostic() {
     summary.packageLockSha256 = identity.rawBytesSha256;
     summary.packageLockIdentity = identity;
     summary.nodeVersion = process.version;
-    summary.testLaunch = { commandRole: "process.execPath", args: ["--import", "tsx", "--test", STARTUP_DIAGNOSTIC_TEST_FILE], cwdRole: "test_worktree", envPolicy: "process_env_minus_CI_GITHUB_TOKEN_and_GITHUB_TOKEN" };
+    summary.testLaunch = createStartupDiagnosticTestLaunchSummary();
     summary.sides.baseline.commit = BASELINE_COMMIT;
     summary.sides.candidate.commit = CANDIDATE_COMMIT;
     summary.sides.baseline.lockBlob = lockBlobs[0];

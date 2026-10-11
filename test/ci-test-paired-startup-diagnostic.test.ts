@@ -10,6 +10,7 @@ import {
   CANDIDATE_COMMIT,
 } from "../scripts/ci-test-paired-comparison.mjs";
 import {
+  createStartupDiagnosticTestLaunchSummary,
   createNpmCiLaunchSpec,
   createNpmVersionLaunchSpec,
   STARTUP_DIAGNOSTIC_JOB_BUDGET_MS,
@@ -257,7 +258,7 @@ test("test reporter records only fixed case IDs and allowlisted error identity",
       details: index === 0 ? { type: "test", error: { name: "Error", code: "ERR_TEST_FAILURE", cause: { name: "AssertionError", code: "ERR_ASSERTION", message: "PRIVATE_ASSERTION C:\\private\\path", stack: "PRIVATE_STACK" } } } : { type: "test" },
     },
   }));
-  events.push({ type: "test:summary", data: { success: false } });
+  events.push({ type: "test:summary", data: testSummary(6, 1) });
   const source = async function* () { for (const event of events) yield event; };
   const chunks: string[] = [];
   for await (const chunk of startupDiagnosticTestReporter(source())) chunks.push(chunk);
@@ -275,21 +276,53 @@ test("test reporter records only fixed case IDs and allowlisted error identity",
     errorCode: "ERR_ASSERTION",
   });
   assert.equal(validateDiagnosticRow({ side: "baseline", runId: "42", sha: BASELINE_COMMIT, seq: 1, event: "test_case_result", phase: "test", caseId: parsed.results[0].caseId, outcome: "failure", errorClass: "AssertionError", errorCode: "ERR_ASSERTION" }, { side: "baseline", runId: "42", sha: BASELINE_COMMIT }), true);
+  const passingCases = names.map((name) => ({ type: "test:pass", data: { nesting: 0, name, details: { type: "test" } } }));
   const suiteFailure = async function* () {
+    for (const event of passingCases) yield event;
     yield { type: "test:fail", data: { nesting: 0, name: "PRIVATE_FILE_OR_PATH", details: { type: "suite" } } };
-    yield { type: "test:summary", data: {} };
+    yield { type: "test:summary", data: testSummary(7, 0, { success: false }) };
   };
   const suiteFailureChunks: string[] = [];
   for await (const chunk of startupDiagnosticTestReporter(suiteFailure())) suiteFailureChunks.push(chunk);
   assert.equal(suiteFailureChunks.join("").includes("PRIVATE_FILE_OR_PATH"), false);
-  assert.equal(parseStartupTestReporterOutput(suiteFailureChunks.join("")).status, "incomplete");
+  assert.equal(parseStartupTestReporterOutput(suiteFailureChunks.join("")).status, "invalid");
+
+  const invalidSummary = async function* () {
+    for (const event of passingCases) yield event;
+    yield { type: "test:summary", data: { success: true, raw: "PRIVATE_SUMMARY_VALUE" } };
+  };
+  const invalidSummaryChunks: string[] = [];
+  for await (const chunk of startupDiagnosticTestReporter(invalidSummary())) invalidSummaryChunks.push(chunk);
+  assert.equal(invalidSummaryChunks.join("").includes("PRIVATE_SUMMARY_VALUE"), false);
+  assert.equal(parseStartupTestReporterOutput(invalidSummaryChunks.join("")).status, "invalid");
+
+  const inconsistentSummary = async function* () {
+    for (const event of passingCases) yield event;
+    yield { type: "test:summary", data: testSummary(6, 1) };
+  };
+  const inconsistentSummaryChunks: string[] = [];
+  for await (const chunk of startupDiagnosticTestReporter(inconsistentSummary())) inconsistentSummaryChunks.push(chunk);
+  assert.equal(parseStartupTestReporterOutput(inconsistentSummaryChunks.join("")).status, "invalid");
+});
+
+test("test launch summary identifies the fixed reporter without exposing its path", () => {
+  const summary = createStartupDiagnosticTestLaunchSummary();
+  assert.deepEqual(summary, {
+    commandRole: "process.execPath",
+    args: ["--import", "tsx", "--test", "--test-reporter=<paired_startup_observer>", STARTUP_DIAGNOSTIC_TEST_FILE],
+    reporterId: "paired_startup_observer",
+    cwdRole: "test_worktree",
+    envPolicy: "process_env_minus_CI_GITHUB_TOKEN_and_GITHUB_TOKEN",
+  });
+  assert.equal(JSON.stringify(summary).includes("observer.mjs"), false);
+  assert.equal(JSON.stringify(summary).includes("C:"), false);
 });
 
 test("unknown test names and error values become invalid or unknown without being retained", async () => {
   const unknownName = "PRIVATE_UNKNOWN_CASE_NAME";
   const source = async function* () {
     yield { type: "test:fail", data: { nesting: 0, name: unknownName, details: { type: "test", error: { name: "PrivateErrorType", code: "PRIVATE_ERROR_CODE", message: "PRIVATE_MESSAGE", stack: "PRIVATE_STACK" } } } };
-    yield { type: "test:summary", data: { success: false } };
+    yield { type: "test:summary", data: testSummary(0, 1) };
   };
   const chunks: string[] = [];
   for await (const chunk of startupDiagnosticTestReporter(source())) chunks.push(chunk);
@@ -311,7 +344,7 @@ test("unknown test names and error values become invalid or unknown without bein
     for (const [index, name] of names.entries()) {
       yield { type: index === 6 ? "test:fail" : "test:pass", data: { nesting: 0, name, details: index === 6 ? { type: "test", error: { name: "Error", code: "ERR_TEST_FAILURE", cause: { name: "PRIVATE_ERROR_TYPE", code: "PRIVATE_ERROR_CODE", message: "PRIVATE_MESSAGE", stack: "PRIVATE_STACK" } } } : { type: "test" } } };
     }
-    yield { type: "test:summary", data: { success: false } };
+    yield { type: "test:summary", data: testSummary(6, 1) };
   };
   const unknownErrorChunks: string[] = [];
   for await (const chunk of startupDiagnosticTestReporter(unknownError())) unknownErrorChunks.push(chunk);
@@ -330,6 +363,14 @@ test("unknown test names and error values become invalid or unknown without bein
 
 function outputWithUnknownSafeFields() {
   return "{\"kind\":\"case\",\"caseId\":\"PRIVATE_CASE\",\"outcome\":\"failure\",\"errorClass\":\"PRIVATE_CLASS\",\"errorCode\":\"PRIVATE_CODE\"}\n";
+}
+
+function testSummary(passed: number, failed: number, overrides: Record<string, unknown> = {}) {
+  return {
+    success: failed === 0,
+    counts: { passed, failed, cancelled: 0, skipped: 0 },
+    ...overrides,
+  };
 }
 
 test("missing and invalid sidecars have distinct collection outcomes", async () => {
