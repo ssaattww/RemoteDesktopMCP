@@ -7,7 +7,6 @@ import { performance } from "node:perf_hooks";
 import {
   BASELINE_COMMIT,
   CANDIDATE_COMMIT,
-  capturePackageLockIdentity,
   normalizePackageLockLineEndings,
   preparePinnedLockForNpmCi,
   runNpmCiWithLockDiagnostics,
@@ -16,15 +15,27 @@ import {
 import { fileURLToPath } from "node:url";
 import { diagnosticEventPath } from "./ci-test-paired-startup-observer.mjs";
 
-export const STARTUP_DIAGNOSTIC_JOB_BUDGET_MS = 10 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_JOB_BUDGET_MS = 18 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS = 4 * 60 * 1000;
-export const STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS = 4 * 60 * 1000;
-export const STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS = 3 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS = 12 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS = 11 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS = 1 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS = 1 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS = 1 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_LOCK_AND_SETUP_BUDGET_MS = 1 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_NPM_CI_SIDE_BUDGET_MS = 4 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_INITIALIZE_SIDE_BUDGET_MS = 1 * 60 * 1000;
+export const STARTUP_DIAGNOSTIC_CHILD_TERMINATION_RESERVE_MS = 6 * 1000;
 export const STARTUP_DIAGNOSTIC_TEST_FILE = "test/config-transfer-integrity.test.ts";
 export const STARTUP_DIAGNOSTIC_SAMPLE_COUNT = 2;
+
+export const STARTUP_DIAGNOSTIC_STAGE_BUDGETS = Object.freeze({
+  lockAndSetup: STARTUP_DIAGNOSTIC_LOCK_AND_SETUP_BUDGET_MS,
+  npmCiBaseline: STARTUP_DIAGNOSTIC_NPM_CI_SIDE_BUDGET_MS,
+  npmCiCandidate: STARTUP_DIAGNOSTIC_NPM_CI_SIDE_BUDGET_MS,
+  initializeBaseline: STARTUP_DIAGNOSTIC_INITIALIZE_SIDE_BUDGET_MS,
+  initializeCandidate: STARTUP_DIAGNOSTIC_INITIALIZE_SIDE_BUDGET_MS,
+});
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const thisFile = fileURLToPath(import.meta.url);
@@ -41,6 +52,46 @@ const SAFE_TERMINATION_REASONS = new Set([
 async function isRegularFile(filePath) {
   try { return (await stat(filePath)).isFile(); }
   catch { return false; }
+}
+
+export function createDiagnosticStageBudget({
+  startedAt = performance.now(),
+  stageBudgets = STARTUP_DIAGNOSTIC_STAGE_BUDGETS,
+} = {}) {
+  const workDeadline = startedAt + STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS;
+  const cleanupDeadline = workDeadline + STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS;
+  const spent = Object.fromEntries(Object.keys(stageBudgets).map((stage) => [stage, 0]));
+  const completed = new Set();
+  const remaining = (stage) => completed.has(stage) ? 0 : Math.max(0, stageBudgets[stage] - spent[stage]);
+  return {
+    workDeadline,
+    cleanupDeadline,
+    deadlineFor(stage, now = performance.now()) {
+      if (!Object.hasOwn(stageBudgets, stage)) throw new Error("unknown diagnostic budget stage");
+      const reserveForOtherStages = Object.keys(stageBudgets)
+        .filter((other) => other !== stage)
+        .reduce((total, other) => total + remaining(other), 0);
+      return Math.min(workDeadline, now + remaining(stage), workDeadline - reserveForOtherStages);
+    },
+    recordElapsed(stage, stageStartedAt, stageFinishedAt = performance.now()) {
+      if (!Object.hasOwn(stageBudgets, stage)) throw new Error("unknown diagnostic budget stage");
+      const elapsedMs = Math.max(0, stageFinishedAt - stageStartedAt);
+      spent[stage] += elapsedMs;
+      return { elapsedMs, stageBudgetExceeded: spent[stage] > stageBudgets[stage] };
+    },
+    complete(stage) {
+      if (!Object.hasOwn(stageBudgets, stage)) throw new Error("unknown diagnostic budget stage");
+      completed.add(stage);
+    },
+    remainingMs(stage) {
+      if (!Object.hasOwn(stageBudgets, stage)) throw new Error("unknown diagnostic budget stage");
+      return remaining(stage);
+    },
+  };
+}
+
+export function childDeadlineWithinStage(stageDeadline) {
+  return stageDeadline - STARTUP_DIAGNOSTIC_CHILD_TERMINATION_RESERVE_MS;
 }
 
 export function npmCliPathsForNodeExecutable(nodeExecutable) {
@@ -532,7 +583,10 @@ export async function runBoundedChild(command, args, options) {
 
 async function git(root, args, deadline, captureStdout = false) {
   const result = await runBoundedChild("git", args, { cwd: root, shell: false, deadline, captureStdout });
-  if (result.timedOut || result.spawnError || result.exitCode !== 0 || result.treeTermination === "unknown") throw Object.assign(new Error("Git diagnostic command failed."), { diagnosticClass: "setup_failure" });
+  if (result.timedOut || result.spawnError || result.exitCode !== 0 || result.treeTermination === "unknown") throw Object.assign(new Error("Git diagnostic command failed."), {
+    diagnosticClass: result.timedOut ? "timeout" : "setup_failure",
+    terminationUnverified: result.timedOut && result.treeTermination === "unknown",
+  });
   if (captureStdout === "buffer") {
     if (!Buffer.isBuffer(result.stdout)) throw Object.assign(new Error("Git diagnostic did not preserve binary stdout."), { diagnosticClass: "setup_failure" });
     return result.stdout;
@@ -547,6 +601,12 @@ function expectedIdentity(bytes, blob) {
     lineEndingNormalizedSha256: sha256(normalizePackageLockLineEndings(bytes)),
     normalizedGitBlob: blob,
   };
+}
+
+async function capturePackageLockIdentity(cwd, root, deadline) {
+  const content = await readFile(path.join(cwd, "package-lock.json"));
+  const normalizedGitBlob = await git(root, ["-C", cwd, "hash-object", "--path=package-lock.json", "package-lock.json"], deadline, true);
+  return expectedIdentity(content, normalizedGitBlob);
 }
 
 function installOverlayText(file, original) {
@@ -621,6 +681,10 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
       preparationMaxMs: STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS,
       scriptStepMaxMs: STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS,
       scriptWorkMaxMs: STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS,
+      lockAndSetupMaxMs: STARTUP_DIAGNOSTIC_LOCK_AND_SETUP_BUDGET_MS,
+      npmCiPerSideMaxMs: STARTUP_DIAGNOSTIC_NPM_CI_SIDE_BUDGET_MS,
+      initializationPerSideMaxMs: STARTUP_DIAGNOSTIC_INITIALIZE_SIDE_BUDGET_MS,
+      childTerminationReserveMs: STARTUP_DIAGNOSTIC_CHILD_TERMINATION_RESERVE_MS,
       checkpointCleanupReserveMs: STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS,
       artifactUploadMaxMs: STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS,
       runnerTransitionReserveMs: STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
@@ -634,8 +698,9 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
 
 async function runStartupDiagnostic() {
   const startedMono = performance.now();
-  const deadline = startedMono + STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS;
-  const finalizationDeadline = deadline + STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS;
+  const stageBudget = createDiagnosticStageBudget({ startedAt: startedMono });
+  let deadline = stageBudget.workDeadline;
+  const finalizationDeadline = stageBudget.cleanupDeadline;
   const root = process.cwd();
   const artifactRoot = path.join(root, "ci-artifacts", "paired-startup-diagnostic");
   await mkdir(artifactRoot, { recursive: true });
@@ -655,11 +720,35 @@ async function runStartupDiagnostic() {
   let allOwnedProcessesClosed = true;
   let terminationUnverified = false;
   let preserveWorktrees = false;
+  let activeBudgetStage;
   const recordFailure = (stage, error, classification) => {
     retainPrimaryDiagnosticFailure(summary, stage, error, classification);
   };
+  const stageBudgetError = (stage) => Object.assign(new Error("diagnostic stage budget exhausted"), {
+    diagnosticClass: "timeout",
+    diagnosticStage: `${stage}_budget`,
+  });
+  const beginBudgetStage = (stage) => {
+    if (activeBudgetStage) throw new Error("diagnostic budget stage already active");
+    const startedAt = performance.now();
+    const stageDeadline = stageBudget.deadlineFor(stage, startedAt);
+    if (stageDeadline <= startedAt) throw stageBudgetError(stage);
+    activeBudgetStage = { stage, startedAt, stageDeadline };
+    deadline = childDeadlineWithinStage(stageDeadline);
+  };
+  const finishBudgetStage = (stage, complete = true) => {
+    if (!activeBudgetStage || activeBudgetStage.stage !== stage) throw new Error("diagnostic budget stage mismatch");
+    const finishedAt = performance.now();
+    const active = activeBudgetStage;
+    activeBudgetStage = undefined;
+    const accounting = stageBudget.recordElapsed(stage, active.startedAt, finishedAt);
+    deadline = stageBudget.workDeadline;
+    if (accounting.stageBudgetExceeded || finishedAt > active.stageDeadline) throw stageBudgetError(stage);
+    if (complete) stageBudget.complete(stage);
+  };
   await checkpoint();
   try {
+    beginBudgetStage("lockAndSetup");
     if (process.platform !== "win32" || process.env.RUNNER_OS !== "Windows") throw Object.assign(new Error("unsupported platform"), { diagnosticClass: "precondition_failure" });
     if (!/^v22\./u.test(process.version) || !/^\d+$/.test(runId) || !/^\d+$/.test(attempt) || !/^[a-f0-9]{40}$/u.test(driverSha)) {
       throw Object.assign(new Error("invalid diagnostic identity"), { diagnosticClass: "precondition_failure" });
@@ -708,6 +797,7 @@ async function runStartupDiagnostic() {
       const status = await git(root, ["-C", targets[side], "status", "--porcelain=v1"], deadline, true);
       if (status) throw Object.assign(new Error("pinned worktree is not clean"), { diagnosticClass: "setup_failure" });
     }
+    finishBudgetStage("lockAndSetup", false);
     for (const side of ["baseline", "candidate"]) {
       const target = targets[side];
       const sideSummary = summary.sides[side];
@@ -719,8 +809,10 @@ async function runStartupDiagnostic() {
       };
       sideSummary.packageLockDiagnostics = lockDiagnostics;
       let checkoutIdentity;
+      const npmCiStage = side === "baseline" ? "npmCiBaseline" : "npmCiCandidate";
+      beginBudgetStage("lockAndSetup");
       try {
-        checkoutIdentity = await capturePackageLockIdentity(target);
+        checkoutIdentity = await capturePackageLockIdentity(target, root, deadline);
         lockDiagnostics.checkoutIdentity = checkoutIdentity;
       } catch (error) {
         lockDiagnostics.checkoutIdentityCaptureError = safeDiagnosticError(error);
@@ -740,14 +832,14 @@ async function runStartupDiagnostic() {
                 expectedIdentity: identity,
                 writeBytes: (bytes) => writeFile(path.join(target, "package-lock.json"), bytes),
                 readBytes: () => readFile(path.join(target, "package-lock.json")),
-                captureIdentity: () => capturePackageLockIdentity(target),
+                captureIdentity: () => capturePackageLockIdentity(target, root, deadline),
               });
               lockDiagnostics.preparationStatus = "verified";
               return prepared;
             } catch (error) {
               lockDiagnostics.preparationStatus = "failed";
               lockDiagnostics.preparationError = safeDiagnosticError(error);
-              try { lockDiagnostics.preparationObservedIdentity = await capturePackageLockIdentity(target); }
+              try { lockDiagnostics.preparationObservedIdentity = await capturePackageLockIdentity(target, root, deadline); }
               catch (captureError) { lockDiagnostics.preparationObservedIdentityCaptureError = safeDiagnosticError(captureError); }
               await checkpoint();
               throw Object.assign(error, { diagnosticClass: "lock_guard_failure", diagnosticStage: "lock_preparation" });
@@ -759,39 +851,60 @@ async function runStartupDiagnostic() {
             const npmCiStartedAt = new Date().toISOString();
             const npmCiProcessDiagnostics = createChildProcessDiagnostics(npmCiStartedAt, null);
             sideSummary.npmCiProcessDiagnostics = npmCiProcessDiagnostics;
-            const npmCiLaunch = createNpmCiLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, target, deadline);
-            const installPromise = runBoundedChild(npmCiLaunch.command, npmCiLaunch.args, {
-              ...npmCiLaunch.options,
-              processStartedAt: npmCiStartedAt,
-              processDiagnostics: npmCiProcessDiagnostics,
-            });
-            const launchCheckpoint = checkpoint();
-            const install = await installPromise;
-            await launchCheckpoint;
-            sideSummary.npmCiProcessDiagnostics = install.processDiagnostics;
-            if (install.timedOut) {
-              allOwnedProcessesClosed &&= install.treeTermination === "verified";
-              if (install.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
-              sideSummary.directChildTermination = install.directChildTermination;
-              sideSummary.npmCi = install.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
-              throw Object.assign(new Error("npm ci timed out"), {
-                diagnosticClass: install.treeTermination === "verified" ? "timeout" : "termination_unverified",
-                unsafePostInstallCapture: install.treeTermination !== "verified",
+            finishBudgetStage("lockAndSetup", false);
+            beginBudgetStage(npmCiStage);
+            let installFailure;
+            try {
+              const npmCiLaunch = createNpmCiLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, target, deadline);
+              const install = await runBoundedChild(npmCiLaunch.command, npmCiLaunch.args, {
+                ...npmCiLaunch.options,
+                processStartedAt: npmCiStartedAt,
+                processDiagnostics: npmCiProcessDiagnostics,
               });
+              sideSummary.npmCiProcessDiagnostics = install.processDiagnostics;
+              if (install.timedOut) {
+                allOwnedProcessesClosed &&= install.treeTermination === "verified";
+                if (install.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
+                sideSummary.directChildTermination = install.directChildTermination;
+                sideSummary.npmCi = install.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
+                throw Object.assign(new Error("npm ci timed out"), {
+                  diagnosticClass: install.treeTermination === "verified" ? "timeout" : "termination_unverified",
+                  unsafePostInstallCapture: install.treeTermination !== "verified",
+                });
+              }
+              if (install.spawnError || install.exitCode !== 0) {
+                sideSummary.npmCi = "failure";
+                sideSummary.npmErrorCode = install.errorCode ?? "unknown";
+                throw Object.assign(new Error("npm ci failed"), { diagnosticClass: "dependency_install_failure" });
+              }
+              sideSummary.npmCi = "success";
+            } catch (error) {
+              installFailure = error;
             }
-            if (install.spawnError || install.exitCode !== 0) {
-              sideSummary.npmCi = "failure";
-              sideSummary.npmErrorCode = install.errorCode ?? "unknown";
-              throw Object.assign(new Error("npm ci failed"), { diagnosticClass: "dependency_install_failure" });
+            let budgetFailure;
+            try { finishBudgetStage(npmCiStage); }
+            catch (error) { budgetFailure = error; }
+            try { beginBudgetStage("lockAndSetup"); }
+            catch (error) { budgetFailure ??= error; }
+            if (budgetFailure) {
+              const primary = installFailure ?? budgetFailure;
+              if (!activeBudgetStage) {
+                sideSummary.npmCi = "lock_unverified";
+                primary.postInstallBudgetUnavailable = true;
+              } else if (!installFailure) {
+                sideSummary.npmCi = "failure";
+              }
+              if (installFailure?.diagnosticClass === "termination_unverified") primary.diagnosticClass = "termination_unverified";
+              throw primary;
             }
-            sideSummary.npmCi = "success";
+            if (installFailure) throw installFailure;
           },
-          captureIdentity: () => capturePackageLockIdentity(target),
+          captureIdentity: () => capturePackageLockIdentity(target, root, deadline),
           expectedIdentity: identity,
           checkoutIdentity,
           diagnostic: lockDiagnostics,
           onDiagnosticUpdate: checkpoint,
-          captureAfterInstallFailure: (error) => error?.unsafePostInstallCapture !== true,
+          captureAfterInstallFailure: (error) => error?.unsafePostInstallCapture !== true && error?.postInstallBudgetUnavailable !== true,
         });
       } catch (error) {
         if (lockDiagnostics.checkoutGuardError) {
@@ -810,6 +923,8 @@ async function runStartupDiagnostic() {
         sideSummary.npmCi = "lock_changed";
         throw Object.assign(new Error("post-install lock guard failed"), { diagnosticClass: "lock_guard_failure", diagnosticStage: "post_install_lock_guard" });
       }
+      finishBudgetStage("lockAndSetup", side === "candidate");
+      beginBudgetStage(side === "baseline" ? "initializeBaseline" : "initializeCandidate");
       const npmVersionLaunch = createNpmVersionLaunchSpec(npmCli.nodeExecutable, npmCli.npmCliPath, target, deadline);
       const npmVersionRun = await runBoundedChild(npmVersionLaunch.command, npmVersionLaunch.args, npmVersionLaunch.options);
       if (npmVersionRun.timedOut || npmVersionRun.treeTermination === "unknown" || npmVersionRun.spawnError
@@ -828,6 +943,7 @@ async function runStartupDiagnostic() {
         throw Object.assign(new Error("installed diagnostic dependencies differ from pinned inputs"), { diagnosticClass: "dependency_identity_mismatch" });
       }
       await checkpoint();
+      finishBudgetStage(side === "baseline" ? "initializeBaseline" : "initializeCandidate");
     }
     if (summary.sides.baseline.npmVersion !== summary.sides.candidate.npmVersion) throw Object.assign(new Error("npm versions differ between diagnostic sides"), { diagnosticClass: "environment_mismatch" });
     let baselineOverlayRecords;
@@ -887,6 +1003,15 @@ async function runStartupDiagnostic() {
       await checkpoint();
     }
   } catch (error) {
+    if (activeBudgetStage) {
+      const active = activeBudgetStage;
+      activeBudgetStage = undefined;
+      stageBudget.recordElapsed(active.stage, active.startedAt, performance.now());
+    }
+    if (error?.terminationUnverified) {
+      terminationUnverified = true;
+      preserveWorktrees = true;
+    }
     recordFailure(error?.diagnosticStage ?? "diagnostic", error, error?.diagnosticClass);
   } finally {
     if (diagnosticWorktreesMayBeMutated({ preserveWorktrees, terminationUnverified })) {

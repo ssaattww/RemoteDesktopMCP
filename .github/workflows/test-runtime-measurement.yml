@@ -32,7 +32,7 @@ jobs:
        github.event.label.name == 'ci-measure-runtime' &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
-    timeout-minutes: ${{ inputs.mode == 'paired-startup-diagnostic' && 10 || 360 }}
+    timeout-minutes: ${{ inputs.mode == 'paired-startup-diagnostic' && 18 || 360 }}
     permissions:
       contents: read
       actions: read
@@ -121,7 +121,7 @@ jobs:
 
       - name: Run bounded paired startup diagnostic
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'paired-startup-diagnostic'
-        timeout-minutes: 4
+        timeout-minutes: 12
         shell: pwsh
         env:
           CI_RUNNER_LABEL: windows-latest

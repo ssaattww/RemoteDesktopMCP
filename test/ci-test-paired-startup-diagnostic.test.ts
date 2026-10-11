@@ -19,12 +19,19 @@ import {
   STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS,
   STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS,
   STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
+  STARTUP_DIAGNOSTIC_LOCK_AND_SETUP_BUDGET_MS,
+  STARTUP_DIAGNOSTIC_NPM_CI_SIDE_BUDGET_MS,
+  STARTUP_DIAGNOSTIC_INITIALIZE_SIDE_BUDGET_MS,
+  STARTUP_DIAGNOSTIC_CHILD_TERMINATION_RESERVE_MS,
+  STARTUP_DIAGNOSTIC_STAGE_BUDGETS,
   STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
   STARTUP_DIAGNOSTIC_TEST_FILE,
   npmCliPathsForNodeExecutable,
   resolveBundledNpmCli,
   createChildProcessDiagnostics,
   createDiagnosticSummary,
+  createDiagnosticStageBudget,
+  childDeadlineWithinStage,
   diagnosticOverlayIdentity,
   diagnosticOverlayPairMatches,
   diagnosticWorktreesMayBeMutated,
@@ -40,9 +47,19 @@ import {
 import { diagnosticEventPath, guardFixturePreparation, importEntryWithSafeDiagnosticMarkers } from "../scripts/ci-test-paired-startup-observer.mjs";
 
 test("startup diagnostic is bounded and separate from the 70-sample performance schedule", () => {
-  assert.equal(STARTUP_DIAGNOSTIC_JOB_BUDGET_MS, 10 * 60 * 1000);
+  assert.equal(STARTUP_DIAGNOSTIC_JOB_BUDGET_MS, 18 * 60 * 1000);
   assert.equal(STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS + STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS + STARTUP_DIAGNOSTIC_UPLOAD_BUDGET_MS + STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS, STARTUP_DIAGNOSTIC_JOB_BUDGET_MS);
   assert.equal(STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS + STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS, STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS);
+  assert.equal(STARTUP_DIAGNOSTIC_LOCK_AND_SETUP_BUDGET_MS + (2 * STARTUP_DIAGNOSTIC_NPM_CI_SIDE_BUDGET_MS) + (2 * STARTUP_DIAGNOSTIC_INITIALIZE_SIDE_BUDGET_MS), STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS);
+  assert.equal(STARTUP_DIAGNOSTIC_CHILD_TERMINATION_RESERVE_MS, 6_000);
+  assert.equal(childDeadlineWithinStage(50_000), 44_000);
+  assert.deepEqual(STARTUP_DIAGNOSTIC_STAGE_BUDGETS, {
+    lockAndSetup: 60_000,
+    npmCiBaseline: 240_000,
+    npmCiCandidate: 240_000,
+    initializeBaseline: 60_000,
+    initializeCandidate: 60_000,
+  });
   assert.equal(STARTUP_DIAGNOSTIC_SAMPLE_COUNT, 2);
   assert.equal(STARTUP_DIAGNOSTIC_TEST_FILE, "test/config-transfer-integrity.test.ts");
   assert.equal(createDiagnosticSummary("123", "1", "a".repeat(40)).overlayIdentityVerified, false);
@@ -56,6 +73,22 @@ test("startup diagnostic is bounded and separate from the 70-sample performance 
   assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: false, terminationUnverified: false }), true);
   assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: false, terminationUnverified: true }), false);
   assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: true, terminationUnverified: false }), false);
+});
+
+test("startup diagnostic phase budgets preserve cleanup and release unused reservations", () => {
+  const budget = createDiagnosticStageBudget({ startedAt: 100 });
+  assert.equal(budget.workDeadline, 100 + 11 * 60_000);
+  assert.equal(budget.cleanupDeadline, 100 + 12 * 60_000);
+  assert.equal(budget.deadlineFor("lockAndSetup", 100), 100 + 60_000);
+  const setup = budget.recordElapsed("lockAndSetup", 100, 100 + 35_000);
+  assert.equal(setup.stageBudgetExceeded, false);
+  assert.equal(budget.remainingMs("lockAndSetup"), 25_000);
+  budget.complete("lockAndSetup");
+  assert.equal(budget.deadlineFor("npmCiBaseline", 100 + 35_000), 100 + 35_000 + 240_000);
+  assert.equal(budget.deadlineFor("npmCiBaseline", 100 + 500_000), 100 + 11 * 60_000 - 6 * 60_000);
+  budget.recordElapsed("npmCiBaseline", 100 + 35_000, 100 + 35_000 + 240_001);
+  assert.equal(budget.remainingMs("npmCiBaseline"), 0);
+  assert.equal(budget.deadlineFor("npmCiCandidate", 100 + 500_000), 100 + 11 * 60_000 - 2 * 60_000);
 });
 
 test("bundled npm CLI resolver uses one Node runtime and fails safely when no CLI exists", async () => {
