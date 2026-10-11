@@ -1,4 +1,5 @@
 import { appendFileSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 const EVENTS = new Set([
@@ -27,7 +28,13 @@ const ENUMS = {
 };
 
 const identityPath = path.join(process.cwd(), "ci-artifacts", "paired-startup-diagnostic", "identity.json");
-const eventsPath = path.join(path.dirname(identityPath), "events.jsonl");
+export function diagnosticEventPath(directory, producerId) {
+  if (producerId !== "driver" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(producerId)) {
+    throw new Error("Paired startup diagnostic producer id is invalid.");
+  }
+  return path.join(directory, `events-${producerId}.jsonl`);
+}
+const eventsPath = diagnosticEventPath(path.dirname(identityPath), randomUUID());
 let identity;
 
 function loadIdentity() {

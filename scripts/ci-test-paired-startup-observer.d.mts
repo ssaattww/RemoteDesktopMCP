@@ -8,6 +8,7 @@ export type StartupDiagnosticEvent =
   | "bootstrap_entry_import_started" | "bootstrap_entry_import_succeeded" | "bootstrap_entry_import_failed"
   | "bootstrap_failed" | "test_started" | "test_completed" | "diagnostic_timeout" | "tree_termination_verified"
   | "tree_termination_unknown";
+export function diagnosticEventPath(directory: string, producerId: string): string;
 export function emitStartupDiagnostic(event: StartupDiagnosticEvent, fields?: Record<string, unknown>): void;
 export function importEntryWithSafeDiagnosticMarkers<T>(
   importEntry: () => Promise<T>,

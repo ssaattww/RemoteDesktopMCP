@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +19,8 @@ import {
   STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
   STARTUP_DIAGNOSTIC_TEST_FILE,
   createDiagnosticSummary,
+  diagnosticOverlayIdentity,
+  diagnosticOverlayPairMatches,
   diagnosticWorktreesMayBeMutated,
   diagnosticBudgetRemaining,
   overlaySource,
@@ -30,7 +31,7 @@ import {
   safeDiagnosticError,
   validateDiagnosticRow,
 } from "../scripts/ci-test-paired-startup-diagnostic.mjs";
-import { guardFixturePreparation, importEntryWithSafeDiagnosticMarkers } from "../scripts/ci-test-paired-startup-observer.mjs";
+import { diagnosticEventPath, guardFixturePreparation, importEntryWithSafeDiagnosticMarkers } from "../scripts/ci-test-paired-startup-observer.mjs";
 
 test("startup diagnostic is bounded and separate from the 70-sample performance schedule", () => {
   assert.equal(STARTUP_DIAGNOSTIC_JOB_BUDGET_MS, 10 * 60 * 1000);
@@ -38,6 +39,7 @@ test("startup diagnostic is bounded and separate from the 70-sample performance 
   assert.equal(STARTUP_DIAGNOSTIC_SCRIPT_BUDGET_MS + STARTUP_DIAGNOSTIC_CLEANUP_RESERVE_MS, STARTUP_DIAGNOSTIC_SCRIPT_STEP_BUDGET_MS);
   assert.equal(STARTUP_DIAGNOSTIC_SAMPLE_COUNT, 2);
   assert.equal(STARTUP_DIAGNOSTIC_TEST_FILE, "test/config-transfer-integrity.test.ts");
+  assert.equal(createDiagnosticSummary("123", "1", "a".repeat(40)).overlayIdentityVerified, false);
   assert.equal(diagnosticBudgetRemaining(10_000, 9_900), 100);
   assert.equal(diagnosticBudgetRemaining(10_000, 10_001), 0);
   assert.equal(diagnosticWorktreesMayBeMutated({ preserveWorktrees: false, terminationUnverified: false }), true);
@@ -59,13 +61,24 @@ test("diagnostic errors and sidecars contain only allowlisted fields, never mess
   assert.equal(JSON.stringify(safe).includes("Users"), false);
 });
 
-test("sidecar reader rejects unknown event properties and accepts fixed identity rows", async () => {
+test("producer sidecars remain independent under concurrent writes and validate each sequence", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paired-startup-sidecar-test-"));
   try {
     const identity = { side: "candidate", runId: "9", sha: CANDIDATE_COMMIT };
-    const file = path.join(root, "events.jsonl");
-    await writeFile(file, `${JSON.stringify({ ...identity, seq: 1, event: "bootstrap_entry_import_succeeded", phase: "entry_import", outcome: "success" })}\n`);
-    assert.equal((await readSafeDiagnosticEvents(file, identity)).length, 1);
+    const driverFile = diagnosticEventPath(root, "driver");
+    const observerId = randomUUID();
+    const observerFile = diagnosticEventPath(root, observerId);
+    assert.notEqual(driverFile, observerFile);
+    assert.notEqual(diagnosticEventPath(root, randomUUID()), observerFile);
+    const row = (seq: number, event: string) => `${JSON.stringify({ ...identity, seq, event, phase: "entry_import", outcome: "success" })}\n`;
+    await Promise.all([
+      writeFile(driverFile, `${row(1, "test_started")}${row(2, "test_completed")}`, { flag: "a" }),
+      writeFile(observerFile, `${row(1, "bootstrap_entry_import_succeeded")}${row(2, "dc_ready")}`, { flag: "a" }),
+    ]);
+    assert.deepEqual((await readSafeDiagnosticEvents(driverFile, identity)).map(({ seq }) => seq), [1, 2]);
+    assert.deepEqual((await readSafeDiagnosticEvents(observerFile, identity)).map(({ seq }) => seq), [1, 2]);
+
+    const file = driverFile;
     await writeFile(file, `${JSON.stringify({ ...identity, seq: 1, event: "bootstrap_entry_import_succeeded", phase: "entry_import", outcome: "success", rawstderr: "unsafe-field-fixture" })}\n`);
     await assert.rejects(readSafeDiagnosticEvents(file, identity), /unsafe record/);
     assert.equal((await readFile(file, "utf8")).includes("unsafe-field-fixture"), true);
@@ -81,24 +94,37 @@ test("sidecar reader rejects unknown event properties and accepts fixed identity
   }
 });
 
-test("overlay generation instruments the same fixed-source launch without private SDK process fields", () => {
+test("overlay generation instruments checked-out sources without private SDK process fields", async () => {
   for (const file of ["src/index.ts", "scripts/desktop-commander-bootstrap.mjs", "test/fixture.ts"]) {
-    const before = execFileSync("git", ["show", `${BASELINE_COMMIT}:${file}`], { encoding: "utf8" });
-    const candidate = execFileSync("git", ["show", `${CANDIDATE_COMMIT}:${file}`], { encoding: "utf8" });
-    const left = overlaySource(file, Buffer.from(before)).toString("utf8");
-    const right = overlaySource(file, Buffer.from(candidate)).toString("utf8");
-    assert.equal(left, right, `${file} observer overlay must be identical for both sides`);
-    assert.match(left, /emitStartupDiagnostic/);
-    assert.doesNotMatch(left, /\._process\b/);
+    const source = await readFile(file);
+    const overlay = overlaySource(file, source).toString("utf8");
+    assert.match(overlay, /emitStartupDiagnostic/);
+    assert.doesNotMatch(overlay, /\._process\b/);
   }
-  const entry = overlaySource("scripts/desktop-commander-bootstrap.mjs", Buffer.from(execFileSync("git", ["show", `${BASELINE_COMMIT}:scripts/desktop-commander-bootstrap.mjs`], { encoding: "utf8" })));
+  const entry = overlaySource("scripts/desktop-commander-bootstrap.mjs", await readFile("scripts/desktop-commander-bootstrap.mjs"));
   assert.match(entry.toString("utf8"), /importEntryWithSafeDiagnosticMarkers/);
   assert.match(entry.toString("utf8"), /exitCode: null, signal: "unknown"/);
-  const service = overlaySource("src/index.ts", Buffer.from(execFileSync("git", ["show", `${BASELINE_COMMIT}:src/index.ts`], { encoding: "utf8" })));
+  const service = overlaySource("src/index.ts", await readFile("src/index.ts"));
   assert.match(service.toString("utf8"), /dc_connect_failed.*exitCode: null, signal: "unknown"/);
-  const fixture = overlaySource("test/fixture.ts", Buffer.from(execFileSync("git", ["show", `${BASELINE_COMMIT}:test/fixture.ts`], { encoding: "utf8" })));
+  const fixture = overlaySource("test/fixture.ts", await readFile("test/fixture.ts"));
   assert.match(fixture.toString("utf8"), /guardFixturePreparation/);
   assert.match(fixture.toString("utf8"), /setPhase\("fixture_private_storage"\)/);
+});
+
+test("fixed-pair overlay identity excludes side identity but detects changed overlay content", () => {
+  const baselineRoot = path.join(os.tmpdir(), "startup-baseline");
+  const candidateRoot = path.join(os.tmpdir(), "startup-candidate");
+  const overlays = (root: string, side: string, sourceHash = "a".repeat(64)) => [
+    { path: path.join(root, "ci-artifacts", "paired-startup-diagnostic", "identity.json"), overlaySha256: side },
+    { path: path.join(root, "src", "index.ts"), overlaySha256: sourceHash },
+    { path: path.join(root, "scripts", "observer.mjs"), overlaySha256: "b".repeat(64) },
+  ];
+  assert.deepEqual(diagnosticOverlayIdentity(baselineRoot, overlays(baselineRoot, "baseline")), [
+    { file: "scripts/observer.mjs", overlaySha256: "b".repeat(64) },
+    { file: "src/index.ts", overlaySha256: "a".repeat(64) },
+  ]);
+  assert.equal(diagnosticOverlayPairMatches(baselineRoot, overlays(baselineRoot, "baseline"), candidateRoot, overlays(candidateRoot, "candidate")), true);
+  assert.equal(diagnosticOverlayPairMatches(baselineRoot, overlays(baselineRoot, "baseline"), candidateRoot, overlays(candidateRoot, "candidate", "c".repeat(64))), false);
 });
 
 test("best-effort entry and fixture diagnostics preserve the primary failure and release the keep-alive timer", async () => {

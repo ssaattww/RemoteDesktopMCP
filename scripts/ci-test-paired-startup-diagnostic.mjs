@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -12,6 +12,7 @@ import {
   writeSummaryCheckpoint,
 } from "./ci-test-paired-comparison.mjs";
 import { fileURLToPath } from "node:url";
+import { diagnosticEventPath } from "./ci-test-paired-startup-observer.mjs";
 
 export const STARTUP_DIAGNOSTIC_JOB_BUDGET_MS = 10 * 60 * 1000;
 export const STARTUP_DIAGNOSTIC_PREPARATION_BUDGET_MS = 4 * 60 * 1000;
@@ -363,13 +364,32 @@ async function applyOverlay(target, side, runId, register) {
 }
 
 async function restoreSidecars(target, artifactRoot, side, identity) {
-  const from = path.join(target, "ci-artifacts", "paired-startup-diagnostic", "events.jsonl");
-  const rows = await readSafeDiagnosticEvents(from, identity);
-  const to = path.join(artifactRoot, `events-${side}.jsonl`);
-  await copyFile(from, to, { errorOnExist: true, force: false });
-  const copied = await readSafeDiagnosticEvents(to, identity);
-  if (copied.length !== rows.length) throw new Error("Copied diagnostic sidecar failed verification.");
-  return rows;
+  const sourceDirectory = path.join(target, "ci-artifacts", "paired-startup-diagnostic");
+  const names = (await readdir(sourceDirectory)).filter((name) => /^events-(?:driver|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/u.test(name)).sort();
+  let eventCount = 0;
+  for (const name of names) {
+    const from = path.join(sourceDirectory, name);
+    const rows = await readSafeDiagnosticEvents(from, identity);
+    const producerId = name.slice("events-".length, -".jsonl".length);
+    const to = path.join(artifactRoot, `events-${side}-${producerId}.jsonl`);
+    await copyFile(from, to, { errorOnExist: true, force: false });
+    const copied = await readSafeDiagnosticEvents(to, identity);
+    if (copied.length !== rows.length) throw new Error("Copied diagnostic sidecar failed verification.");
+    eventCount += rows.length;
+  }
+  return { eventCount, producerCount: names.length };
+}
+
+export function diagnosticOverlayIdentity(worktree, overlays) {
+  return overlays
+    .filter((item) => path.relative(worktree, item.path).split(path.sep).join("/") !== "ci-artifacts/paired-startup-diagnostic/identity.json")
+    .map((item) => ({ file: path.relative(worktree, item.path).split(path.sep).join("/"), overlaySha256: item.overlaySha256 }))
+    .sort((left, right) => left.file.localeCompare(right.file));
+}
+
+export function diagnosticOverlayPairMatches(baselineWorktree, baselineOverlays, candidateWorktree, candidateOverlays) {
+  return JSON.stringify(diagnosticOverlayIdentity(baselineWorktree, baselineOverlays))
+    === JSON.stringify(diagnosticOverlayIdentity(candidateWorktree, candidateOverlays));
 }
 
 export function createDiagnosticSummary(runId, attempt, driverSha) {
@@ -388,7 +408,7 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
     },
     sampleLimit: STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
     testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", test: "not_started", overlay: "not_applied" }, candidate: { npmCi: "not_started", test: "not_started", overlay: "not_applied" } },
-    primaryError: null, checkpointFailureCount: 0, worktreeDisposition: "owned_temporary_worktrees",
+    primaryError: null, checkpointFailureCount: 0, worktreeDisposition: "owned_temporary_worktrees", overlayIdentityVerified: false,
   };
 }
 
@@ -503,13 +523,20 @@ async function runStartupDiagnostic() {
       await checkpoint();
     }
     if (summary.sides.baseline.npmVersion !== summary.sides.candidate.npmVersion) throw Object.assign(new Error("npm versions differ between diagnostic sides"), { diagnosticClass: "environment_mismatch" });
+    let baselineOverlayRecords;
     for (const side of ["baseline", "candidate"]) {
       const target = targets[side];
       const identityForSide = { side, runId, sha: SIDE_IDENTITIES[side] };
-      const sidecar = path.join(target, "ci-artifacts", "paired-startup-diagnostic", "events.jsonl");
+      const sidecar = diagnosticEventPath(path.join(target, "ci-artifacts", "paired-startup-diagnostic"), "driver");
       await applyOverlay(target, side, runId, (files) => overlaysBySide.set(side, files));
+      const applied = overlaysBySide.get(side);
+      if (side === "baseline") baselineOverlayRecords = applied;
+      else if (!diagnosticOverlayPairMatches(targets.baseline, baselineOverlayRecords, target, applied)) {
+        throw Object.assign(new Error("fixed-pair startup diagnostic overlays differ"), { diagnosticClass: "overlay_mismatch" });
+      }
       await appendSafeDriverEvent(sidecar, identityForSide, "overlay_applied", { phase: "overlay_restore", outcome: "success" });
       summary.sides[side].overlay = "applied";
+      if (side === "candidate") summary.overlayIdentityVerified = true;
       await checkpoint();
     }
     for (const side of ["baseline", "candidate"]) {
@@ -519,7 +546,7 @@ async function runStartupDiagnostic() {
       const env = { ...process.env };
       delete env.CI_GITHUB_TOKEN;
       delete env.GITHUB_TOKEN;
-      const sidecar = path.join(target, "ci-artifacts", "paired-startup-diagnostic", "events.jsonl");
+      const sidecar = diagnosticEventPath(path.join(target, "ci-artifacts", "paired-startup-diagnostic"), "driver");
       const identityForSide = { side, runId, sha: SIDE_IDENTITIES[side] };
       await appendSafeDriverEvent(sidecar, identityForSide, "test_started", { phase: "test", role: "test_worktree" });
       const result = await runBoundedChild(process.execPath, ["--import", "tsx", "--test", STARTUP_DIAGNOSTIC_TEST_FILE], { cwd: target, env, shell: false, deadline });
@@ -565,7 +592,7 @@ async function runStartupDiagnostic() {
             preserveWorktrees = true;
             recordFailure("overlay_restore", new Error("overlay restore verification failed"), "overlay_restore_unverified");
           } else {
-            const sidecar = path.join(worktree, "ci-artifacts", "paired-startup-diagnostic", "events.jsonl");
+            const sidecar = diagnosticEventPath(path.join(worktree, "ci-artifacts", "paired-startup-diagnostic"), "driver");
             try { await appendSafeDriverEvent(sidecar, { side, runId, sha: SIDE_IDENTITIES[side] }, "overlay_restored", { phase: "overlay_restore", outcome: "success" }); }
             catch { recordFailure("sidecar", new Error("safe sidecar update failed"), "sidecar_invalid"); }
           }
@@ -576,8 +603,9 @@ async function runStartupDiagnostic() {
       for (const { side, path: worktree } of worktrees) {
         if (sidecarsCollected.has(side) || !overlaysBySide.has(side)) continue;
         try {
-          const rows = await restoreSidecars(worktree, artifactRoot, side, { side, runId, sha: SIDE_IDENTITIES[side] });
-          summary.sides[side].eventCount = rows.length;
+          const collected = await restoreSidecars(worktree, artifactRoot, side, { side, runId, sha: SIDE_IDENTITIES[side] });
+          summary.sides[side].eventCount = collected.eventCount;
+          summary.sides[side].eventProducerCount = collected.producerCount;
           sidecarsCollected.add(side);
         } catch {
           recordFailure("sidecar", new Error("safe sidecar unavailable"), "sidecar_invalid");
