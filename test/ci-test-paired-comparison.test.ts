@@ -19,6 +19,7 @@ import {
   compareRepositoryChanges,
   compareInventories,
   comparePredeclaredControlBlobs,
+  cleanupWorktreesWithCheckpoints,
   formatFailureDiagnostic,
   formatSummaryError,
   runScheduledSamples,
@@ -242,8 +243,10 @@ test("post-npm-ci diagnostic failure does not replace the npm ci failure", async
     expectedIdentity,
     checkoutIdentity: expectedIdentity,
     diagnostic,
+    onDiagnosticUpdate: async () => { throw new Error("checkpoint failed second"); },
   }), /npm ci failed first/);
   assert.equal(diagnostic.afterNpmCiCaptureError, "post-install lock capture failed");
+  assert.equal(diagnostic.checkpointError, "checkpoint failed second");
   assert.equal(diagnostic.afterNpmCiIdentity, null);
 
   await assert.rejects(runNpmCiWithLockDiagnostics({
@@ -403,6 +406,76 @@ test("scheduled sample loop checkpoints a failed record and stops before later s
     { status: "in_progress", sampleCount: 1, records: ["records/0001.json"] },
     { status: "failure", sampleCount: 2, records: ["records/0001.json", "records/0002.json"] },
   ]);
+});
+
+test("terminal failure and success summaries are checkpointed before held cleanup begins", async () => {
+  const holdCleanup = async (summary: Record<string, unknown>) => {
+    const terminalState = JSON.parse(JSON.stringify(summary)) as Record<string, unknown>;
+    const checkpoints: Array<Record<string, unknown>> = [];
+    let markEntered!: () => void;
+    let release!: () => void;
+    const cleanupEntered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const cleanupGate = new Promise<void>((resolve) => { release = resolve; });
+    const cleanup = cleanupWorktreesWithCheckpoints({
+      worktrees: ["baseline"],
+      summary,
+      checkpoint: async () => { checkpoints.push(JSON.parse(JSON.stringify(summary)) as Record<string, unknown>); },
+      removeWorktree: async () => { markEntered(); await cleanupGate; },
+    });
+    try {
+      await cleanupEntered;
+      assert.deepEqual(checkpoints[0], terminalState, "terminal state must be persisted before cleanup starts");
+      return checkpoints[0];
+    } finally {
+      release();
+      await cleanup;
+    }
+  };
+
+  const failed = await holdCleanup({ status: "failure", error: "primary test failure", sampleCount: 3 });
+  assert.equal(failed.status, "failure");
+  assert.equal(failed.error, "primary test failure");
+
+  const succeeded = await holdCleanup({ status: "success", statistics: { target: { medianMs: 42 } }, sampleCount: 70 });
+  assert.equal(succeeded.status, "success");
+  assert.deepEqual(succeeded.statistics, { target: { medianMs: 42 } });
+});
+
+test("cleanup failures are checkpointed before the next worktree attempt", async () => {
+  const summary: Record<string, unknown> = { status: "failure", error: "primary test failure" };
+  const checkpoints: Array<Record<string, unknown>> = [];
+  await cleanupWorktreesWithCheckpoints({
+    worktrees: ["first", "second"],
+    summary,
+    checkpoint: async () => { checkpoints.push(JSON.parse(JSON.stringify(summary)) as Record<string, unknown>); },
+    removeWorktree: async (worktree: string) => {
+      if (worktree === "second") throw new Error("remove second failed");
+      const previous = checkpoints.at(-1)?.cleanupAttempts as Array<{ worktree: string; status: string; error?: string }> | undefined;
+      assert.equal(previous?.at(-1)?.worktree, "second");
+      assert.equal(previous?.at(-1)?.status, "failure");
+      assert.equal(previous?.at(-1)?.error, "remove second failed");
+    },
+  });
+  assert.equal(summary.error, "primary test failure");
+  assert.equal(summary.cleanupError, "remove second failed");
+  assert.deepEqual(summary.cleanupAttempts, [
+    { worktree: "second", status: "failure", error: "remove second failed" },
+    { worktree: "first", status: "success" },
+  ]);
+});
+
+test("checkpoint failures never replace the primary run error", async () => {
+  const summary: Record<string, unknown> = { status: "failure", error: "primary test failure" };
+  await cleanupWorktreesWithCheckpoints({
+    worktrees: ["baseline"],
+    summary,
+    checkpoint: async () => { throw new Error("checkpoint failed"); },
+    removeWorktree: async () => { throw new Error("cleanup failed"); },
+  });
+  assert.equal(summary.error, "primary test failure");
+  assert.equal(summary.cleanupError, "cleanup failed");
+  assert.equal(summary.checkpointFailureCount, 3);
+  assert.equal(summary.checkpointError, "checkpoint failed");
 });
 
 test("screening statistics exclude warmups and report six pairs plus first-side-stratified effects", () => {

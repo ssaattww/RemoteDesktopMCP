@@ -106,6 +106,15 @@ export async function preparePinnedLockForNpmCi({ expectedBytes, expectedIdentit
 }
 
 export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic, onDiagnosticUpdate }) {
+  let diagnosticCheckpointError;
+  const persistDiagnostic = async () => {
+    try {
+      await onDiagnosticUpdate?.();
+    } catch (error) {
+      diagnostic.checkpointError ??= formatSummaryError(error instanceof Error ? error.message : String(error));
+      diagnosticCheckpointError ??= error;
+    }
+  };
   const checkoutClassification = hasCompleteLockIdentity(expectedIdentity) && hasCompleteLockIdentity(checkoutIdentity)
     ? classifyLockfileDifference(expectedIdentity, checkoutIdentity)
     : "unavailable";
@@ -113,7 +122,7 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
     checkoutClassification,
     classification: checkoutClassification === "unavailable" ? "unavailable" : checkoutClassification,
   });
-  await onDiagnosticUpdate?.();
+  await persistDiagnostic();
   if (checkoutClassification !== "unchanged" && checkoutClassification !== "line-ending-only") {
     diagnostic.classification = checkoutClassification === "unavailable"
       ? "unavailable"
@@ -121,7 +130,7 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
     diagnostic.checkoutGuardError = checkoutClassification === "unavailable"
       ? "Pinned or checkout package-lock identity is missing or incomplete."
       : `Checkout package-lock differs from pinned content: ${checkoutClassification}.`;
-    await onDiagnosticUpdate?.();
+    await persistDiagnostic();
     throw new Error(diagnostic.checkoutGuardError);
   }
   const preparedForNpmCiIdentity = await preparePinnedLock();
@@ -129,7 +138,7 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
     preparedForNpmCiIdentity,
     preparationClassification: classifyLockfileDifference(checkoutIdentity, preparedForNpmCiIdentity),
   });
-  await onDiagnosticUpdate?.();
+  await persistDiagnostic();
   let installFailed = false;
   let installError;
   try {
@@ -153,11 +162,12 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
     diagnostic.afterNpmCiCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
     diagnostic.npmCiClassification = "unavailable";
     diagnostic.classification = "unavailable";
-    await onDiagnosticUpdate?.();
+    await persistDiagnostic();
     if (!installFailed) throw error;
   }
-  await onDiagnosticUpdate?.();
+  await persistDiagnostic();
   if (installFailed) throw installError;
+  if (diagnosticCheckpointError) throw diagnosticCheckpointError;
 }
 
 export function formatSummaryError(value) {
@@ -514,6 +524,48 @@ export async function runScheduledSamples({ schedule, summary, recordPathForInde
   return records;
 }
 
+export async function cleanupWorktreesWithCheckpoints({ worktrees, summary, removeWorktree, checkpoint }) {
+  const saveCheckpoint = async () => {
+    try {
+      await checkpoint();
+      return true;
+    } catch (error) {
+      summary.checkpointFailureCount = (summary.checkpointFailureCount ?? 0) + 1;
+      summary.checkpointError ??= formatSummaryError(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  };
+  const saveAndRecordCheckpointFailure = async () => {
+    const saved = await saveCheckpoint();
+    if (!saved && summary.status === "success") {
+      summary.status = "failure";
+      summary.error ??= "Summary checkpoint failed; comparison status is not durable.";
+    }
+    return saved;
+  };
+
+  await saveAndRecordCheckpointFailure();
+  summary.cleanupAttempts ??= [];
+  for (const worktree of [...worktrees].reverse()) {
+    const attempt = { worktree: path.basename(worktree), status: "success" };
+    try {
+      await removeWorktree(worktree);
+    } catch (error) {
+      attempt.status = "failure";
+      attempt.error = formatSummaryError(error instanceof Error ? error.message : String(error));
+      summary.cleanupError ??= attempt.error;
+    }
+    summary.cleanupAttempts.push(attempt);
+    await saveAndRecordCheckpointFailure();
+  }
+  summary.finishedAt = new Date().toISOString();
+  const saved = await saveCheckpoint();
+  if (!saved && summary.status === "success") {
+    summary.status = "failure";
+    summary.error ??= "Final summary checkpoint failed; comparison status is not durable.";
+  }
+}
+
 async function runTestSample({ sample, cwd, runId, attempt, jobId, environment, recordDirectory, diagnosticsDirectory, index }) {
   const startedAt = new Date().toISOString();
   const start = performance.now();
@@ -733,15 +785,15 @@ async function runPairedComparison() {
     }
   } catch (error) {
     summary.status = "failure";
-    summary.error = formatSummaryError(error instanceof Error ? error.message : String(error));
+    summary.error ??= formatSummaryError(error instanceof Error ? error.message : String(error));
     summary.sampleCount = summary.sampleCount ?? 0;
   } finally {
-    for (const worktree of worktrees.reverse()) {
-      try { await git(root, ["worktree", "remove", "--force", worktree], `worktree-remove-${path.basename(worktree)}`, artifactRoot); }
-      catch (error) { summary.cleanupError = formatSummaryError(error instanceof Error ? error.message : String(error)); }
-    }
-    summary.finishedAt = new Date().toISOString();
-    await checkpoint();
+    await cleanupWorktreesWithCheckpoints({
+      worktrees,
+      summary,
+      removeWorktree: (worktree) => git(root, ["worktree", "remove", "--force", worktree], `worktree-remove-${path.basename(worktree)}`, artifactRoot),
+      checkpoint,
+    });
     process.stdout.write(`Paired comparison ${summary.status}; summary: ${summaryPath}\n`);
     process.stderr.write(formatFailureDiagnostic(summary));
   }
