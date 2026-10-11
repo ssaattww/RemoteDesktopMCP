@@ -49,6 +49,13 @@ function classifyLockfileDifference(before, after) {
   return "content-changed";
 }
 
+function hasCompleteLockIdentity(identity) {
+  return Number.isSafeInteger(identity?.byteLength) && identity.byteLength >= 0
+    && /^[a-f0-9]{64}$/u.test(identity?.rawBytesSha256 ?? "")
+    && /^[a-f0-9]{64}$/u.test(identity?.lineEndingNormalizedSha256 ?? "")
+    && /^[a-f0-9]{40}$/u.test(identity?.normalizedGitBlob ?? "");
+}
+
 export function classifyPackageLockDiagnostics(expected, checkout, afterNpmCi) {
   const checkoutClassification = classifyLockfileDifference(expected, checkout);
   const npmCiClassification = classifyLockfileDifference(checkout, afterNpmCi);
@@ -88,10 +95,19 @@ export async function preparePinnedLockForNpmCi({ expectedBytes, expectedIdentit
 }
 
 export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic }) {
+  const checkoutClassification = hasCompleteLockIdentity(expectedIdentity) && hasCompleteLockIdentity(checkoutIdentity)
+    ? classifyLockfileDifference(expectedIdentity, checkoutIdentity)
+    : "unavailable";
+  Object.assign(diagnostic, { checkoutClassification });
+  if (checkoutClassification !== "unchanged" && checkoutClassification !== "line-ending-only") {
+    diagnostic.checkoutGuardError = checkoutClassification === "unavailable"
+      ? "Pinned or checkout package-lock identity is missing or incomplete."
+      : `Checkout package-lock differs from pinned content: ${checkoutClassification}.`;
+    throw new Error(diagnostic.checkoutGuardError);
+  }
   const preparedForNpmCiIdentity = await preparePinnedLock();
   Object.assign(diagnostic, {
     preparedForNpmCiIdentity,
-    checkoutClassification: classifyLockfileDifference(expectedIdentity, checkoutIdentity),
     preparationClassification: classifyLockfileDifference(checkoutIdentity, preparedForNpmCiIdentity),
   });
   let installFailed = false;
@@ -105,7 +121,6 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
   try {
     const afterNpmCiIdentity = await captureIdentity();
     const npmCiClassification = classifyLockfileDifference(preparedForNpmCiIdentity, afterNpmCiIdentity);
-    const checkoutClassification = classifyLockfileDifference(expectedIdentity, checkoutIdentity);
     const classification = npmCiClassification !== "unchanged"
       ? `${npmCiClassification}-during-npm-ci`
       : checkoutClassification !== "unchanged" ? `${checkoutClassification}-at-checkout` : "unchanged";
@@ -612,9 +627,17 @@ async function runPairedComparison() {
     const attempt = Number(metadata.runAttempt);
     const jobId = Number(metadata.workflowJobId);
     for (const [label, target, pinnedLockBytes] of [["baseline", baselinePath, baseLock], ["candidate", candidatePath, candidateLock]]) {
-      const checkoutIdentity = await capturePackageLockIdentity(target);
-      const diagnostic = { checkoutIdentity, preparedForNpmCiIdentity: null, afterNpmCiIdentity: null };
+      const diagnostic = { checkoutIdentity: null, preparedForNpmCiIdentity: null, afterNpmCiIdentity: null };
       summary.packageLockDiagnostics[label] = diagnostic;
+      let checkoutIdentity;
+      try {
+        checkoutIdentity = await capturePackageLockIdentity(target);
+        diagnostic.checkoutIdentity = checkoutIdentity;
+      } catch (error) {
+        diagnostic.checkoutIdentityCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
+        diagnostic.checkoutClassification = "unavailable";
+        throw new Error(`Could not capture ${label} checkout package-lock identity.`);
+      }
       await runNpmCiWithLockDiagnostics({
         preparePinnedLock: () => preparePinnedLockForNpmCi({
           expectedBytes: pinnedLockBytes,

@@ -91,10 +91,10 @@ test("pinned lock bytes are asserted before npm ci and checkout identity is reta
   });
   const expectedBytes = Buffer.from('{"lockfileVersion":3}\n');
   const checkoutBytes = Buffer.from('{"lockfileVersion":3}\r\n');
-  const expectedIdentity = identity(expectedBytes, "pinned-blob");
-  const checkoutIdentity = identity(checkoutBytes, "pinned-blob");
+  const expectedIdentity = identity(expectedBytes, "a".repeat(40));
+  const checkoutIdentity = identity(checkoutBytes, "a".repeat(40));
   let currentBytes = checkoutBytes;
-  const captureIdentity = async () => identity(currentBytes, "pinned-blob");
+  const captureIdentity = async () => identity(currentBytes, "a".repeat(40));
   const diagnostic: Record<string, unknown> = {
     checkoutIdentity,
     preparedForNpmCiIdentity: null,
@@ -131,10 +131,10 @@ test("pinned lock byte mismatch blocks npm ci", async () => {
     byteLength: expectedBytes.length,
     rawBytesSha256: createHash("sha256").update(expectedBytes).digest("hex"),
     lineEndingNormalizedSha256: createHash("sha256").update(normalizePackageLockLineEndings(expectedBytes)).digest("hex"),
-    normalizedGitBlob: "pinned-blob",
+    normalizedGitBlob: "a".repeat(40),
   };
   let installCalled = false;
-  const diagnostic: Record<string, unknown> = { checkoutIdentity: {} };
+  const diagnostic: Record<string, unknown> = { checkoutIdentity: expectedIdentity };
   await assert.rejects(runNpmCiWithLockDiagnostics({
     preparePinnedLock: () => preparePinnedLockForNpmCi({
       expectedBytes,
@@ -146,21 +146,62 @@ test("pinned lock byte mismatch blocks npm ci", async () => {
     install: async () => { installCalled = true; },
     captureIdentity: async () => expectedIdentity,
     expectedIdentity,
-    checkoutIdentity: {},
+    checkoutIdentity: expectedIdentity,
     diagnostic,
   }), /pinned.*lock.*bytes|lock.*pinned.*bytes/i);
   assert.equal(installCalled, false);
-  assert.deepEqual(diagnostic.checkoutIdentity, {});
+  assert.deepEqual(diagnostic.checkoutIdentity, expectedIdentity);
+});
+
+test("checkout content changes and missing lock identities fail closed before preparation and npm ci", async () => {
+  const expectedBytes = Buffer.from('{"lockfileVersion":3}\n');
+  const changedBytes = Buffer.from('{"lockfileVersion":3,"changed":true}\n');
+  const identity = (content: Buffer, blob: string) => ({
+    byteLength: content.length,
+    rawBytesSha256: createHash("sha256").update(content).digest("hex"),
+    lineEndingNormalizedSha256: createHash("sha256").update(normalizePackageLockLineEndings(content)).digest("hex"),
+    normalizedGitBlob: blob,
+  });
+  const expectedIdentity = identity(expectedBytes, "a".repeat(40));
+  const changedIdentity = identity(changedBytes, "b".repeat(40));
+
+  for (const [checkoutIdentity, expectedClassification] of [
+    [changedIdentity, "content-changed"],
+    [identity(changedBytes, "a".repeat(40)), "git-normalized-equivalent"],
+    [null, "unavailable"],
+  ] as const) {
+    let prepareCalled = false;
+    let installCalled = false;
+    const diagnostic: Record<string, unknown> = { checkoutIdentity };
+    await assert.rejects(runNpmCiWithLockDiagnostics({
+      preparePinnedLock: async () => { prepareCalled = true; return expectedIdentity; },
+      install: async () => { installCalled = true; },
+      captureIdentity: async () => expectedIdentity,
+      expectedIdentity,
+      checkoutIdentity,
+      diagnostic,
+    }), expectedClassification === "unavailable" ? /missing or incomplete/ : new RegExp(expectedClassification));
+    assert.equal(diagnostic.checkoutClassification, expectedClassification);
+    assert.equal(prepareCalled, false, "unexpected or missing checkout identity must stop before any lock rewrite");
+    assert.equal(installCalled, false, "unexpected or missing checkout identity must stop before npm ci");
+    assert.equal(diagnostic.checkoutIdentity, checkoutIdentity, "the observed identity is retained for diagnosis");
+  }
 });
 
 test("post-npm-ci diagnostic failure does not replace the npm ci failure", async () => {
+  const expectedIdentity = {
+    byteLength: 0,
+    rawBytesSha256: createHash("sha256").update(Buffer.alloc(0)).digest("hex"),
+    lineEndingNormalizedSha256: createHash("sha256").update(Buffer.alloc(0)).digest("hex"),
+    normalizedGitBlob: "c".repeat(40),
+  };
   const diagnostic: Record<string, unknown> = { afterNpmCiIdentity: null };
   await assert.rejects(runNpmCiWithLockDiagnostics({
     preparePinnedLock: async () => ({}),
     install: async () => { throw new Error("npm ci failed first"); },
     captureIdentity: async () => { throw new Error("post-install lock capture failed"); },
-    expectedIdentity: {},
-    checkoutIdentity: {},
+    expectedIdentity,
+    checkoutIdentity: expectedIdentity,
     diagnostic,
   }), /npm ci failed first/);
   assert.equal(diagnostic.afterNpmCiCaptureError, "post-install lock capture failed");
@@ -170,8 +211,8 @@ test("post-npm-ci diagnostic failure does not replace the npm ci failure", async
     preparePinnedLock: async () => ({}),
     install: async () => undefined,
     captureIdentity: async () => { throw new Error("post-install lock capture failed"); },
-    expectedIdentity: {},
-    checkoutIdentity: {},
+    expectedIdentity,
+    checkoutIdentity: expectedIdentity,
     diagnostic: {},
   }), /post-install lock capture failed/);
 });
