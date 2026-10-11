@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -72,6 +72,17 @@ export function classifyPackageLockDiagnostics(expected, checkout, afterNpmCi) {
   };
 }
 
+export async function writeSummaryCheckpoint(summaryPath, summary) {
+  const temporaryPath = `${summaryPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(summary, null, 2)}\n`, { flag: "wx" });
+    await rename(temporaryPath, summaryPath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function preparePinnedLockForNpmCi({ expectedBytes, expectedIdentity, writeBytes, readBytes, captureIdentity }) {
   if (!Buffer.isBuffer(expectedBytes)
     || expectedIdentity?.byteLength !== expectedBytes.length
@@ -94,15 +105,17 @@ export async function preparePinnedLockForNpmCi({ expectedBytes, expectedIdentit
   return identity;
 }
 
-export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic }) {
+export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic, onDiagnosticUpdate }) {
   const checkoutClassification = hasCompleteLockIdentity(expectedIdentity) && hasCompleteLockIdentity(checkoutIdentity)
     ? classifyLockfileDifference(expectedIdentity, checkoutIdentity)
     : "unavailable";
   Object.assign(diagnostic, { checkoutClassification });
+  await onDiagnosticUpdate?.();
   if (checkoutClassification !== "unchanged" && checkoutClassification !== "line-ending-only") {
     diagnostic.checkoutGuardError = checkoutClassification === "unavailable"
       ? "Pinned or checkout package-lock identity is missing or incomplete."
       : `Checkout package-lock differs from pinned content: ${checkoutClassification}.`;
+    await onDiagnosticUpdate?.();
     throw new Error(diagnostic.checkoutGuardError);
   }
   const preparedForNpmCiIdentity = await preparePinnedLock();
@@ -110,6 +123,7 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
     preparedForNpmCiIdentity,
     preparationClassification: classifyLockfileDifference(checkoutIdentity, preparedForNpmCiIdentity),
   });
+  await onDiagnosticUpdate?.();
   let installFailed = false;
   let installError;
   try {
@@ -131,8 +145,10 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
     });
   } catch (error) {
     diagnostic.afterNpmCiCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
+    await onDiagnosticUpdate?.();
     if (!installFailed) throw error;
   }
+  await onDiagnosticUpdate?.();
   if (installFailed) throw installError;
 }
 
@@ -464,7 +480,7 @@ function sameEnvironment(left, right) {
   return Object.keys(left).every((key) => left[key] === right[key]);
 }
 
-export async function runScheduledSamples({ schedule, summary, recordPathForIndex, runSample }) {
+export async function runScheduledSamples({ schedule, summary, recordPathForIndex, runSample, onSampleComplete }) {
   const records = [];
   summary.sampleCount = 0;
   summary.successfulSampleCount = 0;
@@ -479,6 +495,13 @@ export async function runScheduledSamples({ schedule, summary, recordPathForInde
     summary.warmupSampleCount = records.filter((sample) => sample.phase === "warmup").length;
     summary.measuredSampleCount = records.filter((sample) => sample.phase === "measured").length;
     summary.records = records.map((_sample, recordIndex) => recordPathForIndex(recordIndex + 1));
+    if (record.status !== "success") {
+      summary.status = "failure";
+      summary.stoppedAfterScheduleIndex = index + 1;
+      summary.error = `Sample ${index + 1} ended with status ${formatSummaryError(record.status)}; remaining scheduled samples were skipped.`;
+    }
+    await onSampleComplete?.();
+    if (record.status !== "success") break;
   }
   return records;
 }
@@ -542,7 +565,7 @@ async function runPairedComparison() {
   const summaryPath = path.join(artifactRoot, "paired-comparison-summary.json");
   const summary = {
     schemaVersion: 1,
-    status: "failure",
+    status: "in_progress",
     startedAt: new Date().toISOString(),
     baselineCommit: BASELINE_COMMIT,
     candidateCommit: CANDIDATE_COMMIT,
@@ -551,8 +574,10 @@ async function runPairedComparison() {
     excludedTestDifferences: EXCLUDED_FILES,
     recordsDirectory: "records",
   };
+  const checkpoint = () => writeSummaryCheckpoint(summaryPath, summary);
   const worktrees = [];
   try {
+    await checkpoint();
     if (process.platform !== "win32" || process.env.RUNNER_OS !== "Windows") throw new Error("Paired comparison must run on the Windows GitHub runner.");
     if (!/^v22\./u.test(process.version)) throw new Error(`Paired comparison requires Node 22, got ${process.version}.`);
     if (process.env.GITHUB_EVENT_NAME !== "workflow_dispatch") throw new Error("Paired comparison is available only for manual workflow_dispatch runs.");
@@ -636,6 +661,7 @@ async function runPairedComparison() {
       } catch (error) {
         diagnostic.checkoutIdentityCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
         diagnostic.checkoutClassification = "unavailable";
+        await checkpoint();
         throw new Error(`Could not capture ${label} checkout package-lock identity.`);
       }
       await runNpmCiWithLockDiagnostics({
@@ -651,6 +677,7 @@ async function runPairedComparison() {
         expectedIdentity: summary.packageLockIdentity,
         checkoutIdentity,
         diagnostic,
+        onDiagnosticUpdate: checkpoint,
       });
     }
     const baselineEnvironment = await environmentFor(baselinePath, artifactRoot);
@@ -676,9 +703,11 @@ async function runPairedComparison() {
     if (schedule.length !== 70 || summary.warmupScheduleSampleCount !== 10 || summary.measuredScheduleSampleCount !== 60) {
       throw new Error("Screening schedule must contain 10 warmups and 60 measured samples.");
     }
+    summary.status = "in_progress";
     const records = await runScheduledSamples({
       schedule,
       summary,
+      onSampleComplete: checkpoint,
       recordPathForIndex: (index) => path.relative(artifactRoot, path.join(recordDirectory, `${String(index).padStart(4, "0")}.json`)).replaceAll("\\", "/"),
       runSample: (sample, index) => {
       const commit = sample.side === "baseline" ? BASELINE_COMMIT : CANDIDATE_COMMIT;
@@ -686,10 +715,15 @@ async function runPairedComparison() {
       return runTestSample({ sample: { ...sample, commit }, cwd, runId, attempt, jobId, environment: recordEnvironment, recordDirectory, diagnosticsDirectory, index });
       },
     });
-    if (summary.successfulSampleCount !== schedule.length) throw new Error("One or more paired test samples failed; comparison statistics are not valid.");
-    summary.statistics = summarizeComparison(records.map((record) => ({ ...record, durationMs: record.monotonicDurationMs })), screeningInventory);
-    summary.status = "success";
+    if (records.length !== schedule.length || summary.successfulSampleCount !== schedule.length) {
+      summary.status = "failure";
+      summary.error ??= `Paired comparison stopped after ${records.length} of ${schedule.length} scheduled samples; statistics were not generated.`;
+    } else {
+      summary.statistics = summarizeComparison(records.map((record) => ({ ...record, durationMs: record.monotonicDurationMs })), screeningInventory);
+      summary.status = "success";
+    }
   } catch (error) {
+    summary.status = "failure";
     summary.error = formatSummaryError(error instanceof Error ? error.message : String(error));
     summary.sampleCount = summary.sampleCount ?? 0;
   } finally {
@@ -698,7 +732,7 @@ async function runPairedComparison() {
       catch (error) { summary.cleanupError = formatSummaryError(error instanceof Error ? error.message : String(error)); }
     }
     summary.finishedAt = new Date().toISOString();
-    await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+    await checkpoint();
     process.stdout.write(`Paired comparison ${summary.status}; summary: ${summaryPath}\n`);
     process.stderr.write(formatFailureDiagnostic(summary));
   }

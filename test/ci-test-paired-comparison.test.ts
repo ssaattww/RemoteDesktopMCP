@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,7 @@ import {
   runScheduledSamples,
   runNpmCiWithLockDiagnostics,
   summarizeComparison,
+  writeSummaryCheckpoint,
 } from "../scripts/ci-test-paired-comparison.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -188,6 +190,42 @@ test("checkout content changes and missing lock identities fail closed before pr
   }
 });
 
+test("lock guard failure checkpoints its classification before stopping npm ci", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "paired-lock-checkpoint-"));
+  const summaryPath = path.join(tempRoot, "paired-comparison-summary.json");
+  const expectedBytes = Buffer.from('{"lockfileVersion":3}\n');
+  const changedBytes = Buffer.from('{"lockfileVersion":3,"changed":true}\n');
+  const identity = (content: Buffer, blob: string) => ({
+    byteLength: content.length,
+    rawBytesSha256: createHash("sha256").update(content).digest("hex"),
+    lineEndingNormalizedSha256: createHash("sha256").update(normalizePackageLockLineEndings(content)).digest("hex"),
+    normalizedGitBlob: blob,
+  });
+  const expectedIdentity = identity(expectedBytes, "a".repeat(40));
+  const checkoutIdentity = identity(changedBytes, "b".repeat(40));
+  const diagnostic: Record<string, unknown> = { checkoutIdentity };
+  const summary = { status: "failure", packageLockDiagnostics: { baseline: diagnostic } };
+  let installCalled = false;
+  try {
+    await writeSummaryCheckpoint(summaryPath, { status: "previous-checkpoint" });
+    await assert.rejects(runNpmCiWithLockDiagnostics({
+      install: async () => { installCalled = true; },
+      preparePinnedLock: async () => expectedIdentity,
+      captureIdentity: async () => expectedIdentity,
+      expectedIdentity,
+      checkoutIdentity,
+      diagnostic,
+      onDiagnosticUpdate: () => writeSummaryCheckpoint(summaryPath, summary),
+    }), /Checkout package-lock differs from pinned content: content-changed/);
+
+    const saved = JSON.parse(await readFile(summaryPath, "utf8")) as typeof summary;
+    assert.equal(saved.packageLockDiagnostics.baseline.checkoutClassification, "content-changed");
+    assert.equal(installCalled, false);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("post-npm-ci diagnostic failure does not replace the npm ci failure", async () => {
   const expectedIdentity = {
     byteLength: 0,
@@ -278,7 +316,7 @@ test("failure summary output keeps the command label but redacts credentials and
   assert.equal(formatFailureDiagnostic({ status: "success", error: undefined }), "");
 });
 
-test("screening uses predeclared controls and records two separate warmups plus six balanced pairs", () => {
+test("screening uses predeclared controls and records two separate warmups plus six balanced pairs", async () => {
   assert.deepEqual(PREDECLARED_CONTROL_FILES, [
     "test/independent-transfer-lifecycle.test.ts",
     "test/tool-root-contracts.test.ts",
@@ -302,6 +340,22 @@ test("screening uses predeclared controls and records two separate warmups plus 
   assert.deepEqual(firstFile.slice(2).map(({ orderInPair }) => orderInPair), [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]);
   assert.equal(schedule.filter(({ phase }) => phase === "warmup").length, 10);
   assert.equal(schedule.filter(({ phase }) => phase === "measured").length, 60);
+
+  const executed: typeof schedule = [];
+  const summary: Record<string, unknown> = {};
+  const records = await runScheduledSamples({
+    schedule,
+    summary,
+    recordPathForIndex: (index: number) => `records/${String(index).padStart(4, "0")}.json`,
+    runSample: async (sample: (typeof schedule)[number]) => {
+      executed.push(sample);
+      return { status: "success", phase: sample.phase };
+    },
+  });
+  assert.deepEqual(executed, schedule);
+  assert.equal(records.length, 70);
+  assert.equal(summary.sampleCount, 70);
+  assert.equal(summary.successfulSampleCount, 70);
 });
 
 test("predeclared controls must have identical tracked blob identities on both sides", () => {
@@ -314,23 +368,40 @@ test("predeclared controls must have identical tracked blob identities on both s
   assert.throws(() => comparePredeclaredControlBlobs(baseline, candidate), /predeclared control.*changed|changed.*control/i);
 });
 
-test("scheduled sample loop retains completed records and counts when a later sample throws", async () => {
-  const summary: Record<string, unknown> = {};
+test("scheduled sample loop checkpoints a failed record and stops before later samples", async () => {
+  const summary: Record<string, unknown> = { status: "in_progress" };
   let calls = 0;
-  await assert.rejects(runScheduledSamples({
-    schedule: [{ side: "baseline" }, { side: "candidate" }],
+  const checkpoints: Array<{ status?: string; sampleCount?: number; records?: string[] }> = [];
+  const records = await runScheduledSamples({
+    schedule: [
+      { side: "baseline", phase: "warmup" },
+      { side: "candidate", phase: "warmup" },
+      { side: "baseline", phase: "measured" },
+    ],
     summary,
     recordPathForIndex: (index: number) => `records/${String(index).padStart(4, "0")}.json`,
-    runSample: async (_sample: unknown, index: number) => {
-      calls += 1;
-      if (index === 2) throw new Error("second sample failed");
-      return { status: "success", sampleIndex: index };
+    onSampleComplete: async () => {
+      checkpoints.push({ status: summary.status as string, sampleCount: summary.sampleCount as number, records: [...summary.records as string[]] });
     },
-  }), /second sample failed/);
+    runSample: async (sample: { phase: string }, index: number) => {
+      calls += 1;
+      return { status: index === 2 ? "failure" : "success", phase: sample.phase, sampleIndex: index };
+    },
+  });
   assert.equal(calls, 2);
-  assert.equal(summary.sampleCount, 1);
+  assert.equal(records.length, 2);
+  assert.equal(summary.status, "failure");
+  assert.equal(summary.stoppedAfterScheduleIndex, 2);
+  assert.equal(summary.sampleCount, 2);
   assert.equal(summary.successfulSampleCount, 1);
-  assert.deepEqual(summary.records, ["records/0001.json"]);
+  assert.equal(summary.warmupSampleCount, 2);
+  assert.equal(summary.measuredSampleCount, 0);
+  assert.equal("statistics" in summary, false);
+  assert.deepEqual(summary.records, ["records/0001.json", "records/0002.json"]);
+  assert.deepEqual(checkpoints, [
+    { status: "in_progress", sampleCount: 1, records: ["records/0001.json"] },
+    { status: "failure", sampleCount: 2, records: ["records/0001.json", "records/0002.json"] },
+  ]);
 });
 
 test("screening statistics exclude warmups and report six pairs plus first-side-stratified effects", () => {
