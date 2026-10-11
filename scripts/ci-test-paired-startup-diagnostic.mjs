@@ -9,6 +9,8 @@ import {
   CANDIDATE_COMMIT,
   capturePackageLockIdentity,
   normalizePackageLockLineEndings,
+  preparePinnedLockForNpmCi,
+  runNpmCiWithLockDiagnostics,
   writeSummaryCheckpoint,
 } from "./ci-test-paired-comparison.mjs";
 import { fileURLToPath } from "node:url";
@@ -407,7 +409,7 @@ export function createDiagnosticSummary(runId, attempt, driverSha) {
       runnerTransitionReserveMs: STARTUP_DIAGNOSTIC_RUNNER_SLACK_MS,
     },
     sampleLimit: STARTUP_DIAGNOSTIC_SAMPLE_COUNT,
-    testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", test: "not_started", overlay: "not_applied" }, candidate: { npmCi: "not_started", test: "not_started", overlay: "not_applied" } },
+    testFile: STARTUP_DIAGNOSTIC_TEST_FILE, sides: { baseline: { npmCi: "not_started", test: "not_started", overlay: "not_applied", packageLockDiagnostics: null }, candidate: { npmCi: "not_started", test: "not_started", overlay: "not_applied", packageLockDiagnostics: null } },
     primaryError: null, checkpointFailureCount: 0, worktreeDisposition: "owned_temporary_worktrees", overlayIdentityVerified: false,
   };
 }
@@ -453,6 +455,7 @@ async function runStartupDiagnostic() {
     if (!expectedBytes[0].equals(expectedBytes[1]) || lockBlobs[0] !== lockBlobs[1]) throw Object.assign(new Error("pinned lock mismatch"), { diagnosticClass: "lock_guard_failure" });
     const identity = expectedIdentity(expectedBytes[0], lockBlobs[0]);
     summary.packageLockSha256 = identity.rawBytesSha256;
+    summary.packageLockIdentity = identity;
     summary.nodeVersion = process.version;
     summary.testLaunch = { commandRole: "process.execPath", args: ["--import", "tsx", "--test", STARTUP_DIAGNOSTIC_TEST_FILE], cwdRole: "test_worktree", envPolicy: "process_env_minus_CI_GITHUB_TOKEN_and_GITHUB_TOKEN" };
     summary.sides.baseline.commit = BASELINE_COMMIT;
@@ -474,36 +477,94 @@ async function runStartupDiagnostic() {
     }
     for (const side of ["baseline", "candidate"]) {
       const target = targets[side];
-      const checkout = await capturePackageLockIdentity(target);
-      if (checkout.rawBytesSha256 !== identity.rawBytesSha256) {
-        const lf = checkout.lineEndingNormalizedSha256 === identity.lineEndingNormalizedSha256;
-        const blob = checkout.normalizedGitBlob === identity.normalizedGitBlob;
-        if (!lf || !blob) throw Object.assign(new Error("checkout lock guard failed"), { diagnosticClass: "lock_guard_failure" });
-        await writeFile(path.join(target, "package-lock.json"), expectedBytes[0]);
+      const sideSummary = summary.sides[side];
+      const lockDiagnostics = {
+        expectedIdentity: identity,
+        checkoutIdentity: null,
+        preparedForNpmCiIdentity: null,
+        afterNpmCiIdentity: null,
+      };
+      sideSummary.packageLockDiagnostics = lockDiagnostics;
+      let checkoutIdentity;
+      try {
+        checkoutIdentity = await capturePackageLockIdentity(target);
+        lockDiagnostics.checkoutIdentity = checkoutIdentity;
+      } catch (error) {
+        lockDiagnostics.checkoutIdentityCaptureError = safeDiagnosticError(error);
+        lockDiagnostics.checkoutClassification = "unavailable";
+        lockDiagnostics.classification = "unavailable";
+        await checkpoint();
+        throw Object.assign(new Error("checkout lock identity could not be verified"), { diagnosticClass: "lock_guard_failure", diagnosticStage: "checkout_lock_guard" });
       }
-      const prepared = await capturePackageLockIdentity(target);
-      if (prepared.rawBytesSha256 !== identity.rawBytesSha256 || prepared.normalizedGitBlob !== identity.normalizedGitBlob) throw Object.assign(new Error("prepared lock guard failed"), { diagnosticClass: "lock_guard_failure" });
-      summary.sides[side].npmCi = "running";
-      await checkpoint();
-      const install = await runBoundedChild("npm.cmd", ["ci"], { cwd: target, shell: true, deadline });
-      if (install.timedOut) {
-        allOwnedProcessesClosed &&= install.treeTermination === "verified";
-        if (install.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
-        summary.sides[side].directChildTermination = install.directChildTermination;
-        summary.sides[side].npmCi = install.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
-        throw Object.assign(new Error("npm ci timed out"), { diagnosticClass: install.treeTermination === "verified" ? "timeout" : "termination_unverified" });
+      try {
+        await runNpmCiWithLockDiagnostics({
+          preparePinnedLock: async () => {
+            lockDiagnostics.preparationStatus = "running";
+            await checkpoint();
+            try {
+              const prepared = await preparePinnedLockForNpmCi({
+                expectedBytes: expectedBytes[side === "baseline" ? 0 : 1],
+                expectedIdentity: identity,
+                writeBytes: (bytes) => writeFile(path.join(target, "package-lock.json"), bytes),
+                readBytes: () => readFile(path.join(target, "package-lock.json")),
+                captureIdentity: () => capturePackageLockIdentity(target),
+              });
+              lockDiagnostics.preparationStatus = "verified";
+              return prepared;
+            } catch (error) {
+              lockDiagnostics.preparationStatus = "failed";
+              lockDiagnostics.preparationError = safeDiagnosticError(error);
+              try { lockDiagnostics.preparationObservedIdentity = await capturePackageLockIdentity(target); }
+              catch (captureError) { lockDiagnostics.preparationObservedIdentityCaptureError = safeDiagnosticError(captureError); }
+              await checkpoint();
+              throw Object.assign(error, { diagnosticClass: "lock_guard_failure", diagnosticStage: "lock_preparation" });
+            }
+          },
+          install: async () => {
+            sideSummary.npmCi = "running";
+            await checkpoint();
+            const install = await runBoundedChild("npm.cmd", ["ci"], { cwd: target, shell: true, deadline });
+            if (install.timedOut) {
+              allOwnedProcessesClosed &&= install.treeTermination === "verified";
+              if (install.treeTermination !== "verified") { terminationUnverified = true; preserveWorktrees = true; }
+              sideSummary.directChildTermination = install.directChildTermination;
+              sideSummary.npmCi = install.treeTermination === "verified" ? "timeout_tree_stopped" : "timeout_tree_unknown";
+              throw Object.assign(new Error("npm ci timed out"), {
+                diagnosticClass: install.treeTermination === "verified" ? "timeout" : "termination_unverified",
+                unsafePostInstallCapture: install.treeTermination !== "verified",
+              });
+            }
+            if (install.spawnError || install.exitCode !== 0) {
+              sideSummary.npmCi = "failure";
+              sideSummary.npmErrorCode = install.errorCode ?? "unknown";
+              throw Object.assign(new Error("npm ci failed"), { diagnosticClass: "dependency_install_failure" });
+            }
+            sideSummary.npmCi = "success";
+          },
+          captureIdentity: () => capturePackageLockIdentity(target),
+          expectedIdentity: identity,
+          checkoutIdentity,
+          diagnostic: lockDiagnostics,
+          onDiagnosticUpdate: checkpoint,
+          captureAfterInstallFailure: (error) => error?.unsafePostInstallCapture !== true,
+        });
+      } catch (error) {
+        if (lockDiagnostics.checkoutGuardError) {
+          Object.assign(error, { diagnosticClass: "lock_guard_failure", diagnosticStage: "checkout_lock_guard" });
+        } else if (lockDiagnostics.afterNpmCiCaptureError && !error?.diagnosticClass) {
+          sideSummary.npmCi = "lock_unverified";
+          Object.assign(error, { diagnosticClass: "lock_guard_failure", diagnosticStage: "post_install_lock_identity" });
+        }
+        throw error;
       }
-      if (install.spawnError || install.exitCode !== 0) {
-        summary.sides[side].npmCi = "failure";
-        summary.sides[side].npmErrorCode = install.errorCode ?? "unknown";
-        throw Object.assign(new Error("npm ci failed"), { diagnosticClass: "dependency_install_failure" });
+      const after = lockDiagnostics.afterNpmCiIdentity;
+      if (lockDiagnostics.npmCiClassification !== "unchanged"
+        || after?.rawBytesSha256 !== identity.rawBytesSha256
+        || after?.lineEndingNormalizedSha256 !== identity.lineEndingNormalizedSha256
+        || after?.normalizedGitBlob !== identity.normalizedGitBlob) {
+        sideSummary.npmCi = "lock_changed";
+        throw Object.assign(new Error("post-install lock guard failed"), { diagnosticClass: "lock_guard_failure", diagnosticStage: "post_install_lock_guard" });
       }
-      const after = await capturePackageLockIdentity(target);
-      if (after.rawBytesSha256 !== identity.rawBytesSha256 || after.normalizedGitBlob !== identity.normalizedGitBlob) {
-        summary.sides[side].npmCi = "lock_changed";
-        throw Object.assign(new Error("post-install lock guard failed"), { diagnosticClass: "lock_guard_failure" });
-      }
-      summary.sides[side].npmCi = "success";
       const npmVersionRun = await runBoundedChild("npm.cmd", ["--version"], { cwd: target, shell: true, deadline, captureStdout: true });
       if (npmVersionRun.timedOut || npmVersionRun.treeTermination === "unknown" || npmVersionRun.spawnError
         || npmVersionRun.exitCode !== 0 || !/^\d+\.\d+\.\d+(?:[-+].*)?\s*$/u.test(npmVersionRun.stdout)) {

@@ -259,6 +259,30 @@ test("post-npm-ci diagnostic failure does not replace the npm ci failure", async
   }), /post-install lock capture failed/);
 });
 
+test("unverified npm ci process trees skip unsafe post-install lock reads", async () => {
+  const expectedIdentity = {
+    byteLength: 0,
+    rawBytesSha256: createHash("sha256").update(Buffer.alloc(0)).digest("hex"),
+    lineEndingNormalizedSha256: createHash("sha256").update(Buffer.alloc(0)).digest("hex"),
+    normalizedGitBlob: "d".repeat(40),
+  };
+  const primary = Object.assign(new Error("npm ci timed out"), { unsafePostInstallCapture: true });
+  const diagnostic: Record<string, unknown> = { afterNpmCiIdentity: null };
+  let captureCalls = 0;
+  await assert.rejects(runNpmCiWithLockDiagnostics({
+    preparePinnedLock: async () => expectedIdentity,
+    install: async () => { throw primary; },
+    captureIdentity: async () => { captureCalls += 1; return expectedIdentity; },
+    expectedIdentity,
+    checkoutIdentity: expectedIdentity,
+    diagnostic,
+    captureAfterInstallFailure: (error) => error?.unsafePostInstallCapture !== true,
+  }), (error: unknown) => error === primary);
+  assert.equal(captureCalls, 0);
+  assert.equal(diagnostic.afterNpmCiCaptureSkipped, "install_process_tree_unverified");
+  assert.equal(diagnostic.npmCiClassification, "unavailable");
+});
+
 test("package lock identity records raw bytes and Git's path-normalized blob", async () => {
   const repositoryRoot = path.resolve(here, "..");
   const lockBytes = await readFile(path.join(repositoryRoot, "package-lock.json"));

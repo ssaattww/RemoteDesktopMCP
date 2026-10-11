@@ -105,7 +105,7 @@ export async function preparePinnedLockForNpmCi({ expectedBytes, expectedIdentit
   return identity;
 }
 
-export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic, onDiagnosticUpdate }) {
+export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic, onDiagnosticUpdate, captureAfterInstallFailure = () => true }) {
   let diagnosticCheckpointError;
   const persistDiagnostic = async () => {
     try {
@@ -146,6 +146,14 @@ export async function runNpmCiWithLockDiagnostics({ install, preparePinnedLock, 
   } catch (error) {
     installFailed = true;
     installError = error;
+  }
+  if (installFailed && captureAfterInstallFailure(installError) === false) {
+    diagnostic.afterNpmCiCaptureSkipped = "install_process_tree_unverified";
+    diagnostic.npmCiClassification = "unavailable";
+    diagnostic.classification = "unavailable";
+    await persistDiagnostic();
+    if (diagnosticCheckpointError) throw diagnosticCheckpointError;
+    throw installError;
   }
   try {
     const afterNpmCiIdentity = await captureIdentity();
