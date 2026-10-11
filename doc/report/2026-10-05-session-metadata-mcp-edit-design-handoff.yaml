@@ -1,0 +1,310 @@
+﻿schema_version: 3
+producer:
+  skill: chat-handoff-manager
+  mode: initial_implementation
+  generated_at: "2026-10-05T19:49:13+09:00"
+
+repository: ssaattww/RemoteDesktopMCP
+issue_or_pr: "Issue #71 / PR #74"
+task_id: null
+branch: design/session-metadata-mcp-edit
+base_ref: main
+target:
+  current_head: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+  reviewed_head: null
+  commit_range: f20c75e1ecd409f0e8573720c0f74b39d8178f93..685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+
+execution_environment:
+  kind: connected_computer
+  tool: RemoteDesktopMCP
+  machine_id: local
+  connection: available
+  os: Windows
+  shell: cmd.exe
+  working_directory: 'C:\Users\donabe\RemoteDesktopWorkspace\RemoteDesktopMCP'
+  repository: ssaattww/RemoteDesktopMCP
+  branch: design/session-metadata-mcp-edit
+  head_sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+  source_state: dirty_report_handoff_only
+  source_fingerprint: "git HEAD 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5; only report/handoff follow-up edits pending"
+  ownership: current_task
+  writable_paths:
+    - doc/design/session-metadata-mcp-edit.md
+    - tools/lint/markdown-whitelist.yaml
+    - package.json
+    - doc/report/2026-10-05-session-metadata-mcp-edit-design.md
+    - doc/report/2026-10-05-session-metadata-mcp-edit-design-handoff.yaml
+  dependencies:
+    - name: git
+      status: available
+      evidence: git status/rev-parse/commit/push succeeded
+    - name: gh
+      status: available
+      evidence: Issue #71 read and PR #74 created successfully
+    - name: npm dependencies
+      status: available
+      evidence: npm ci succeeded; npm run lint and npm run check succeeded
+  evidence:
+    - PR #74 design terminology refinement was pushed at headRefOid=ff02bdcd23f2941894c9ba7c812fd7b5cdea551e before the follow-up report/handoff commit
+    - RDMCP node local was connected and the session working directory was fixed to the repository
+
+verification:
+  capability: local_execution_available
+  capability_evidence:
+    - npm run lint completed with exit code 0
+    - npm run check completed with exit code 0
+    - git diff --check completed with exit code 0
+  technical_head: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+  administrative_parent: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+  commit:
+    state: report_handoff_commit_pending
+    review_target_sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+  push:
+    state: pushed
+    head_sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+  ci_wait:
+    state: do_not_wait_by_user_instruction
+    required_for: exact_head_status_observation_only
+  final_publication:
+    sequence: final_push_then_pr_update_then_exact_head_status_check_without_wait
+    pr_action: update
+
+authoritative_requirements:
+  - source: user_instruction
+    reference: current chat
+    summary: Design RemoteDesktopMCP Issue #71 using RDMCP, publish a PR, and list/add suitable common design terms to the whitelist.
+  - source: user_instruction
+    reference: current chat follow-up
+    summary: Use katakana for explanatory design terms except source-code literals; retain common abbreviations such as SSRF, CI and Todo; use テスト分割 instead of shard; keep report-only operation details out of the product design.
+  - source: issue
+    reference: Issue #71
+    summary: Add MCP editing of existing session working directory, purpose, URL and title while reusing the HTTP shared mutation, versioning, safety, audit and process semantics.
+  - source: repository_instruction
+    reference: project instructions
+    summary: Use RDMCP and gh, keep changes reviewable, save a detailed report, comment the PR, verify CI only against the PR current HEAD, and do not merge.
+  - source: design
+    reference: doc/design/session-metadata-edit.md
+    summary: Preserve the existing shared session metadata update, process working-directory snapshot, audit rollback and terminal lifecycle rules.
+  - source: design
+    reference: doc/design/session-external-links.md
+    summary: Preserve existing URL/title validation, SSRF protection, fetch generation and owner-only lifecycle rules.
+
+development_policy:
+  method: design_only_with_tdd_plan_for_followup_implementation
+  testing_order: mechanical_document_validation_now; red_then_green_for_future_product_implementation
+  governing_source: user and repository instructions plus Issue #71
+validation_plan:
+  commands:
+    - git diff --check
+    - npm run lint
+    - npm run check
+  required_failure_diagnostics:
+    - .github/workflows/lint.yml ci-artifacts/test-results.txt
+    - per-step stdout logs
+    - per-step stderr logs
+    - per-step result files
+    - environment.log
+    - Windows shard diagnostic JSON
+
+blocked: []
+
+authorized_actions:
+  - read_repository
+  - edit_documentation
+  - edit_configuration
+  - write_handoff
+  - write_report
+  - create_branch
+  - commit
+  - push
+  - create_pr
+  - update_pr
+  - comment_pr
+
+write_boundary:
+  allowed:
+    - path_or_operation: doc/design/session-metadata-mcp-edit.md
+      reason: accepted design scope
+    - path_or_operation: tools/lint/markdown-whitelist.yaml
+      reason: user-requested whitelist candidates for common design terms
+    - path_or_operation: package.json
+      reason: add the new design document to strict design-term lint
+    - path_or_operation: doc/report/2026-10-05-session-metadata-mcp-edit-design.md
+      reason: required detailed report
+    - path_or_operation: doc/report/2026-10-05-session-metadata-mcp-edit-design-handoff.yaml
+      reason: required handoff
+    - path_or_operation: git commit/push and PR #74 create/update/comment
+      reason: required publication flow
+  forbidden:
+    - path_or_operation: src/** product implementation
+      reason: current request is design only
+    - path_or_operation: test/** implementation tests
+      reason: future TDD implementation scope
+    - path_or_operation: merge PR #74
+      reason: merge is reserved for the user
+
+scope:
+  - Design the MCP contract for editing existing session metadata.
+  - Reuse RemoteDesktopService.updateSessionMetadata rather than duplicate mutation rules.
+  - Define expected_version, session_list version exposure, process ordering, audit behavior, Todo gate behavior, and external-link safety.
+  - Keep whitelist terms minimal: allowed general terms plus English terms that directly describe the program/API/security behavior; do not whitelist report-only operation vocabulary.
+  - Publish the design in PR #74 with report and handoff evidence.
+
+non_goals:
+  - Implement session_update in src/index.ts.
+  - Add product tests now.
+  - Change the existing HTTP session edit behavior.
+  - Change the URL title retrieval implementation.
+  - Change the CI workflow because required diagnostics already exist.
+  - Merge the PR.
+
+files:
+  changed:
+    - path: tools/lint/markdown-whitelist.yaml
+      purpose: Keep nine needed terms: Todo, SSRF, ラッパー, スネークケース, スキーマ, ハンドラー, ロールバック, CI, リンク; use テスト分割 instead of shard.
+    - path: doc/design/session-metadata-mcp-edit.md
+      purpose: Define the complete MCP session metadata edit design.
+    - path: package.json
+      purpose: Include the new design in strict design-term lint.
+    - path: doc/report/2026-10-05-session-metadata-mcp-edit-design.md
+      purpose: Persist detailed design work evidence.
+    - path: doc/report/2026-10-05-session-metadata-mcp-edit-design-handoff.yaml
+      purpose: Persist transportable continuation state.
+  inspected:
+    - path: src/index.ts
+      purpose: Verify Session, updateSessionMetadata, MCP wrapper, todo gate, process snapshot and tool registration behavior.
+    - path: src/session-links.ts
+      purpose: Verify shared URL/title update and async fetch primitives.
+    - path: src/user-console.ts
+      purpose: Verify PATCH route uses updateSessionMetadata.
+    - path: doc/design/session-metadata-edit.md
+      purpose: Reuse established post-edit semantics.
+    - path: doc/design/session-external-links.md
+      purpose: Reuse established URL/title safety semantics.
+    - path: .github/workflows/lint.yml
+      purpose: Verify failure-diagnostic artifacts already include result/stdout/stderr/logs.
+    - path: tasks/tasks-status.md
+      purpose: Confirm existing repository tracking context; not modified.
+  intentionally_untouched:
+    - path_or_area: src/**
+      reason: design-only request
+    - path_or_area: test/**
+      reason: product TDD is a follow-up after design review
+    - path_or_area: .github/workflows/lint.yml
+      reason: required diagnostic artifacts already exist
+    - path_or_area: tasks/tasks-status.md
+      reason: no task entry update was required by the accepted design scope
+
+commands:
+  - command: npm ci
+    purpose: Restore lockfile-pinned local dependencies required for document lint.
+    exit_code: 0
+    result: passed
+    head_sha: f20c75e1ecd409f0e8573720c0f74b39d8178f93
+    evidence: Added 669 packages; npm also reported four high severity dependency vulnerabilities outside this design scope.
+    execution_environment: null
+    source_fingerprint: null
+  - command: git diff --check
+    purpose: Verify patch whitespace and diff integrity after terminology refinement.
+    exit_code: 0
+    result: passed
+    head_sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+    evidence: no errors
+    execution_environment: null
+    source_fingerprint: null
+  - command: npm run lint
+    purpose: Run TypeScript lint, Markdown lint and strict design-term lint after terminology refinement.
+    exit_code: 0
+    result: passed
+    head_sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+    evidence: completed successfully; Markdown lint had 145 files and zero issues; explanatory design terms use katakana, SSRF remains as a common abbreviation, and shard is not used in the target design
+    execution_environment: null
+    source_fingerprint: null
+  - command: npm run check
+    purpose: Verify TypeScript project type-check remains valid after package script change.
+    exit_code: 0
+    result: passed
+    head_sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+    evidence: tsc --noEmit succeeded
+    execution_environment: null
+    source_fingerprint: null
+
+tests:
+  - name: product tests
+    phase: not_applicable
+    result: not_run
+    head_sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+    evidence: Design-only change; future implementation plan explicitly requires TDD.
+
+ci:
+  required: true
+  workflow: .github/workflows/lint.yml
+  run_id: null
+  head_sha: unknown
+  conclusion: unknown
+  artifacts: []
+
+implementation:
+  outcome: completed
+  final_head: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+  commits:
+    - sha: ec2381f57a95311042bfe5d744e2ebd07819901f
+      purpose: Add initial design-term whitelist candidates.
+    - sha: 6ed44d1984fe2c8d584230b67cfaf82a92478f30
+      purpose: Add MCP session metadata edit design and strict lint coverage.
+    - sha: de1978d7a61f4fa304b1f908727a861ac2d1c50a
+      purpose: Persist the initial detailed report and handoff.
+    - sha: ff02bdcd23f2941894c9ba7c812fd7b5cdea551e
+      purpose: Remove report-only CI operation details from the design and narrow the whitelist to needed terms.
+    - sha: ccd72bf1aab7874ed4ebcacb482632bedca8d4b5
+      purpose: Persist the terminology-refinement report and handoff.
+    - sha: 81aba6bf728a7c8a3a9f26f68b1381975558a303
+      purpose: Convert explanatory design terms to katakana forms.
+    - sha: 685a20c27b5f8d34cb85544ca0eacb7c5cd1d0e5
+      purpose: Keep SSRF as the common abbreviation and keep CI description in Japanese.
+  addressed_findings: []
+  failure_diagnostics:
+    - type: standard_error
+      location: initial npm run lint:md attempt
+      summary: markdownlint package was missing before npm ci; dependency restoration resolved the local environment issue.
+    - type: other
+      location: .github/workflows/lint.yml
+      summary: Existing CI captures test results, stdout, stderr, result files, environment information and Windows shard diagnostics.
+  blocked_items: []
+  summary:
+    - Design terminology uses katakana except source-code literals and common abbreviations; the technical head is 685a20c.
+    - Report-only CI operation details were removed from the product design and retained in the report.
+    - PR #74 is open and unmerged.
+    - A final report/handoff commit and one exact-head CI status observation remain; do not wait for CI completion.
+
+review:
+  mode: not_applicable
+  reviewed_head: unknown
+  reviewer:
+    identity: unknown
+    role: not_applicable
+    continuity:
+      previous_reviewer_identity: null
+      changed: false
+      reason: null
+    independence:
+      implemented_change: unknown
+      implemented_review_fix: unknown
+      served_as_normal_reviewer: unknown
+      inherited_conversation: unknown
+      evidence: []
+  verdict: not_applicable
+  required_coverage: []
+  independent_closure:
+    initial_independent_reviewed_head: null
+    closure_reviewed_heads: []
+    reviewer_continuity: null
+    closure_scope: []
+    completeness_matrix: []
+  validation_assessment: []
+
+next_action:
+  - Commit and push this report and handoff without changing the technical design.
+  - Update PR #74 body/comment with the terminology decision.
+  - Observe exact-head CI status once after the final push; do not wait for completion and never substitute another SHA.
+  - Hand PR #74 to a separate normal design reviewer; do not merge.

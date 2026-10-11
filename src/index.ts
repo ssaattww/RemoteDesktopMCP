@@ -1175,6 +1175,7 @@ export class RemoteDesktopService {
     switch (tool) {
       case "session_open": text("working_directory", 4096); text("purpose", 200); break;
       case "session_close": case "node_list": session(); break;
+      case "session_update": session(); number("expected_version"); break;
       case "file_search": case "content_search": session(); text("root_id", 500); text("query", 120); break;
       case "file_read": file(); number("offset"); number("length"); break;
       case "file_patch": file(); text("old_string", 4000); text("new_string", 4000); number("expected_replacements"); break;
@@ -1421,7 +1422,46 @@ export class RemoteDesktopService {
     };
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
     server.registerTool("session_open", { description: "Open a 24-hour idle-expiring operation session for the authenticated caller. Set the required absolute working_directory and brief purpose. Commands started with process_start run in working_directory. File and transfer tools do not use this directory: their relative_path values are relative to root_id. Pass the returned session_id to file, transfer, and process operations that require it; it can be reused across HTTP connections by the same caller. Optionally provide a public HTTP(S) url and display title. When title is blank or omitted and the URL is eligible, the server sends an unauthenticated public request to retrieve the page title; it sends no cookies or local credentials. Private or login-required pages are not supported, so enter a title for those links. Do not put secrets in a URL. Retrieval is bounded and failure does not prevent opening the session; a provided title prevents retrieval. Opening is rejected while the caller's Emergency Stop is active.", inputSchema: { working_directory: z.string().trim().min(1).max(4096), purpose: z.string().trim().min(1).max(200), url: z.string().optional(), title: z.string().optional() } }, this.tool(user, async ({ working_directory, purpose, url, title }) => { await this.sweepExpired(); this.requireCurrentOperation(); let workingDirectory: string; try { if (!path.isAbsolute(working_directory)) throw new Error(); workingDirectory = await realpath(working_directory); if (!(await lstat(workingDirectory)).isDirectory()) throw new Error(); } catch { throw new Error("Working directory must be an existing absolute directory."); } const externalLink = createSessionLink({ url, title }); this.requireCurrentOperation(); const now = Date.now(); const mono = performance.now(); const session: Session = { id: makeId(), user, workingDirectory, purpose: purpose.trim(), created: now, touched: now, expires: now + SESSION_TTL, state: "active", version: 1, todo: { items: [], version: 0, lastTodoUpdatedMono: null, lastUpdatedAt: null, enabled: true, enabledAtMono: mono, lastGateMono: mono, lastGateWall: now }, ...externalLink }; this.sessions.set(session.id, session); let auditWarning = false; try { await this.audit("session.open", { user, sessionId: session.id, connectionId: session.id, workingDirectory, purpose: session.purpose, stopGeneration: this.userExecutionState(user).stopGeneration }); } catch { auditWarning = true; } this.startSessionLinkTitleFetch(session); return { session_id: session.id, connection_id: session.id, working_directory: session.workingDirectory, purpose: session.purpose, idle_ttl_seconds: SESSION_TTL / 1000, expires_at: new Date(session.expires).toISOString(), state: session.state, ...(session.externalUrl ? { external_url: session.externalUrl } : {}), ...(session.externalTitle ? { external_title: session.externalTitle } : {}), ...(session.externalTitleSource ? { external_title_source: session.externalTitleSource } : {}), external_title_status: session.externalTitleStatus, ...(auditWarning ? { audit_warning: true, applied: true } : {}) }; }));
-    server.registerTool("session_list", { description: "List the caller's active sessions with their working directory, purpose, and optional external link display metadata.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, working_directory: entry.workingDirectory, purpose: entry.purpose, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state, ...(entry.externalUrl || entry.externalTitle ? { ...(entry.externalUrl ? { external_url: entry.externalUrl } : {}), ...(entry.externalTitle ? { external_title: entry.externalTitle } : {}), external_title_source: entry.externalTitleSource, external_title_status: entry.externalTitleStatus } : {}) })) }; }));
+    server.registerTool("session_list", { description: "List the caller's active sessions with their working directory, purpose, metadata version, and optional external link display metadata.", inputSchema: {} }, this.tool(user, async () => { await this.sweepExpired(); return { sessions: [...this.sessions.values()].filter((entry) => entry.user === user && entry.state === "active").map((entry) => ({ session_id: entry.id, working_directory: entry.workingDirectory, purpose: entry.purpose, version: entry.version, created_at: new Date(entry.created).toISOString(), last_used_at: new Date(entry.touched).toISOString(), expires_at: new Date(entry.expires).toISOString(), state: entry.state, ...(entry.externalUrl || entry.externalTitle ? { ...(entry.externalUrl ? { external_url: entry.externalUrl } : {}), ...(entry.externalTitle ? { external_title: entry.externalTitle } : {}), external_title_source: entry.externalTitleSource, external_title_status: entry.externalTitleStatus } : {}) })) }; }));
+    server.registerTool("session_update", {
+      description: "Update one or more editable metadata fields on an active session owned by the authenticated caller. Read the current version with session_list and pass it as expected_version. A stale version, unavailable session, or invalid value returns ok=false; retry conflicts only after rereading session_list. URL and title follow the same public-link validation and title lookup rules as the HTTP console.",
+      inputSchema: {
+        session_id: sessionId,
+        expected_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+        working_directory: z.string().optional(),
+        purpose: z.string().optional(),
+        url: z.string().nullable().optional(),
+        title: z.string().nullable().optional(),
+      },
+    }, this.tool(user, async ({ session_id, expected_version, working_directory, purpose, url, title }) => {
+      const update = await this.updateSessionMetadata(user, session_id, {
+        expectedVersion: expected_version,
+        ...(working_directory === undefined ? {} : { workingDirectory: working_directory }),
+        ...(purpose === undefined ? {} : { purpose }),
+        ...(url === undefined ? {} : { externalUrl: url }),
+        ...(title === undefined ? {} : { externalTitle: title }),
+      });
+      if (!update.ok) return {
+        ok: false,
+        error: update.error,
+        ...(update.currentVersion === undefined ? {} : { current_version: update.currentVersion }),
+        applied: false,
+      };
+      const changedFields = update.changedFields.map((field) => field === "workingDirectory" ? "working_directory" : field === "externalUrl" ? "url" : field === "externalTitle" ? "title" : field);
+      return {
+        ok: true,
+        session_id: update.session_id,
+        working_directory: update.working_directory,
+        purpose: update.purpose,
+        external_url: update.external_url ?? null,
+        external_title: update.external_title ?? null,
+        external_title_source: update.external_title_source ?? null,
+        external_title_status: update.external_title_status,
+        version: update.version,
+        changed_fields: changedFields,
+        applied: changedFields.length > 0,
+      };
+    }));
     server.registerTool("session_close", { description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.processLock.run(() => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.clearSessionLink(session); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } let auditWarning = false; try { await this.audit("session.close", { user, sessionId: session_id }); } catch { auditWarning = true; } return { closed: true, ...(auditWarning ? { audit_warning: true, applied: true } : {}) }; }))));
     server.registerTool("todo_get", { description: "Read the shared Todo list for a session owned by the authenticated caller.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.todoGet(user, session_id)));
     server.registerTool("todo_update", { description: "Add, edit, reorder, complete, or delete Todo items using an expected version.", inputSchema: { session_id: sessionId, expected_version: z.number().int().nonnegative(), changes: todoChangesSchema } }, this.tool(user, async ({ session_id, expected_version, changes }) => this.todoUpdate(user, session_id, expected_version, changes)));
