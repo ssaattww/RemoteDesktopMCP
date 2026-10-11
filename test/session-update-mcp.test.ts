@@ -60,20 +60,21 @@ test("Issue 71: MCP session_update updates one field through the shared versione
     assert.equal(apiSession?.external_title, listed?.external_title);
     assert.equal(apiSession?.version, listed?.version);
 
-    const metadataAuditCount = () => f.service.auditEntriesForConsole().filter((entry) => entry.event === "session.metadata.updated").length;
-    const auditsBeforeSameValue = metadataAuditCount();
-    const sameValue = await owner.call("session_update", { session_id: sessionId, expected_version: 2, purpose: "After update" });
-    assert.equal(sameValue.ok, true);
-    assert.equal(sameValue.applied, false);
-    assert.deepEqual(sameValue.changed_fields, []);
-    assert.equal(sameValue.version, 2);
-    assert.equal(metadataAuditCount(), auditsBeforeSameValue);
-
     const originalAudit = f.service.audit.bind(f.service);
     f.service.audit = async (event, fields) => {
       if (event === "operation.succeeded") throw new Error("injected terminal audit failure");
       return originalAudit(event, fields);
     };
+    const metadataAuditCount = () => f.service.auditEntriesForConsole().filter((entry) => entry.event === "session.metadata.updated").length;
+    const auditsBeforeSameValue = metadataAuditCount();
+    const sameValue = await owner.call("session_update", { session_id: sessionId, expected_version: 2, purpose: "After update" });
+    assert.equal(sameValue.ok, true);
+    assert.equal(sameValue.audit_warning, true);
+    assert.equal(sameValue.applied, false);
+    assert.deepEqual(sameValue.changed_fields, []);
+    assert.equal(sameValue.version, 2);
+    assert.equal(metadataAuditCount(), auditsBeforeSameValue);
+
     const terminalAuditFailure = await owner.call("session_update", { session_id: sessionId, expected_version: 2, purpose: "Applied despite terminal audit failure" });
     assert.equal(terminalAuditFailure.ok, true);
     assert.equal(terminalAuditFailure.audit_warning, true);
@@ -86,6 +87,46 @@ test("Issue 71: MCP session_update updates one field through the shared versione
     await f.cleanup();
   }
 });
+
+test("Issue 71: MCP session_update applies each metadata field independently, preserves omitted fields, and clears URL/title", async () => {
+  const f = await fixture({ initializeService: false });
+  const owner = await mcp(f.service);
+  try {
+    const opened = await owner.call("session_open", { working_directory: f.root, purpose: "Initial purpose" });
+    const sessionId = String(opened.session_id);
+    let expectedVersion = 1;
+    let expected = { working_directory: f.root, purpose: "Initial purpose", external_url: null as string | null, external_title: null as string | null };
+
+    const updateAndCheck = async (fields: Record<string, string | null>, changedField: string) => {
+      const updated = await owner.call("session_update", { session_id: sessionId, expected_version: expectedVersion, ...fields });
+      assert.equal(updated.ok, true);
+      assert.equal(updated.applied, true);
+      expectedVersion++;
+      assert.equal(updated.version, expectedVersion);
+      assert.deepEqual(updated.changed_fields, [changedField]);
+      for (const field of ["working_directory", "purpose", "external_url", "external_title"] as const) {
+        if (Object.hasOwn(fields, field === "external_url" ? "url" : field === "external_title" ? "title" : field)) {
+          expected = { ...expected, [field]: field === "external_url" ? updated.external_url : field === "external_title" ? updated.external_title : fields[field] };
+        }
+      }
+      const listed = (await owner.call("session_list", {}) as { sessions: Array<Record<string, unknown>> }).sessions.find((entry) => entry.session_id === sessionId);
+      assert.ok(listed);
+      assert.equal(listed.version, expectedVersion);
+      assert.deepEqual(Object.fromEntries(Object.keys(expected).map((key) => [key, listed[key] ?? null])), expected);
+    };
+
+    await updateAndCheck({ working_directory: f.base }, "working_directory");
+    await updateAndCheck({ purpose: "Updated purpose" }, "purpose");
+    await updateAndCheck({ title: "Manual title" }, "title");
+    await updateAndCheck({ url: "https://example.com/session" }, "url");
+    await updateAndCheck({ url: null }, "url");
+    await updateAndCheck({ title: null }, "title");
+  } finally {
+    await owner.close();
+    await f.cleanup();
+  }
+});
+
 test("Issue 71: MCP session_update requires a version, rejects foreign/invalid updates, and never marks rejection applied", async () => {
   const f = await fixture({ initializeService: false });
   const owner = await mcp(f.service);
@@ -124,13 +165,15 @@ test("Issue 71: MCP session_update requires a version, rejects foreign/invalid u
     assert.equal(f.service.sessions.get(sessionId)?.purpose, "Owned session");
 
     f.service.audit = async (event, fields) => {
-      if (event === "session.metadata.updated") throw new Error("injected metadata audit failure");
+      if (event === "session.metadata.updated" || event === "operation.succeeded") throw new Error("injected metadata and terminal audit failures");
       return originalAudit(event, fields);
     };
     const metadataAuditFailure = await owner.call("session_update", { session_id: sessionId, expected_version: 1, purpose: "Must roll back" });
     assert.equal(metadataAuditFailure.ok, false);
     assert.equal(metadataAuditFailure.error, "update_unavailable");
+    assert.equal(metadataAuditFailure.audit_warning, true);
     assert.equal(metadataAuditFailure.applied, false);
+    assert.equal(metadataAuditFailure.current_version, undefined);
     assert.equal(f.service.sessions.get(sessionId)?.version, 1);
     assert.equal(f.service.sessions.get(sessionId)?.purpose, "Owned session");
   } finally {
