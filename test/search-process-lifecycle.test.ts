@@ -112,7 +112,10 @@ test("NR003 and NR004: searches return every page and portable Node processes re
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.match(observed, /line-1004/, "the final output page must be returned");
-    const longRunning = await api.call("process_start", { session_id: session, command: nodeScriptCommand(longScript), timeout_ms: 200 });
+    const longStartAt = Date.now();
+    const longRunning = await api.call("process_start", { session_id: session, command: nodeScriptCommand(longScript), timeout_ms: 60_000 });
+    const longStartElapsed = Date.now() - longStartAt;
+    assert.ok(longStartElapsed < 5_000, `process_start waited ${longStartElapsed}ms despite the requested timeout being only an initial-output wait`);
     const killedId = longRunning.process_id as string;
     assert.equal((await api.call("process_status", { session_id: session, process_id: killedId })).state, "running", "the portable process must be alive before termination is requested");
     const killStarted = process.env.CI ? undefined : Date.now();

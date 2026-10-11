@@ -78,6 +78,11 @@ npm.cmd run lint
 ファイル操作とプロセス操作で同じ相対パスを使う場合は、それぞれの基準が一致する
 ことを確認してください。
 
+`process_start` の `timeout_ms` はコマンド全体の実行期限ではなく、初期出力を待つ時間です。
+指定できる値は 100〜60000 ms ですが、サーバーから Desktop Commander へ渡す待ち時間は
+最大 1000 ms です。長くかかるコマンドは返された `process_id` を使い、
+`process_status` や `process_output` で完了まで追跡してください。
+
 RemoteDesktopMCP 専用の Desktop Commander 設定と private cache は `DATA_DIR` 内に隔離し、
 既存ユーザーの Desktop Commander 設定を変更しません。
 `DATA_DIR` 自体は親フォルダから権限を継承できます。認証状態と監査ログの
