@@ -28,8 +28,18 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const ordinal = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const DOCUMENTATION_ROOTS = ["doc/", "reports/", "tasks/"];
 
-function normalizeLineEndings(content) {
-  return Buffer.from(content.toString("utf8").replace(/\r\n?/gu, "\n"), "utf8");
+export function normalizePackageLockLineEndings(content) {
+  const normalized = Buffer.allocUnsafe(content.length);
+  let outputLength = 0;
+  for (let index = 0; index < content.length; index++) {
+    if (content[index] === 0x0d) {
+      normalized[outputLength++] = 0x0a;
+      if (content[index + 1] === 0x0a) index++;
+    } else {
+      normalized[outputLength++] = content[index];
+    }
+  }
+  return normalized.subarray(0, outputLength);
 }
 
 function classifyLockfileDifference(before, after) {
@@ -53,6 +63,28 @@ export function classifyPackageLockDiagnostics(expected, checkout, afterNpmCi) {
     npmCi: npmCiClassification,
     classification,
   };
+}
+
+export async function runNpmCiWithLockDiagnostics({ install, captureIdentity, expectedIdentity, checkoutIdentity, diagnostic }) {
+  let installFailed = false;
+  let installError;
+  try {
+    await install();
+  } catch (error) {
+    installFailed = true;
+    installError = error;
+  }
+  try {
+    const afterNpmCi = await captureIdentity();
+    Object.assign(diagnostic, {
+      afterNpmCi,
+      ...classifyPackageLockDiagnostics(expectedIdentity, checkoutIdentity, afterNpmCi),
+    });
+  } catch (error) {
+    diagnostic.afterNpmCiCaptureError = formatSummaryError(error instanceof Error ? error.message : String(error));
+    if (!installFailed) throw error;
+  }
+  if (installFailed) throw installError;
 }
 
 export function formatSummaryError(value) {
@@ -322,7 +354,7 @@ export async function capturePackageLockIdentity(cwd) {
   return {
     byteLength: content.length,
     rawBytesSha256: sha256(content),
-    lineEndingNormalizedSha256: sha256(normalizeLineEndings(content)),
+    lineEndingNormalizedSha256: sha256(normalizePackageLockLineEndings(content)),
     normalizedGitBlob,
   };
 }
@@ -525,7 +557,7 @@ async function runPairedComparison() {
     summary.packageLockIdentity = {
       byteLength: baseLock.length,
       rawBytesSha256: sha256(baseLock),
-      lineEndingNormalizedSha256: sha256(normalizeLineEndings(baseLock)),
+      lineEndingNormalizedSha256: sha256(normalizePackageLockLineEndings(baseLock)),
       normalizedGitBlob: baseLockBlob,
     };
     summary.packageLockDiagnostics = {};
@@ -549,15 +581,13 @@ async function runPairedComparison() {
       const checkout = await capturePackageLockIdentity(target);
       const diagnostic = { checkout, afterNpmCi: null };
       summary.packageLockDiagnostics[label] = diagnostic;
-      try {
-        await runLogged("npm.cmd", ["ci"], { cwd: target, artifactRoot, shell: true, timeoutMs: 90 * 60 * 1000 }, `npm-ci-${label}`);
-      } finally {
-        const afterNpmCi = await capturePackageLockIdentity(target);
-        Object.assign(diagnostic, {
-          afterNpmCi,
-          ...classifyPackageLockDiagnostics(summary.packageLockIdentity, checkout, afterNpmCi),
-        });
-      }
+      await runNpmCiWithLockDiagnostics({
+        install: () => runLogged("npm.cmd", ["ci"], { cwd: target, artifactRoot, shell: true, timeoutMs: 90 * 60 * 1000 }, `npm-ci-${label}`),
+        captureIdentity: () => capturePackageLockIdentity(target),
+        expectedIdentity: summary.packageLockIdentity,
+        checkoutIdentity: checkout,
+        diagnostic,
+      });
     }
     const baselineEnvironment = await environmentFor(baselinePath, artifactRoot);
     const candidateEnvironment = await environmentFor(candidatePath, artifactRoot);

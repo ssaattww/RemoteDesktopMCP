@@ -13,12 +13,14 @@ import {
   buildPairedSchedule,
   capturePackageLockIdentity,
   classifyPackageLockDiagnostics,
+  normalizePackageLockLineEndings,
   compareRepositoryChanges,
   compareInventories,
   comparePredeclaredControlBlobs,
   formatFailureDiagnostic,
   formatSummaryError,
   runScheduledSamples,
+  runNpmCiWithLockDiagnostics,
   summarizeComparison,
 } from "../scripts/ci-test-paired-comparison.mjs";
 
@@ -31,8 +33,7 @@ const targetFiles = [
 test("package lock diagnostics distinguish unchanged bytes, line endings, and content by stage", () => {
   const identity = (content: Buffer, normalizedGitBlob: string) => ({
     rawBytesSha256: createHash("sha256").update(content).digest("hex"),
-    lineEndingNormalizedSha256: createHash("sha256")
-      .update(content.toString("utf8").replace(/\r\n?/gu, "\n"), "utf8").digest("hex"),
+    lineEndingNormalizedSha256: createHash("sha256").update(normalizePackageLockLineEndings(content)).digest("hex"),
     normalizedGitBlob,
   });
   const expected = identity(Buffer.from('{"lockfileVersion":3}\n'), "expected-blob");
@@ -65,6 +66,40 @@ test("package lock diagnostics distinguish unchanged bytes, line endings, and co
     npmCi: "unchanged",
     classification: "content-changed-at-checkout",
   });
+
+  const invalidUtf8Before = Buffer.from([0x80, 0x0d, 0x0a, 0x81]);
+  const invalidUtf8After = Buffer.from([0x81, 0x0d, 0x0a, 0x80]);
+  assert.notDeepEqual(normalizePackageLockLineEndings(invalidUtf8Before), normalizePackageLockLineEndings(invalidUtf8After));
+  assert.deepEqual(classifyPackageLockDiagnostics(
+    identity(invalidUtf8Before, "invalid-before"),
+    identity(invalidUtf8Before, "invalid-before"),
+    identity(invalidUtf8After, "invalid-after"),
+  ), {
+    checkout: "unchanged",
+    npmCi: "content-changed",
+    classification: "content-changed-during-npm-ci",
+  });
+});
+
+test("post-npm-ci diagnostic failure does not replace the npm ci failure", async () => {
+  const diagnostic: Record<string, unknown> = { afterNpmCi: null };
+  await assert.rejects(runNpmCiWithLockDiagnostics({
+    install: async () => { throw new Error("npm ci failed first"); },
+    captureIdentity: async () => { throw new Error("post-install lock capture failed"); },
+    expectedIdentity: {},
+    checkoutIdentity: {},
+    diagnostic,
+  }), /npm ci failed first/);
+  assert.equal(diagnostic.afterNpmCiCaptureError, "post-install lock capture failed");
+  assert.equal(diagnostic.afterNpmCi, null);
+
+  await assert.rejects(runNpmCiWithLockDiagnostics({
+    install: async () => undefined,
+    captureIdentity: async () => { throw new Error("post-install lock capture failed"); },
+    expectedIdentity: {},
+    checkoutIdentity: {},
+    diagnostic: {},
+  }), /post-install lock capture failed/);
 });
 
 test("package lock identity records raw bytes and Git's path-normalized blob", async () => {
