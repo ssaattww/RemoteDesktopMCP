@@ -127,6 +127,42 @@ test("pinned lock bytes are asserted before npm ci and checkout identity is reta
   assert.equal(diagnostic.npmCiClassification, "unchanged");
 });
 
+test("npm ci lock diagnostics retain raw and Git identities for unchanged, line-ending-only, and content changes", async () => {
+  const expectedBytes = Buffer.from('{"lockfileVersion":3}\n');
+  const lineEndingOnlyBytes = Buffer.from('{"lockfileVersion":3}\r\n');
+  const contentChangedBytes = Buffer.from('{"lockfileVersion":3,"changed":true}\n');
+  const identity = (content: Buffer, normalizedGitBlob: string) => ({
+    byteLength: content.length,
+    rawBytesSha256: createHash("sha256").update(content).digest("hex"),
+    lineEndingNormalizedSha256: createHash("sha256").update(normalizePackageLockLineEndings(content)).digest("hex"),
+    normalizedGitBlob,
+  });
+  const expectedIdentity = identity(expectedBytes, "a".repeat(40));
+  const cases = [
+    { name: "unchanged", bytes: expectedBytes, classification: "unchanged", npmCiClassification: "unchanged", blob: "a".repeat(40) },
+    { name: "line-ending-only", bytes: lineEndingOnlyBytes, classification: "line-ending-only-during-npm-ci", npmCiClassification: "line-ending-only", blob: "a".repeat(40) },
+    { name: "content-changed", bytes: contentChangedBytes, classification: "content-changed-during-npm-ci", npmCiClassification: "content-changed", blob: "b".repeat(40) },
+  ];
+
+  for (const sample of cases) {
+    let installedBytes = expectedBytes;
+    const diagnostic: Record<string, unknown> = {};
+    await runNpmCiWithLockDiagnostics({
+      preparePinnedLock: async () => expectedIdentity,
+      install: async () => { installedBytes = sample.bytes; },
+      captureIdentity: async () => identity(installedBytes, sample.blob),
+      expectedIdentity,
+      checkoutIdentity: expectedIdentity,
+      diagnostic,
+    });
+
+    assert.equal(diagnostic.classification, sample.classification, sample.name);
+    assert.equal(diagnostic.npmCiClassification, sample.npmCiClassification, sample.name);
+    assert.deepEqual(diagnostic.preparedForNpmCiIdentity, expectedIdentity, sample.name);
+    assert.deepEqual(diagnostic.afterNpmCiIdentity, identity(sample.bytes, sample.blob), sample.name);
+  }
+});
+
 test("pinned lock byte mismatch blocks npm ci", async () => {
   const expectedBytes = Buffer.from('{"lockfileVersion":3}\n');
   const unexpectedBytes = Buffer.from('{"lockfileVersion":3,"extra":true}\n');
