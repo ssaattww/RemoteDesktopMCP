@@ -740,6 +740,35 @@ test("common wrapper marks a completed safe cleanup applied when pre and post au
   }
 });
 
+test("long initial process waits return a tracked process before the MCP request deadline", async () => {
+  const h = await harness();
+  const owner = await h.connect("owner@example.test");
+  try {
+    const opened = await owner.call("session_open", { working_directory: process.cwd(), purpose: "bounded process start response" });
+    const sessionId = String(opened.session_id);
+    seedProcess(h.service, { sessionId });
+    const internals = h.service as unknown as { dc: { call(name: string, args: Record<string, unknown>, timeout?: number): Promise<string> } };
+    let starts = 0;
+    internals.dc.call = async (name, args, timeout) => {
+      assert.equal(name, "start_process");
+      starts += 1;
+      assert.equal(args.command, "long-running command");
+      assert.ok(Number(args.timeout_ms) <= 10_000, "return a process ID well before the outer 60-second request deadline");
+      assert.ok(timeout !== undefined && timeout > Number(args.timeout_ms) && timeout < 60_000, "the transport deadline must allow the initial wait to finish");
+      return `Process started with PID ${5000 + starts}`;
+    };
+    for (const requested of [100, 10_000, 60_000]) {
+      const started = await owner.call("process_start", { session_id: sessionId, command: "long-running command", timeout_ms: requested });
+      assert.equal(typeof started.process_id, "string");
+      assert.ok(h.service.processes.has(String(started.process_id)), "the returned process must remain available for status checks");
+    }
+    assert.equal(starts, 3, "each command is dispatched exactly once");
+  } finally {
+    await owner.close();
+    await h.close();
+  }
+});
+
 test("ordinary side effect failures after dispatch return an unknown applied state without retry", async () => {
   const h = await harness();
   const owner = await h.connect("owner@example.test");

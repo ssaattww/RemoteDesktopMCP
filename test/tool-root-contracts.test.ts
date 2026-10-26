@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { link, mkdir, readFile, readdir, rename, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { once } from "node:events";
@@ -157,4 +157,50 @@ test("Issue 9: sessions require a working directory and purpose, and commands st
     assert.ok(String(started.output).includes(workingDirectory));
     assert.match(String(started.output), /available outside the working directory/);
   } finally { await api.close(); await f.cleanup(); }
+});
+
+test("published tools explicitly distinguish reads, writes, destructive actions, and open-world access", async () => {
+  const f = await fixture({ initializeService: false });
+  const api = await mcp(f.service);
+  try {
+    // Check the actual tools/list response, including the OAuth metadata wrapper.
+    // A new tool must be reviewed here so missing annotations cannot recur.
+    const expected = {
+      session_open: [false, false, true],
+      session_list: [true, false, false],
+      session_update: [false, true, true],
+      session_close: [false, true, false],
+      todo_get: [true, false, false],
+      todo_update: [false, true, false],
+      todo_enforcement_set: [false, false, false],
+      node_list: [true, false, false],
+      file_search: [true, false, false],
+      content_search: [true, false, false],
+      file_read: [true, false, false],
+      file_patch: [false, true, false],
+      file_transfer_download_begin: [false, false, false],
+      file_transfer_download_chunk: [false, false, false],
+      file_transfer_upload_begin: [false, true, false],
+      file_transfer_upload_chunk: [false, false, false],
+      file_transfer_upload_commit: [false, true, false],
+      file_transfer_status: [true, false, false],
+      file_transfer_cancel: [false, true, false],
+      process_start: [false, true, true],
+      process_output: [true, false, false],
+      process_status: [true, false, false],
+      process_kill: [false, true, false],
+    };
+    const { tools } = await api.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), Object.keys(expected).sort());
+    for (const tool of tools) {
+      const [readOnlyHint, destructiveHint, openWorldHint] = expected[tool.name as keyof typeof expected];
+      assert.deepEqual(tool.annotations, { readOnlyHint, destructiveHint, openWorldHint }, tool.name);
+      assert.deepEqual(tool._meta?.securitySchemes, [{ type: "oauth2", scopes: ["mcp"] }], tool.name);
+      assert.deepEqual(tool._meta?.["openai/securitySchemes"], [{ type: "oauth2", scopes: ["mcp"] }], tool.name);
+      assert.ok(tool.inputSchema.required?.includes("comment"), tool.name);
+    }
+  } finally {
+    await api.close();
+    await f.cleanup();
+  }
 });

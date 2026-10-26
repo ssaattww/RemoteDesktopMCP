@@ -15,6 +15,28 @@ const nodeScriptCommand = (file: string) => process.platform === "win32"
   ? `node "${file.replaceAll("\"", "\"\"")}"`
   : `'${process.execPath.replaceAll("'", "'\\''")}' '${file.replaceAll("'", "'\\''")}'`;
 
+test("a real long-running command returns a usable process ID with a requested 60-second initial wait", async () => {
+  const f = await fixture();
+  const api = await mcp(f.service);
+  let processId: string | undefined;
+  let sessionId: string | undefined;
+  try {
+    const script = path.join(f.root, "long-initial-wait.cjs");
+    await writeFile(script, "setTimeout(() => process.stdout.write('done'), 45000)");
+    sessionId = String((await api.call("session_open", {})).session_id);
+    const began = performance.now();
+    const started = await api.call("process_start", { session_id: sessionId, command: nodeScriptCommand(script), timeout_ms: 60_000 });
+    processId = String(started.process_id);
+    assert.ok(performance.now() - began < 25_000, "the process ID must return before the command completes and before the MCP deadline");
+    const status = await api.call("process_status", { session_id: sessionId, process_id: processId });
+    assert.equal(status.state, "running", "the initial response wait must not terminate the command");
+  } finally {
+    if (processId && sessionId) await api.call("process_kill", { session_id: sessionId, process_id: processId }).catch(() => undefined);
+    await api.close();
+    await f.cleanup();
+  }
+});
+
 const hasAuditEvent = (text: string, event: string, processId: string) => text.split("\n").some((line) => {
   try { const entry = JSON.parse(line) as { event?: unknown; processId?: unknown }; return entry.event === event && entry.processId === processId; } catch { return false; }
 });
