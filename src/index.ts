@@ -1647,7 +1647,7 @@ export function createApp(service: RemoteDesktopService): Express {
     const tokenInput = { grantType: typeof req.body?.grant_type === "string" ? req.body.grant_type : "", code: typeof req.body?.code === "string" ? req.body.code : undefined, verifier: typeof req.body?.code_verifier === "string" ? req.body.code_verifier : undefined, clientId: typeof req.body?.client_id === "string" ? req.body.client_id : "", redirectUri: typeof req.body?.redirect_uri === "string" ? req.body.redirect_uri : undefined, resource: typeof req.body?.resource === "string" ? req.body.resource : undefined, refreshToken: typeof req.body?.refresh_token === "string" ? req.body.refresh_token : undefined };
     if (!rate.allow(service.publicAuth ? `token:${service.publicAuth.tokenAdmissionKey(tokenInput) ?? "invalid"}` : "token")) { await service.audit("oauth.rate_limited", {}); return res.status(429).json({ error: "rate_limited" }); }
     if (service.publicAuth) {
-      const issued = await service.publicAuth.token(tokenInput);
+      const issued = await service.publicAuth.token(tokenInput, async (reason) => { await service.audit("oauth.token_rejected", { reason }); });
       res.setHeader("Cache-Control", "no-store");
       if ("error" in issued) { await service.audit("oauth.rejected", { reason: "token" }); return res.status(400).json(issued); }
       await service.audit("oauth.token_issued", { clientId: CHATGPT_CLIENT_ID }); return res.json(issued);

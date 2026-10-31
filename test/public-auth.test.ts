@@ -227,7 +227,7 @@ test("RA-05 through RA-08: PKCE/client/resource bindings, refresh retries, repla
   const retry = requireTokens(await second.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource }));
   assert.equal(retry.refresh_token, latest.refresh_token, "a delayed retry receives the latest replacement");
   assert.equal(await second.authenticate(`Bearer ${rotated.access_token}`), `google:${subject.iss}:${subject.sub}`);
-  now += 60_001;
+  now += 5 * 60_000 + 1;
   const replay = await second.token({ grantType: "refresh_token", refreshToken: issued.refresh_token, clientId, resource });
   assert.deepEqual(replay, { error: "invalid_grant" });
   assert.equal(await second.authenticate(`Bearer ${issued.access_token}`), undefined, "family replay revokes the original access token");
@@ -241,6 +241,79 @@ test("RA-03 and RA-09: an unapproved subject cannot bootstrap access", async () 
   const googleState = new URL(begun.redirect).searchParams.get("state") ?? "";
   assert.equal((await auth.googleCallback({ state: googleState, code: "google-code", cookie: begun.cookie })).redirect?.includes("error=access_denied"), true);
   assert.equal(auth.hasAllowedSubject(), false);
+});
+
+test("delayed OAuth refresh retries observed in production preserve the latest grant across restart", async () => {
+  for (const delay of [59_000, 92_240, 216_683]) {
+    let now = 1_700_000_000_000;
+    const store = memoryStore();
+    const auth = publicAuth({ store, now: () => now });
+    await auth.initialize();
+    await auth.addAllowedSubject(subject);
+    const original = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+    const rotated = requireTokens(await auth.token({ grantType: "refresh_token", refreshToken: original.refresh_token, clientId, resource }));
+    now += 25_000;
+    const latest = requireTokens(await auth.token({ grantType: "refresh_token", refreshToken: rotated.refresh_token, clientId, resource }));
+    const persisted = structuredClone(await store.load());
+    now += delay;
+    const restarted = publicAuth({ store, now: () => now });
+    await restarted.initialize();
+    const retry = requireTokens(await restarted.token({ grantType: "refresh_token", refreshToken: original.refresh_token, clientId, resource }));
+    assert.equal(retry.refresh_token, latest.refresh_token, `a ${delay}ms delayed caller must converge on the latest replacement`);
+    assert.equal(await restarted.authenticate(`Bearer ${retry.access_token}`), `google:${subject.iss}:${subject.sub}`);
+    assert.deepEqual(await store.load(), persisted, "a retry must neither rotate again nor extend the grant or retry deadlines");
+  }
+});
+
+test("OAuth refresh retry grace has a fixed five-minute boundary and revokes only the replayed family", async () => {
+  let now = 1_700_000_000_000;
+  const retiredAt = now;
+  const auth = publicAuth({ now: () => now });
+  await auth.initialize();
+  await auth.addAllowedSubject(subject);
+  const original = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  const latest = requireTokens(await auth.token({ grantType: "refresh_token", refreshToken: original.refresh_token, clientId, resource }));
+  const separate = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  for (const elapsed of [216_683, 299_999]) {
+    now = retiredAt + elapsed;
+    const retry = requireTokens(await auth.token({ grantType: "refresh_token", refreshToken: original.refresh_token, clientId, resource }));
+    assert.equal(retry.refresh_token, latest.refresh_token);
+  }
+  now = retiredAt + 300_000;
+  const reasons: string[] = [];
+  const rejected = await auth.token({ grantType: "refresh_token", refreshToken: original.refresh_token, clientId, resource }, async (reason) => { reasons.push(reason); });
+  assert.deepEqual(rejected, { error: "invalid_grant" });
+  assert.deepEqual(reasons, ["refresh_replay"], "record why reauthentication became necessary without logging tokens");
+  assert.equal(await auth.authenticate(`Bearer ${latest.access_token}`), undefined);
+  assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: latest.refresh_token, clientId, resource }), { error: "invalid_grant" }, "retry grace must not revive a revoked family");
+  assert.equal(await auth.authenticate(`Bearer ${separate.access_token}`), `google:${subject.iss}:${subject.sub}`);
+});
+
+test("OAuth refresh retry grace still rejects incorrect client, resource, and signature bindings", async () => {
+  let now = 1_700_000_000_000;
+  const auth = publicAuth({ now: () => now });
+  await auth.initialize();
+  await auth.addAllowedSubject(subject);
+  const original = requireTokens(await auth.token({ grantType: "authorization_code", code: await authorizedCode(auth), verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  const latest = requireTokens(await auth.token({ grantType: "refresh_token", refreshToken: original.refresh_token, clientId, resource }));
+  now += 216_683;
+  for (const changes of [{ clientId: "https://attacker.example/client.json" }, { resource: `${resource}/other` }, { refreshToken: `${original.refresh_token}tampered` }]) {
+    assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: original.refresh_token, clientId, resource, ...changes }), { error: "invalid_grant" });
+    assert.equal(await auth.authenticate(`Bearer ${latest.access_token}`), `google:${subject.iss}:${subject.sub}`);
+  }
+});
+
+test("OAuth rejection diagnostics cannot turn a rejected request into success or expose tokens", async () => {
+  const auth = publicAuth();
+  await auth.initialize();
+  const reasons: string[] = [];
+  const rejected = await auth.token({ grantType: "refresh_token", refreshToken: "sensitive-invalid-token", clientId, resource }, async (reason) => {
+    reasons.push(reason);
+    throw new Error("diagnostic storage unavailable");
+  });
+  assert.deepEqual(rejected, { error: "invalid_grant" });
+  assert.deepEqual(reasons, ["refresh_grant_invalid"]);
+  assert.ok(!JSON.stringify(reasons).includes("sensitive-invalid-token"));
 });
 
 test("legacy refresh records gain retry support on their first rotation", async () => {
@@ -280,7 +353,7 @@ test("REMOTE-NR-001: a seven-day refresh family rotates beyond 256 uses, detects
   assert.equal(successful.length, 2, "concurrent retries do not destroy the grant");
   const winner = requireTokens(successful[0]!);
   assert.equal(requireTokens(successful[1]!).refresh_token, winner.refresh_token, "both callers receive one replacement");
-  now += 60_001;
+  now += 5 * 60_000 + 1;
   assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: current.refresh_token, clientId, resource }), { error: "invalid_grant" }, "a stale refresh token revokes its family after the retry window");
   assert.equal(await auth.authenticate(`Bearer ${winner.access_token}`), undefined, "replay revocation invalidates the winning access token too");
   now += 8 * 24 * 60 * 60_000;
@@ -523,6 +596,9 @@ test("RA-01, RA-02, RA-04, RA-06; REMOTE-NR-003, REMOTE-NR-006, REMOTE-NR-008, a
     const malformed = await fetch(`${local}/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" });
     const publicOutputs = [hiddenVerifierError.headers.get("location") ?? "", await hiddenVerifierError.text(), await malformed.text(), await readFile(path.join(f.data, "audit.jsonl"), "utf8")];
     for (const output of publicOutputs) assert.equal(output.includes(sentinel), false, "fixture secret is absent from HTTP responses, exceptions, and audit records");
+    const rejectionAudit = publicOutputs.at(-1)!;
+    assert.match(rejectionAudit, /"event":"oauth\.token_rejected"[^\n]*"reason":"authorization_code_invalid"/);
+    for (const credential of [tokenBody.access_token, tokenBody.refresh_token]) assert.equal(rejectionAudit.includes(credential), false, "rejection diagnostics never store credentials");
     const chunked = await fetch(`${local}/token`, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`grant_type=${"x".repeat(17 * 1024)}`)); controller.close(); } }), duplex: "half",
