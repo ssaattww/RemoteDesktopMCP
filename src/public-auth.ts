@@ -16,7 +16,9 @@ const TRANSACTION_TTL = 5 * 60_000;
 const CODE_TTL = 5 * 60_000;
 const ACCESS_TTL = 10 * 60;
 const REFRESH_TTL = 7 * 24 * 60 * 60_000;
-const REFRESH_RETRY_MS = 60_000;
+// Allow delayed overlapping requests to converge on the latest replacement.
+// This fixed grace starts at rotation; retries never extend it or the grant.
+const REFRESH_RETRY_MS = 5 * 60_000;
 const MAX_RECENT_REFRESHES = 32;
 const MAX_ACTIVE_FAMILIES = 32;
 
@@ -38,6 +40,9 @@ export type OAuthState = {
 export interface OAuthStateStore { load(): Promise<OAuthState>; save(state: OAuthState): Promise<void>; }
 export type PublicAuthConfig = { baseUrl: string; tokenSecret: string; dataDir: string; googleClientId: string; googleClientSecret: string; googleRedirectUri: string };
 export type PublicAuthOptions = { store?: OAuthStateStore; verifier?: OidcVerifier; now?: () => number; makeId?: () => string; request?: typeof fetch };
+type TokenInput = { grantType: string; code?: string; verifier?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string };
+export type TokenRejectionReason = "authorization_code_invalid" | "refresh_request_invalid" | "refresh_grant_invalid" | "refresh_replay";
+type TokenRejectionObserver = (reason: TokenRejectionReason) => Promise<void>;
 type Transaction = { id: string; googleState: string; nonce: string; clientId: string; redirectUri: string; resource: string; state?: string; challenge: string; expires: number; subject?: GoogleIdentity; googleCallbackStarted?: boolean };
 type Code = Omit<Transaction, "id" | "googleState" | "nonce"> & { subject: GoogleIdentity; epoch: number };
 
@@ -241,26 +246,32 @@ export class PublicAuthService {
     state.refreshes = state.refreshes.filter((item) => item.family !== family); state.refreshes.push(record); await this.persist();
     return this.tokenResponse(record);
   }
-  async token(input: { grantType: string; code?: string; verifier?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string }) { return this.serialized(async () => this.tokenUnlocked(input)); }
-  private async tokenUnlocked(input: { grantType: string; code?: string; verifier?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string }) {
+  async token(input: TokenInput, onRejected?: TokenRejectionObserver) { return this.serialized(async () => this.tokenUnlocked(input, onRejected)); }
+  private async tokenUnlocked(input: TokenInput, onRejected?: TokenRejectionObserver) {
+    const reject = async (reason: TokenRejectionReason) => {
+      // Diagnostics contain only a fixed reason code, never credentials or claims.
+      // A failed diagnostic write must not change the authentication decision.
+      try { await onRejected?.(reason); } catch { /* Preserve the rejection. */ }
+      return { error: "invalid_grant" as const };
+    };
     await this.reload();
     this.clean(); if (input.grantType === "authorization_code") {
       const code = input.code ?? ""; const authorization = this.codes.get(code); this.codes.delete(code);
       const verifier = input.verifier ?? "";
-      if (!authorization || authorization.expires <= this.now() || authorization.epoch !== this.current().epoch || !this.allowed(authorization.subject) || authorization.clientId !== input.clientId || authorization.redirectUri !== input.redirectUri || authorization.resource !== input.resource || !/^[A-Za-z0-9\-._~]{43,128}$/.test(verifier) || !same(digest(verifier), authorization.challenge)) return { error: "invalid_grant" as const };
+      if (!authorization || authorization.expires <= this.now() || authorization.epoch !== this.current().epoch || !this.allowed(authorization.subject) || authorization.clientId !== input.clientId || authorization.redirectUri !== input.redirectUri || authorization.resource !== input.resource || !/^[A-Za-z0-9\-._~]{43,128}$/.test(verifier) || !same(digest(verifier), authorization.challenge)) return reject("authorization_code_invalid");
       return this.issue(authorization.subject, authorization.clientId, authorization.resource, "mcp");
     }
-    if (input.grantType !== "refresh_token" || !input.refreshToken || input.resource !== `${this.cfg.baseUrl}/mcp`) return { error: "invalid_grant" as const };
+    if (input.grantType !== "refresh_token" || !input.refreshToken || input.resource !== `${this.cfg.baseUrl}/mcp`) return reject("refresh_request_invalid");
     const state = this.current(); const presented = this.verify(input.refreshToken!); const family = typeof presented?.family === "string" ? presented.family : undefined; const item = family ? state.refreshes.find((token) => token.family === family) : undefined;
     const validClaims = presented?.type === "refresh" && presented.iss === this.cfg.baseUrl && presented.aud === input.resource && presented.client_id === input.clientId && presented.scope === "mcp" && typeof presented.sub === "string" && typeof presented.google_iss === "string" && typeof presented.epoch === "number" && typeof presented.exp === "number" && presented.exp > Math.floor(this.now() / 1000);
-    if (!item || !family || !validClaims || item.clientId !== input.clientId || item.resource !== input.resource || item.expires <= this.now() || item.epoch !== state.epoch || !this.allowed(item.subject) || state.families[family]?.active !== true || state.families[family]?.epoch !== state.epoch) return { error: "invalid_grant" as const };
+    if (!item || !family || !validClaims || item.clientId !== input.clientId || item.resource !== input.resource || item.expires <= this.now() || item.epoch !== state.epoch || !this.allowed(item.subject) || state.families[family]?.active !== true || state.families[family]?.epoch !== state.epoch) return reject("refresh_grant_invalid");
     const presentedHash = digest(input.refreshToken!);
     if (!same(item.hash, presentedHash)) {
       if (item.id && item.issuedAt !== undefined && item.recent?.some((recent) => recent.until > this.now() && same(recent.hash, presentedHash))) {
         const currentToken = this.refreshToken(item);
         if (same(item.hash, digest(currentToken))) return this.tokenResponse(item);
       }
-      delete state.families[family]; state.refreshes = state.refreshes.filter((token) => token.family !== family); await this.persist(); return { error: "invalid_grant" as const };
+      delete state.families[family]; state.refreshes = state.refreshes.filter((token) => token.family !== family); await this.persist(); return reject("refresh_replay");
     }
     return this.issue(item.subject, item.clientId, item.resource, item.scope, family, item);
   }

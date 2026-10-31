@@ -139,6 +139,17 @@ ChatGPT の接続画面や開発者モードの利用可否はアカウント設
 ツール定義の更新手順は [OpenAI の接続手順](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)、
 読み取り専用などの指定は [OpenAI のツール定義](https://developers.openai.com/plugins/reference#annotations)も参照してください。
 
+### 認証の更新で再ログインを求められる場合
+
+`oauth_token_invalid_grant` は、ツール使用の許可とは別の認証更新エラーです。
+更新済みトークンの遅延再試行は、置換時点から固定5分、最大32世代まで受け付け、
+最新の更新用トークンを返します。再試行によって、この猶予や更新用トークンの期限は延びません。
+猶予を超えた再利用では、その接続の認証系列を失効させます。
+
+既に失効した認証系列は復活しません。接続を再認証してから、必要な操作を再開してください。
+再発時は、発生時刻と管理者画面の `oauth.token_rejected` の拒否理由を照合します。
+記録する拒否理由は固定の識別子だけで、トークンやその内容を診断ログへ保存しません。
+
 ## 接続できない場合
 
 `process_start` の `timeout_ms` は初回応答の待ち時間で、コマンド自体の制限時間ではありません。
