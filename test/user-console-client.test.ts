@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { chronologicalPage, mergeBoundedItems, slideLogWindow, userConsoleClientScript, type ConsoleLogItem } from "../src/user-console-client.js";
@@ -371,7 +371,8 @@ test("adding and deleting a Todo use versioned JSON updates and reconcile the vi
   assert.equal(requests[0]?.body.changes[0]?.op, "add");
   const added = fixture.list.querySelectorAll<FakeElement>("li[data-todo-id]").find((row) => row.dataset.todoId === "todo-2");
   assert.ok(added);
-  assert.equal(added.children[0]?.tagName, "textarea", "the dynamic row must omit the visible item label wrapper");
+  assert.equal(added.querySelector<FakeElement>("[data-todo-text]")?.parentElement, added, "the dynamic text field remains directly in its row without a visible item label wrapper");
+  assert.equal(added.querySelector(".todo-text-label"), null, "the row does not add a repeated visible item label");
   assert.equal(added.querySelector<FakeElement>("[data-todo-text]")?.ariaLabel, "作業項目", "the textarea keeps its accessible name");
   const addedControls = added.children.find((child) => child.className === "todo-controls");
   assert.equal(addedControls?.children[0]?.className, "todo-status");
@@ -2297,4 +2298,286 @@ test("state refresh reconciles rows by session id while preserving live edit DOM
   assert.equal(FakeElement.activeElement?.focusOptions?.preventScroll, true);
   assert.equal(sessionRows.children.length, 2);
   ui.sources[0]?.close();
+});
+
+type SubtaskUiItem = { id: string; text: string; status: string; parent_id: string | null; order: number; child_total: number; child_completed: number; descendant_incomplete: number };
+type SubtaskUiSnapshot = { session_id: string; version: number; items: SubtaskUiItem[]; total: number; completed: number; last_updated_at: string; enforcement_enabled: boolean };
+
+// 直属の子が完了していても、孫に未完了が残る固定の表示例。
+function subtaskUiItems(): SubtaskUiItem[] {
+  return [
+    { id: "todo-1", text: "全体作業", status: "in_progress", parent_id: null, order: 0, child_total: 2, child_completed: 2, descendant_incomplete: 1 },
+    { id: "todo-2", text: "実装", status: "completed", parent_id: "todo-1", order: 0, child_total: 1, child_completed: 0, descendant_incomplete: 1 },
+    { id: "todo-3", text: "境界条件", status: "not_started", parent_id: "todo-2", order: 0, child_total: 0, child_completed: 0, descendant_incomplete: 0 },
+    { id: "todo-4", text: "文書", status: "completed", parent_id: "todo-1", order: 1, child_total: 0, child_completed: 0, descendant_incomplete: 0 },
+    { id: "todo-5", text: "別の作業", status: "not_started", parent_id: null, order: 1, child_total: 0, child_completed: 0, descendant_incomplete: 0 },
+  ];
+}
+
+// 件数は検証用に明示する。製品の集計関数を試験側で再実装しない。
+function subtaskUiSnapshot(version: number, items = subtaskUiItems(), total = 5, completed = 2): SubtaskUiSnapshot {
+  return { session_id: "todo-session", version, items, total, completed, last_updated_at: "2026-11-02T00:00:00Z", enforcement_enabled: true };
+}
+
+// 「文書」の親だけを「別の作業」に変えた固定の応答。
+function subtaskUiReparentedItems(): SubtaskUiItem[] {
+  return [
+    { id: "todo-1", text: "全体作業", status: "in_progress", parent_id: null, order: 0, child_total: 1, child_completed: 1, descendant_incomplete: 1 },
+    { id: "todo-2", text: "実装", status: "completed", parent_id: "todo-1", order: 0, child_total: 1, child_completed: 0, descendant_incomplete: 1 },
+    { id: "todo-3", text: "境界条件", status: "not_started", parent_id: "todo-2", order: 0, child_total: 0, child_completed: 0, descendant_incomplete: 0 },
+    { id: "todo-5", text: "別の作業", status: "not_started", parent_id: null, order: 1, child_total: 1, child_completed: 1, descendant_incomplete: 0 },
+    { id: "todo-4", text: "文書", status: "completed", parent_id: "todo-5", order: 0, child_total: 0, child_completed: 0, descendant_incomplete: 0 },
+  ];
+}
+
+// 既存の画面試験補助を用い、読み取りと更新の応答を個別に指定する。
+async function bootSubtaskUi() {
+  const fixture = todoFixture();
+  fixture.panel.dataset.active = "true";
+  let readSnapshot = subtaskUiSnapshot(2);
+  let mutationResponse = response(200, subtaskUiSnapshot(3));
+  const writes: Array<{ expected_version: number; changes: Array<Record<string, unknown>> }> = [];
+  const ui = boot(async (url, init) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-11-02T00:00:00Z" });
+    if (request.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (request.pathname === "/api/sessions/todo-session/todo") {
+      if (init?.method === "PUT") {
+        writes.push(JSON.parse(String(init.body)) as { expected_version: number; changes: Array<Record<string, unknown>> });
+        return mutationResponse;
+      }
+      return response(200, readSnapshot);
+    }
+    throw new Error("unexpected request " + request.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  const refresh = async () => { ui.newest.click(); await settle(); await settle(); };
+  const row = (id: string) => {
+    const found = fixture.list.children.find((candidate) => candidate.dataset.todoId === id);
+    assert.ok(found, "表示対象の行が必要: " + id);
+    return found;
+  };
+  const control = (target: FakeElement, op: string) => {
+    const found = target.querySelector<FakeElement>('[data-todo-op="' + op + '"]');
+    assert.ok(found, "画面操作が必要: " + op);
+    return found;
+  };
+  await settle();
+  await refresh();
+  return { fixture, ui, writes, row, control, refresh, setReadSnapshot: (value: SubtaskUiSnapshot) => { readSnapshot = value; }, setMutationResponse: (value: SubtaskUiSnapshot, status = 200) => { mutationResponse = response(status, value); } };
+}
+
+test("subtask UI reconstructs hierarchy and distinguishes direct completion from incomplete descendants", async () => {
+  const h = await bootSubtaskUi();
+  assert.deepEqual(h.fixture.list.children.map((row) => row.dataset.todoId), ["todo-1", "todo-2", "todo-3", "todo-4", "todo-5"]);
+  assert.equal(h.row("todo-1").dataset.todoParentId, "");
+  assert.equal(h.row("todo-2").dataset.todoParentId, "todo-1");
+  assert.equal(h.row("todo-3").dataset.todoParentId, "todo-2");
+  assert.equal(h.row("todo-1").dataset.todoDepth, "1");
+  assert.equal(h.row("todo-3").dataset.todoDepth, "3");
+  assert.equal(h.row("todo-4").dataset.todoOrder, "1");
+  assert.match(h.row("todo-2").querySelector<FakeElement>("[data-todo-parent-label]")?.textContent ?? "", /全体作業/);
+  assert.match(h.row("todo-3").querySelector<FakeElement>("[data-todo-parent-label]")?.textContent ?? "", /実装/);
+  const progress = h.row("todo-1").querySelector<FakeElement>("[data-todo-children-progress]");
+  assert.ok(progress);
+  assert.match(progress.textContent, /2\s*\/\s*2/);
+  assert.match(progress.textContent, /未完了[^0-9]*1|1[^0-9]*未完了/);
+  assert.equal(h.writes.length, 0);
+});
+
+test("subtask UI collapse preserves all rows and survives later snapshots without a mutation", async () => {
+  const h = await bootSubtaskUi();
+  const originalRows = [...h.fixture.list.children];
+  h.control(h.row("todo-1"), "toggle-children").click();
+  assert.equal(h.row("todo-1").hidden, false);
+  assert.equal(h.row("todo-2").hidden, true);
+  assert.equal(h.row("todo-3").hidden, true);
+  assert.equal(h.row("todo-4").hidden, true);
+  assert.equal(h.row("todo-5").hidden, false);
+  assert.deepEqual(h.fixture.list.children, originalRows, "折り畳みで行や取得済み項目を破棄しない");
+  const next = subtaskUiItems();
+  next[0]!.descendant_incomplete = 0;
+  next[1]!.child_completed = 1; next[1]!.descendant_incomplete = 0;
+  next[2]!.status = "completed";
+  h.setReadSnapshot(subtaskUiSnapshot(3, next, 5, 3));
+  await h.refresh();
+  assert.equal(h.row("todo-3").hidden, true, "更新後も親の折り畳みを保つ");
+  assert.equal(h.fixture.list.children.length, 5);
+  h.control(h.row("todo-1"), "toggle-children").click();
+  for (const row of h.fixture.list.children) assert.equal(row.hidden, false);
+  assert.equal(h.writes.length, 0, "表示の展開・折り畳みは共有状態を更新しない");
+});
+
+test("subtask UI adds a child through the shared add form with its selected parent", async () => {
+  const h = await bootSubtaskUi();
+  h.fixture.addText.value = "追加する子作業";
+  h.fixture.addText.click("input");
+  h.control(h.row("todo-1"), "add-child").click();
+  assert.equal(h.fixture.addDetails.open, true);
+  assert.equal(h.fixture.addText.value, "追加する子作業", "既存の追加入力を消さない");
+  const parent = h.fixture.panel.querySelector<FakeElement>("[data-todo-add-parent]");
+  assert.ok(parent);
+  assert.equal(parent.value, "todo-1");
+  const next = subtaskUiItems();
+  next[0]!.child_total = 3; next[0]!.descendant_incomplete = 2;
+  next.splice(4, 0, { id: "todo-6", text: "追加する子作業", status: "not_started", parent_id: "todo-1", order: 2, child_total: 0, child_completed: 0, descendant_incomplete: 0 });
+  h.setMutationResponse(subtaskUiSnapshot(3, next, 6, 2));
+  h.fixture.addButton.click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes, [{ expected_version: 2, changes: [{ op: "add", text: "追加する子作業", parent_id: "todo-1" }] }]);
+  assert.equal(h.row("todo-6").dataset.todoParentId, "todo-1");
+});
+
+test("subtask UI changes and removes a parent using explicit reparent requests", async () => {
+  const h = await bootSubtaskUi();
+  const target = h.row("todo-4");
+  const parent = target.querySelector<FakeElement>("[data-todo-parent]");
+  assert.ok(parent);
+  parent.value = "todo-5"; parent.click("change");
+  h.setMutationResponse(subtaskUiSnapshot(3, subtaskUiReparentedItems()));
+  h.control(target, "reparent").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[0], { expected_version: 2, changes: [{ op: "reparent", id: "todo-4", parent_id: "todo-5" }] });
+  assert.equal(h.row("todo-4"), target, "親変更で編集中の行を作り直さない");
+  assert.equal(target.dataset.todoParentId, "todo-5");
+  const detached = subtaskUiReparentedItems();
+  detached[3]!.child_total = 0; detached[3]!.child_completed = 0;
+  detached[4]!.parent_id = null; detached[4]!.order = 2;
+  h.setMutationResponse(subtaskUiSnapshot(4, detached));
+  h.control(target, "detach").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[1], { expected_version: 3, changes: [{ op: "reparent", id: "todo-4", parent_id: null }] });
+  assert.equal(target.dataset.todoParentId, "");
+});
+
+test("subtask UI moves siblings and whole parent groups with sibling-relative orders", async () => {
+  const h = await bootSubtaskUi();
+  const first = subtaskUiItems();
+  first[1]!.order = 1; first[3]!.order = 0;
+  const childReordered = [first[0]!, first[3]!, first[1]!, first[2]!, first[4]!];
+  h.setMutationResponse(subtaskUiSnapshot(3, childReordered));
+  h.control(h.row("todo-4"), "move-up").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[0], { expected_version: 2, changes: [{ op: "move", id: "todo-4", order: 0 }] });
+  assert.deepEqual(h.fixture.list.children.map((row) => row.dataset.todoId), ["todo-1", "todo-4", "todo-2", "todo-3", "todo-5"]);
+  const second = subtaskUiItems();
+  second[0]!.order = 1; second[4]!.order = 0; second[1]!.order = 1; second[3]!.order = 0;
+  h.setMutationResponse(subtaskUiSnapshot(4, [second[4]!, second[0]!, second[3]!, second[1]!, second[2]!]));
+  h.control(h.row("todo-5"), "move-up").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[1], { expected_version: 3, changes: [{ op: "move", id: "todo-5", order: 0 }] });
+  assert.deepEqual(h.fixture.list.children.map((row) => row.dataset.todoId), ["todo-5", "todo-1", "todo-4", "todo-2", "todo-3"]);
+  assert.equal(h.row("todo-3").dataset.todoParentId, "todo-2");
+  const third = subtaskUiItems();
+  third[0]!.order = 1; third[4]!.order = 0;
+  h.setMutationResponse(subtaskUiSnapshot(5, [third[4]!, third[0]!, third[1]!, third[2]!, third[3]!]));
+  h.control(h.row("todo-4"), "move-down").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[2], { expected_version: 4, changes: [{ op: "move", id: "todo-4", order: 1 }] });
+  assert.deepEqual(h.fixture.list.children.map((row) => row.dataset.todoId), ["todo-5", "todo-1", "todo-2", "todo-3", "todo-4"]);
+});
+
+test("subtask UI preserves text and selection during an external parent change and never resends the old parent on save", async () => {
+  const h = await bootSubtaskUi();
+  const target = h.row("todo-4");
+  const text = target.querySelector<FakeElement>("[data-todo-text]");
+  assert.ok(text);
+  text.value = "未保存の本文"; text.click("input"); text.focus(); text.setSelectionRange(1, 4, "backward");
+  h.setReadSnapshot(subtaskUiSnapshot(3, subtaskUiReparentedItems()));
+  await h.refresh();
+  assert.equal(h.row("todo-4"), target);
+  assert.equal(text.value, "未保存の本文");
+  assert.equal(FakeElement.activeElement, text);
+  assert.equal(text.selectionStart, 1); assert.equal(text.selectionEnd, 4); assert.equal(text.selectionDirection, "backward");
+  assert.equal(target.dataset.todoParentId, "todo-5");
+  assert.equal(target.querySelector<FakeElement>("[data-todo-conflict]")?.hidden, false);
+  assert.equal(h.writes.length, 0);
+  h.control(target, "keep-draft").click();
+  const saved = subtaskUiReparentedItems(); saved[4]!.text = "未保存の本文";
+  h.setMutationResponse(subtaskUiSnapshot(4, saved));
+  h.control(target, "save").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[0], { expected_version: 3, changes: [{ op: "edit", id: "todo-4", text: "未保存の本文" }, { op: "status", id: "todo-4", status: "completed" }] });
+  assert.equal(target.dataset.todoParentId, "todo-5");
+});
+
+test("subtask UI preserves an unsaved parent selection across an external update and explicit conflict resolution", async () => {
+  const h = await bootSubtaskUi();
+  const target = h.row("todo-4");
+  const parent = target.querySelector<FakeElement>("[data-todo-parent]");
+  assert.ok(parent);
+  parent.value = "todo-5"; parent.click("change");
+  const externallyEdited = subtaskUiItems(); externallyEdited[2]!.text = "外部で更新した境界条件";
+  h.setReadSnapshot(subtaskUiSnapshot(3, externallyEdited));
+  await h.refresh();
+  assert.equal(parent.value, "todo-5", "未保存の親選択を古い親へ戻さない");
+  assert.equal(target.dataset.todoParentId, "todo-1", "保存された親と未保存の選択を区別する");
+  assert.equal(target.querySelector<FakeElement>("[data-todo-conflict]")?.hidden, false);
+  assert.equal(h.writes.length, 0);
+  h.control(target, "keep-draft").click();
+  assert.equal(parent.value, "todo-5");
+  const moved = subtaskUiReparentedItems(); moved[2]!.text = "外部で更新した境界条件";
+  h.setMutationResponse(subtaskUiSnapshot(4, moved));
+  h.control(target, "reparent").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[0], { expected_version: 3, changes: [{ op: "reparent", id: "todo-4", parent_id: "todo-5" }] });
+});
+
+test("subtask UI reparent leaves an unsaved text draft intact and submits only the relation change", async () => {
+  const h = await bootSubtaskUi();
+  const target = h.row("todo-4");
+  const text = target.querySelector<FakeElement>("[data-todo-text]");
+  const parent = target.querySelector<FakeElement>("[data-todo-parent]");
+  assert.ok(text); assert.ok(parent);
+  text.value = "本文はまだ保存しない"; text.click("input");
+  parent.value = "todo-5"; parent.click("change");
+  h.setMutationResponse(subtaskUiSnapshot(3, subtaskUiReparentedItems()));
+  h.control(target, "reparent").click();
+  await settle(); await settle();
+  assert.deepEqual(h.writes[0], { expected_version: 2, changes: [{ op: "reparent", id: "todo-4", parent_id: "todo-5" }] });
+  assert.equal(text.value, "本文はまだ保存しない");
+  assert.equal(target.dataset.todoParentId, "todo-5");
+});
+
+// 階層UIの8件と同じ test/user-console-client.test.ts の末尾へ追加する。
+test("subtask UI explains a hierarchy constraint rejection and keeps drafts without advancing the version or retrying", async () => {
+  const fixture = todoFixture();
+  fixture.panel.dataset.active = "true";
+  const writes: Array<{ expected_version: number; changes: Array<Record<string, unknown>> }> = [];
+  const ui = boot(async (url, init) => {
+    const request = new URL(url, "http://local.test");
+    if (request.pathname === "/api/console-state") return response(200, { stopped: false, activeSessions: 1, runningProcesses: 0, updatedAt: "2026-11-02T00:00:00Z" });
+    if (request.pathname === "/api/logs") return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false, hasMoreNewer: false });
+    if (request.pathname === "/api/sessions/todo-session/todo") {
+      if (init?.method === "PUT") {
+        writes.push(JSON.parse(String(init.body)) as { expected_version: number; changes: Array<Record<string, unknown>> });
+        // 制約の判定はAPIの責務。画面では拒否理由と入力保持の契約を検証する。
+        return response(400, { error: "TODO_DEPTH_LIMIT", message: "TODO_DEPTH_LIMIT: 作業の階層は最上位を含めて8段までです。", applied: false });
+      }
+      return response(200, subtaskUiSnapshot(2));
+    }
+    throw new Error("unexpected request " + request.href);
+  }, [], { "session-todo": fixture.panel }, "todo-session");
+  await settle();
+  ui.newest.click();
+  await settle(); await settle();
+
+  const target = fixture.list.children.find((row) => row.dataset.todoId === "todo-4");
+  assert.ok(target);
+  const text = target.querySelector<FakeElement>("[data-todo-text]");
+  const parent = target.querySelector<FakeElement>("[data-todo-parent]");
+  const reparent = target.querySelector<FakeElement>('[data-todo-op="reparent"]');
+  const statusMessage = fixture.panel.querySelector<FakeElement>("[data-todo-status-message]");
+  assert.ok(text); assert.ok(parent); assert.ok(reparent); assert.ok(statusMessage);
+  text.value = "制約エラー後も残す本文"; text.click("input");
+  parent.value = "todo-5"; parent.click("change");
+  reparent.click();
+  await settle(); await settle();
+
+  assert.deepEqual(writes, [{ expected_version: 2, changes: [{ op: "reparent", id: "todo-4", parent_id: "todo-5" }] }], "拒否された操作を自動再送しない");
+  assert.equal(fixture.panel.dataset.version, "2", "制約エラーで共有版を進めない");
+  assert.equal(target.dataset.baseVersion, "2");
+  assert.equal(target.dataset.todoParentId, "todo-1", "拒否された親変更を保存済み表示へ反映しない");
+  assert.equal(text.value, "制約エラー後も残す本文");
+  assert.equal(parent.value, "todo-5", "利用者が選んだ未保存の親を保持する");
+  assert.match(statusMessage.textContent, /作業の階層は最上位を含めて8段までです。/, "再操作の判断に必要な制約理由を表示する");
 });
