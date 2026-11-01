@@ -1,4 +1,4 @@
-# Task 一覧
+﻿# Task 一覧
 
 更新規則: このファイルは `task-breakdown-planner`、`task-consistency-manager`、`progress-sync-manager` を通してのみ更新する。
 
@@ -127,3 +127,14 @@ DR-003 と NR-009 の完了は次候補の両 OS CI と同じ reviewer の確認
 最終独立判定と報告専用コミット、最終 HEAD の CI は `reports/2026-09-25-independent-review.md` と PR #1 を最終記録とする。この一覧は独立判定を先取りしない。
 
 | R24-10 | R24 | main統合後の律速を実測で再選定し、`user-console.test.ts`の16試験を4意味群へ分割して比較する | R24-08 | M | 承認済み設計に沿って既存16試験の名前・callback本文・assertion・`fixture`隔離・cleanupを機械照合し、TDD Red→分割→Greenを記録する。現行manifestを新しい試験集合へ流用せず、時間表未適用の同一candidate HEADで必須CIを3回成功させ、各runで全追跡ファイルの一度ずつの割当を検証する。その後、重複起動せずにWindows Node 22で全対象を3回単独測定し、artifactと全path・成功・median・fingerprintを検証してから新時間表を登録する。manifest適用後も同一applied HEADの必須CIを3回成功させ、各runの全件割当を検証する。通常reviewとexact-head CIを通したDraft PRを作成する。`fixture`計測や削減、3分未達の隠蔽、PR #72の変更、PR #62固有変更は対象外。PR mergeと公開コメントは親確認待ち。 | 設計追補の通常reviewは修正確認pass。ユーザー承認scopeに沿い、PR #73 Draft/open/unmerged、head `f01940217de6e1dc60833de7617298b1187d62ca`、base `f20c75e1ecd409f0e8573720c0f74b39d8178f93`。PR #72の変更とPR #62固有変更は候補に含まない。16試験は4群へ分割、AST title+callback 16/16一致、旧宣言なし。通常review `pass_with_held`、指摘なし。Linux Node 24 focusedは2/16 pass・14 fail（baseでも同じowner marker不足、機序未確定）。全体試験は8失敗出力後に停止・中断。check/build/lint/diff-checkはpass、依存版・lockfile・安全検査の変更なし。baseline必須確認run `37206614291` は同一headのattempt 1/2/3全10 job success。主指標302/322/325秒、副指標302/323/326秒、最大Windows Test 219/232/228秒。各attemptの割当artifact `11305265805`/`11311521283`/`11312010635` はdigestと公式planDigest再計算一致を確認し、30 test files/8 shardの全件・無重複割当も一致。必要な3回完了前に単独測定 `37206964800` が開始された順序逸脱を設計文書へ記録し、この測定は取消さず完了。成果物 `11306340866` は90/90 success、30 path×3、候補時間表再構築・Windows fingerprint独立再計算・同HEAD割当成果物との一致を検証。4分割後file medianは57.3/11.8/19.3/50.6秒で、CI全体短縮や3分達成を示さない。設計とPR本文に事実を反映、公開コメントなし。測定がbaseline必須確認の3回成功より先に始まった順序逸脱は保持。測定完了後に同一baseline HEADのattempt 2/3を再実行し、後続で3/3全成功を達成したため、ユーザー承認に基づきartifact `11306340866`由来のmanifestを本変更で登録する。適用後のCIは新しい同一HEADで3回成功が必要。今回のmanifest適用報告 `reports/issue-24-r24-10-manifest-application-20261004.md` にbaseline時刻、measurement artifact、ローカル検証を記録。PR #73はdraft/open/unmerged、mergeなし。3分主指標3回全て180秒以内までIssue #24継続。
+
+## 共有作業一覧の親子構成
+
+対象は Issue #85。2026年11月2日に利用者が仕様を承認し、設計書更新、テスト駆動開発、検証と PR 作成の順で対応する。今回の終了地点は第三者の確認を始める前である。既存の別作業の状態は変更しない。
+
+| ID | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
+| --- | --- | --- | --- | --- | --- | --- |
+| TODO-HIER-01 | TODO-HIER | 承認した親子構成を既存設計へ反映 | なし | S | API 契約、上限、状態、削除、競合と受入条件を記載し文書検査を通す | 設計と文書検査完了 |
+| TODO-HIER-02 | TODO-HIER | 共通処理と MCP をテスト駆動で実装 | TODO-HIER-01 | M | 実装前の失敗と実装後の成功、深さ・件数・循環・原子性・所有者境界を確認 | 未着手 |
+| TODO-HIER-03 | TODO-HIER | 階層表示と画面操作をテスト駆動で実装 | TODO-HIER-02 | M | 子の追加、親変更、解除、並べ替え、折り畳みと入力保持を確認 | 未着手 |
+| TODO-HIER-04 | TODO-HIER | 回帰検証、PR 作成と報告 | TODO-HIER-02,TODO-HIER-03 | M | 対象検証、文書検査、コミットと公開、詳細報告と PR コメントが揃う | 未着手。レビューは今回開始しない |
