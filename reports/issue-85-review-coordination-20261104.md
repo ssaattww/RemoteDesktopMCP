@@ -57,3 +57,5 @@
 ## 現在の状態
 
 初回通常レビューはfail、R85-N01〜N03の3件（各medium/P2）を指摘対応担当へ渡した。[通常レビューPRコメント](https://github.com/ssaattww/RemoteDesktopMCP/pull/90#issuecomment-6615737501)は投稿後に読み戻した。3件の修正と関連試験・実HTTP/Edge描画の検証結果は [指摘対応報告](issue-85-review-fixes-20261104.md) に記録する。同一通常reviewerが前回のID・重要度・判定を保持して復帰し、固定修正HEADでの再確認を担当する。通常再確認、最終候補の全体ゲート、独立レビューの完了は本記録の作成時点では未確定であり、以後の対応報告とPRコメントを参照する。本記録はマージ許可を表さない。
+
+1回目の修正コミットは `11d085740bd271d8fdbcc4105058ef1032b83a78`。[対応後コメント](https://github.com/ssaattww/RemoteDesktopMCP/pull/90#issuecomment-6616777406) を投稿・読み戻した。同一通常reviewerの [修正確認](issue-85-fix-verification-20261104.md) はN03 closed、N01/N02 partialでfail。元のID・medium/P2を保持し、二重の祖先展開とrevealされた生存行のfocus候補を残対応として同じ実装担当へ戻した。[再確認コメント](https://github.com/ssaattww/RemoteDesktopMCP/pull/90#issuecomment-6616911905) も投稿・読み戻した。失敗報告と追跡を `18c71be56125c007dbb1480149f3e04f87b0f139` に保存し、製品内容は変えずに2回目の対応を開始した。2回目の実装証拠は [残対応報告](issue-85-review-fixes-2-20261104.md) を参照する。

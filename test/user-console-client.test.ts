@@ -2407,6 +2407,59 @@ test("subtask UI collapse preserves all rows and survives later snapshots withou
   assert.equal(h.writes.length, 0, "表示の展開・折り畳みは共有状態を更新しない");
 });
 
+test("subtask UI preserves a snapshot reveal across nested expansion and clears it on deliberate collapse", async () => {
+  const h = await bootSubtaskUi();
+  const inner = h.row("todo-2");
+  const outer = h.row("todo-1");
+  h.control(inner, "toggle-children").click();
+  h.control(outer, "toggle-children").click();
+  const incoming = h.row("todo-5");
+  const text = incoming.querySelector<FakeElement>("[data-todo-text]")!;
+  text.value = "unsaved nested reveal"; text.click("input"); text.focus();
+  const moved = subtaskUiItems();
+  moved[4]!.parent_id = "todo-2";
+  h.setReadSnapshot(subtaskUiSnapshot(3, moved));
+  await h.refresh();
+  assert.equal(incoming.hidden, false, "external move beneath nested collapsed ancestors reveals the dirty row");
+  h.control(outer, "toggle-children").click();
+  assert.equal(incoming.hidden, false, "expanding only the outer ancestor preserves the reveal beneath the inner collapse");
+  h.control(inner, "toggle-children").click();
+  assert.equal(incoming.hidden, false, "expanding the inner ancestor keeps the row visible");
+  h.control(outer, "toggle-children").click();
+  assert.equal(incoming.hidden, true, "deliberate collapse clears the reveal");
+  h.setReadSnapshot(subtaskUiSnapshot(4, moved));
+  await h.refresh();
+  assert.equal(incoming.hidden, true, "later snapshots preserve the deliberate collapse");
+  assert.equal(text.value, "unsaved nested reveal", "the unsaved draft remains available");
+  assert.equal(h.writes.length, 0);
+});
+
+test("subtask UI uses a snapshot-revealed previous row when deleting the focused last row", async () => {
+  const h = await bootSubtaskUi();
+  const initial = subtaskUiItems();
+  initial[3]!.parent_id = null;
+  h.setReadSnapshot(subtaskUiSnapshot(3, initial));
+  await h.refresh();
+  h.control(h.row("todo-1"), "toggle-children").click();
+  const revealed = h.row("todo-4");
+  const revealedText = revealed.querySelector<FakeElement>("[data-todo-text]")!;
+  revealedText.value = "unsaved revealed previous row"; revealedText.click("input");
+  const moved = subtaskUiItems();
+  moved[3]!.parent_id = "todo-1";
+  h.setReadSnapshot(subtaskUiSnapshot(4, moved));
+  await h.refresh();
+  assert.equal(revealed.hidden, false, "dirty row moved beneath a collapsed parent is temporarily revealed");
+  const focusedLastRow = h.row("todo-5");
+  focusedLastRow.querySelector<FakeElement>("[data-todo-text]")!.focus();
+  const afterDelete = moved.filter((item) => item.id !== "todo-5");
+  h.setReadSnapshot(subtaskUiSnapshot(5, afterDelete, 4, 2));
+  await h.refresh();
+  assert.equal(FakeElement.activeElement, revealedText, "the revealed previous row remains eligible for post-removal focus");
+  assert.equal(revealed.hidden, false);
+  assert.equal(revealedText.value, "unsaved revealed previous row");
+  assert.equal(h.writes.length, 0);
+});
+
 test("subtask UI adds a child through the shared add form with its selected parent", async () => {
   const h = await bootSubtaskUi();
   h.fixture.addText.value = "追加する子作業";

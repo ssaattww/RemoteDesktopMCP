@@ -454,7 +454,7 @@ function clientBootstrap(): void {
     for (const id of snapshotRevealedTodoIds) if (!snapshotIds.has(id) || !todoAncestors(id).some((ancestor) => collapsedTodoIds.has(ancestor))) snapshotRevealedTodoIds.delete(id);
     const eligibleSnapshotRows = [...oldRows, ...orderedRows.filter((row) => !oldRows.includes(row))].filter((row) => {
       const id = row.dataset.todoId ?? ""; const state = stateFor(row);
-      return Boolean(row.parentElement && ((snapshotIds.has(id) && visibleSnapshotIds.has(id)) || state.deletedDraft));
+      return Boolean(row.parentElement && ((snapshotIds.has(id) && (visibleSnapshotIds.has(id) || snapshotRevealedTodoIds.has(id))) || state.deletedDraft));
     });
     for (const row of oldRows) {
       if (itemIds.has(row.dataset.todoId ?? "")) continue;
@@ -569,7 +569,7 @@ function clientBootstrap(): void {
     const text = textField(row); if (text) { stateFor(row); resizeTodoText(text); text.addEventListener("input", () => { const state = stateFor(row); state.textGeneration += 1; resizeTodoText(text); refreshTodoControls(); }); }
     const stateField = statusField(row); if (stateField) { stateFor(row); stateField.addEventListener("change", () => { const state = stateFor(row); state.statusGeneration += 1; refreshTodoControls(); }); }
     const parent = parentField(row); if (parent) parent.addEventListener("change", () => { stateFor(row).parentGeneration += 1; refreshTodoControls(); });
-    row.querySelector<HTMLButtonElement>('[data-todo-op="toggle-children"]')?.addEventListener("click", (event) => { const id = row.dataset.todoId ?? ""; for (const revealedId of snapshotRevealedTodoIds) if (todoAncestors(revealedId).includes(id)) snapshotRevealedTodoIds.delete(revealedId); if (collapsedTodoIds.has(id)) collapsedTodoIds.delete(id); else collapsedTodoIds.add(id); (event?.currentTarget as HTMLButtonElement | null)?.focus({ preventScroll: true }); refreshTodoCollapse(); });
+    row.querySelector<HTMLButtonElement>('[data-todo-op="toggle-children"]')?.addEventListener("click", (event) => { const id = row.dataset.todoId ?? ""; const expanding = collapsedTodoIds.has(id); if (!expanding) for (const revealedId of snapshotRevealedTodoIds) if (todoAncestors(revealedId).includes(id)) snapshotRevealedTodoIds.delete(revealedId); if (expanding) collapsedTodoIds.delete(id); else collapsedTodoIds.add(id); (event?.currentTarget as HTMLButtonElement | null)?.focus({ preventScroll: true }); refreshTodoCollapse(); });
     row.querySelector<HTMLButtonElement>('[data-todo-op="add-child"]')?.addEventListener("click", () => {
       const addParent = todoPanel?.querySelector<HTMLSelectElement>("[data-todo-add-parent]"); const addText = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); if (!addParent || !addText) return;
       const id = row.dataset.todoId ?? ""; if (addParent.value !== id) { syncTodoParentOptions(addParent, id); addState.generation += 1; }
