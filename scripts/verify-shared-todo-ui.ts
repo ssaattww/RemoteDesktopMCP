@@ -17,8 +17,10 @@ const rowSelector = (itemId: string) => `#session-todo li[data-todo-id="${itemId
 const errors: string[] = [];
 const pageErrors: string[] = [];
 const consoleErrors: string[] = [];
+const expectedConflictConsoleMessages: string[] = [];
 const interceptionErrors: string[] = [];
 const checks: Record<string, unknown> = {};
+let currentStage = "initialization";
 const savedScreenshots: string[] = [];
 const screenshots = { mobile: path.join(outputDir, "mobile.png"), desktop: path.join(outputDir, "desktop.png") };
 const result: Record<string, unknown> = { started_at: new Date().toISOString(), node: process.version, platform: process.platform, ok: false, checks, screenshots, screenshots_saved: savedScreenshots, page_errors: pageErrors, console_errors: consoleErrors, interception_errors: interceptionErrors, errors };
@@ -97,6 +99,14 @@ try {
   config.baseUrl = baseUrl;
   assert.equal(service.cfg.baseUrl, baseUrl);
   const todoUrl = `${baseUrl}/api/sessions/${sessionId}/todo`;
+  const refreshTodoInBrowser = async () => {
+    const [response] = await Promise.all([
+      page.waitForResponse((candidate) => candidate.url() === todoUrl && candidate.request().method() === "GET"),
+      page.click("#log-new-button"),
+    ]);
+    assert.equal(response.status(), 200);
+    return response;
+  };
   const login = await fetch(`${baseUrl}/user/login`, { method: "POST", headers: { origin: baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: owner, password }), redirect: "manual" });
   assert.equal(login.status, 303);
   const token = /rdmcp_user=([^;,]+)/.exec(login.headers.get("set-cookie") ?? "")?.[1];
@@ -107,7 +117,7 @@ try {
   const page = await browser.newPage();
   page.setDefaultTimeout(15_000);
   page.on("pageerror", (error) => pageErrors.push(error instanceof Error ? error.stack ?? error.message : String(error)));
-  page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error") { if (/responded with a status of 409/i.test(message.text())) expectedConflictConsoleMessages.push(message.text()); else consoleErrors.push(message.text()); } });
   await page.setCookie({ name: "rdmcp_user", value: token, url: baseUrl, httpOnly: true, sameSite: "Lax" });
   let resolveHeld: ((request: HTTPRequest) => void) | undefined;
   let holdNextMutation = false;
@@ -200,11 +210,218 @@ try {
   const moved = afterMove.items.find((item) => item.id === "chain-8")!;
   assert.equal(moved.parent_id, "other-root"); assert.equal(moved.text, storedText);
   checks.reparent_preserves_draft = { same_element: preserved.same_element, focused: preserved.focused, selection: [preserved.start, preserved.end], unsaved_text_retained: true, shared_text_unchanged: true, parent_id: moved.parent_id };
+
+  // Exercise move timestamps through the authenticated HTTP route and preserve descendants.
+  currentStage = "N03 create move sibling through UI";
+  await openStructure(page, "other-root");
+  await page.click(`${rowSelector("other-root")} [data-todo-op="add-child"]`);
+  await page.type("[data-todo-add-text]", "move peer");
+  const [peerResponse] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.click('#session-todo [data-todo-op="add"]')]);
+  assert.equal(peerResponse.status(), 200);
+  let snapshot = await service.todoGet(owner, sessionId);
+  const peer = snapshot.items.find((item) => item.text === "move peer")!;
+  await openStructure(page, peer.id);
+  await page.click(`${rowSelector(peer.id)} [data-todo-op="add-child"]`);
+  await page.type("[data-todo-add-text]", "move descendant");
+  const [descendantResponse] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.click('#session-todo [data-todo-op="add"]')]);
+  assert.equal(descendantResponse.status(), 200);
+  snapshot = await service.todoGet(owner, sessionId);
+  const descendant = snapshot.items.find((item) => item.text === "move descendant")!;
+  const beforeMoveSnapshot = await service.todoGet(owner, sessionId);
+  const peerBefore = beforeMoveSnapshot.items.find((item) => item.id === peer.id)!;
+  const descendantBefore = beforeMoveSnapshot.items.find((item) => item.id === descendant.id)!;
+  const [moveResponse] = await Promise.all([
+    page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"),
+    page.click(`${rowSelector(peer.id)} [data-todo-op="move-up"]`),
+  ]);
+  currentStage = "N03 assert move response and descendant state";
+  assert.equal(moveResponse.status(), 200);
+  await page.waitForFunction((selector) => document.querySelector<HTMLButtonElement>(`${selector} [data-todo-op="save"]`)?.disabled === false, {}, rowSelector(peer.id));
+  const afterMoveSnapshot = await service.todoGet(owner, sessionId);
+  const peerAfter = afterMoveSnapshot.items.find((item) => item.id === peer.id)!;
+  const descendantAfter = afterMoveSnapshot.items.find((item) => item.id === descendant.id)!;
+  assert.notEqual(peerAfter.updatedAt, peerBefore.updatedAt);
+  assert.deepEqual(descendantAfter, descendantBefore);
+  checks.move_timestamp = { target_updated: peerAfter.updatedAt !== peerBefore.updatedAt, descendant_unchanged: JSON.stringify(descendantAfter) === JSON.stringify(descendantBefore), transport: "authenticated HTTP PUT" };
+
+  // A collapsed ancestor must not hide an edited row newly moved beneath it.
+  currentStage = "N01 prepare dirty row under collapsed ancestor";
+  if (await page.$eval(`${rowSelector("chain-8")} [data-todo-conflict]`, (element) => !(element as HTMLElement).hidden)) {
+    await page.click(`${rowSelector("chain-8")} [data-todo-op="keep-draft"]`);
+    await page.waitForFunction((selector) => document.querySelector<HTMLButtonElement>(`${selector} [data-todo-op="save"]`)?.disabled === false, {}, rowSelector("chain-8"));
+  }
+  await page.click(`${rowSelector("chain-1")} [data-todo-op="toggle-children"]`);
+  const collapseState = await page.evaluate(() => ({ existingChildHidden: document.querySelector<HTMLElement>('[data-todo-id="chain-2"]')!.hidden, incomingRowVisible: !document.querySelector<HTMLElement>('[data-todo-id="chain-8"]')!.hidden }));
+  assert.deepEqual(collapseState, { existingChildHidden: true, incomingRowVisible: true });
+  await page.$eval(textSelector, (element) => { const field = element as HTMLTextAreaElement; field.value = "newly hidden unsaved draft"; field.dispatchEvent(new Event("input", { bubbles: true })); });
+  await page.select(`${rowSelector("chain-8")} [data-todo-status]`, "in_progress");
+  await page.select(`${rowSelector("chain-8")} [data-todo-parent]`, "chain-1");
+  await page.$eval(textSelector, (field) => { (field as HTMLTextAreaElement).focus(); (field as HTMLTextAreaElement).setSelectionRange(4, 12, "forward"); });
+  const n01Before = await page.evaluate((selector) => { const row = document.querySelector<HTMLElement>(selector)!; return { rowHidden: row.hidden, parent: row.dataset.todoParentId, saveDisabled: row.querySelector<HTMLButtonElement>('[data-todo-op="save"]')?.disabled, version: document.querySelector<HTMLElement>("#session-todo")?.dataset.version, collapsed: Array.from(document.querySelectorAll<HTMLElement>('#session-todo [data-todo-op="toggle-children"]')).filter((button) => button.getAttribute("aria-expanded") === "false").map((button) => button.closest<HTMLElement>("li")?.dataset.todoId) }; }, rowSelector("chain-8"));
+  checks.n01_before = n01Before;
+  assert.equal(n01Before.saveDisabled, false);
+  currentStage = "N01 apply external parent change to service";
+  const beforeExternalReparent = await service.todoGet(owner, sessionId);
+  const externalParentMove = await service.todoUpdate(owner, sessionId, beforeExternalReparent.version, [{ op: "reparent", id: "other-root", parent_id: "chain-1" }]);
+  currentStage = "N01 send stale save and receive 409 snapshot";
+  const [reparentConflict] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.$eval(`${rowSelector("chain-8")} [data-todo-op="save"]`, (button) => (button as HTMLButtonElement).click())]);
+  currentStage = "N01 assert conflict snapshot, focus, selection, and drafts";
+  assert.equal(reparentConflict.status(), 409);
+  assert.equal(Number(await page.$eval("#session-todo", (element) => (element as HTMLElement).dataset.version)), externalParentMove.version);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const retained = await page.evaluate((selector) => {
+    const field = document.querySelector<HTMLTextAreaElement>(selector)!;
+    const row = field.closest<HTMLElement>("li[data-todo-id]")!;
+    const status = row.querySelector<HTMLSelectElement>("[data-todo-status]")!;
+    const parent = row.querySelector<HTMLSelectElement>("[data-todo-parent]")!;
+    return { hidden: row.hidden, visible: field.getClientRects().length > 0, focused: document.activeElement === field, value: field.value, status: status.value, parent: parent.value, start: field.selectionStart, end: field.selectionEnd, direction: field.selectionDirection, conflict: !row.querySelector<HTMLElement>("[data-todo-conflict]")!.hidden };
+  }, textSelector);
+  assert.equal(retained.hidden, false); assert.equal(retained.visible, true); assert.equal(retained.focused, true);
+  assert.equal(retained.value, "newly hidden unsaved draft"); assert.equal(retained.status, "in_progress"); assert.equal(retained.parent, "chain-1");
+  assert.equal(retained.start, 4); assert.equal(retained.end, 12); assert.equal(retained.direction, "forward"); assert.equal(retained.conflict, true);
+  checks.reparent_under_collapsed_ancestor = retained;
+  await page.$eval(`${rowSelector("chain-8")} [data-todo-op="keep-draft"]`, (button) => (button as HTMLButtonElement).click());
+  await page.waitForFunction((selector) => document.querySelector<HTMLElement>(`${selector} [data-todo-conflict]`)?.hidden === true, {}, rowSelector("chain-8"));
+  const [selfMoveResponse] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.$eval(`${rowSelector("chain-8")} [data-todo-op="reparent"]`, (button) => (button as HTMLButtonElement).click())]);
+  assert.equal(selfMoveResponse.status(), 200);
+  await page.waitForFunction(() => document.querySelector<HTMLElement>('[data-todo-id="chain-8"]')?.dataset.todoParentId === "chain-1");
+  const selfReparent = await page.evaluate((selector) => {
+    const field = document.querySelector<HTMLTextAreaElement>(selector)!; const row = field.closest<HTMLElement>("li[data-todo-id]")!;
+    return { hidden: row.hidden, visible: field.getClientRects().length > 0, focused: document.activeElement === field, text: field.value, status: row.querySelector<HTMLSelectElement>("[data-todo-status]")!.value, parent: row.querySelector<HTMLSelectElement>("[data-todo-parent]")!.value, start: field.selectionStart, end: field.selectionEnd, conflictHidden: row.querySelector<HTMLElement>("[data-todo-conflict]")!.hidden };
+  }, textSelector);
+  assert.equal(selfReparent.hidden, false); assert.equal(selfReparent.visible, true); assert.equal(selfReparent.focused, true);
+  assert.equal(selfReparent.text, "newly hidden unsaved draft"); assert.equal(selfReparent.status, "in_progress"); assert.equal(selfReparent.parent, "chain-1");
+  assert.equal(selfReparent.start, 4); assert.equal(selfReparent.end, 12); assert.equal(selfReparent.conflictHidden, true);
+  checks.same_screen_reparent_under_collapsed_ancestor = selfReparent;
+  await page.click(`${rowSelector("chain-1")} [data-todo-op="toggle-children"]`); // clear the snapshot reveal by explicitly expanding
+  await page.click(`${rowSelector("chain-1")} [data-todo-op="toggle-children"]`);
+  const intentionalCollapse = await page.evaluate(() => ({ hidden: document.querySelector<HTMLElement>('[data-todo-id="chain-8"]')?.hidden, focusedToggle: document.activeElement === document.querySelector('[data-todo-id="chain-1"] [data-todo-op="toggle-children"]') }));
+  assert.equal(intentionalCollapse.hidden, true); assert.equal(intentionalCollapse.focusedToggle, true);
+  checks.intentional_collapse_remains_effective = intentionalCollapse;
+
+  // Deleting a complete collapsed branch selects the surviving snapshot-visible row.
+  currentStage = "N02 prepare branch deletion";
+  const beforeDeleteBranch = await service.todoGet(owner, sessionId);
+  const byId = new Map(beforeDeleteBranch.items.map((item) => [item.id, item]));
+  const depth = (id: string) => { let value = 0; let parentId = byId.get(id)?.parent_id ?? null; const seen = new Set<string>(); while (parentId && !seen.has(parentId)) { seen.add(parentId); value += 1; parentId = byId.get(parentId)?.parent_id ?? null; } return value; };
+  const branchDeletes = beforeDeleteBranch.items.filter((item) => item.id === "chain-1" || item.parent_id !== null).sort((left, right) => depth(right.id) - depth(left.id));
+  const deleteChanges = [{ op: "add", text: "surviving visible row" }, ...branchDeletes.map((item) => ({ op: "delete", id: item.id }))];
+  const collapsedToggle = `${rowSelector("chain-1")} [data-todo-op="toggle-children"]`;
+  await page.$eval(collapsedToggle, (button) => (button as HTMLButtonElement).focus());
+  const removedBranch = await service.todoUpdate(owner, sessionId, beforeDeleteBranch.version, deleteChanges);
+  const [deleteConflict] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.$eval(`${rowSelector("chain-1")} [data-todo-op="save"]`, (button) => { (button as HTMLButtonElement).focus(); (button as HTMLButtonElement).click(); })]);
+  currentStage = "N02 assert visible destination and message";
+  assert.equal(deleteConflict.status(), 409);
+  assert.equal(Number(await page.$eval("#session-todo", (element) => (element as HTMLElement).dataset.version)), removedBranch.version);
+  const focusAfterDelete = await page.evaluate(() => ({ tag: document.activeElement?.tagName, row: document.activeElement?.closest<HTMLElement>("li[data-todo-id]")?.dataset.todoId ?? null, status: document.querySelector<HTMLElement>("[data-todo-status-message]")?.textContent ?? "", visibleRows: Array.from(document.querySelectorAll<HTMLElement>("#session-todo li[data-todo-id]")).filter((row) => !row.hidden).map((row) => row.dataset.todoId), draftRows: Array.from(document.querySelectorAll<HTMLElement>("#session-todo li[data-deleted-draft='true']")).map((row) => row.dataset.todoId) }));
+  assert.equal(focusAfterDelete.tag, "TEXTAREA"); assert.equal(focusAfterDelete.row, removedBranch.items[0]?.id);
+  assert.match(focusAfterDelete.status, /表示中の項目へフォーカス/);
+  assert.ok(focusAfterDelete.visibleRows.includes(focusAfterDelete.row));
+  assert.ok(focusAfterDelete.draftRows.includes("chain-8"), "the unresolved deleted draft remains available");
+  checks.delete_collapsed_branch = focusAfterDelete;
+
+  // At both supported widths, edit text, change status, and delete a leaf task.
+  let currentSurvivor = removedBranch.items[0]!;
+  for (const width of [320, 1280]) {
+    currentStage = `320/1280 edit, status, delete at ${width}px`;
+    await page.setViewport({ width, height: 900, deviceScaleFactor: 1 });
+    const survivor = currentSurvivor;
+    const survivorRow = rowSelector(survivor.id);
+    await page.$eval(`${survivorRow} [data-todo-text]`, (element) => { const field = element as HTMLTextAreaElement; field.value = "edited at both widths"; field.dispatchEvent(new Event("input", { bubbles: true })); });
+    await page.select(`${survivorRow} [data-todo-status]`, "completed");
+    const [editResponse] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.click(`${survivorRow} [data-todo-op="save"]`)]);
+    assert.equal(editResponse.status(), 200);
+    const afterEdit = await service.todoGet(owner, sessionId);
+    const edited = afterEdit.items.find((item) => item.id === survivor.id)!;
+    assert.equal(edited.text, "edited at both widths"); assert.equal(edited.status, "completed");
+    const [deleteResponse] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.click(`${survivorRow} [data-todo-op="delete"]`)]);
+    assert.equal(deleteResponse.status(), 200);
+    assert.equal((await service.todoGet(owner, sessionId)).items.some((item) => item.id === survivor.id), false);
+    checks[`mobile_desktop_edit_status_delete_${width}`] = { text_saved: edited.text, status_saved: edited.status, deleted: true };
+    if (width === 320) {
+      const next = await service.todoGet(owner, sessionId);
+      const replacement = await service.todoUpdate(owner, sessionId, next.version, [{ op: "add", text: "surviving visible row" }]);
+      await refreshTodoInBrowser();
+      currentSurvivor = replacement.items.find((item) => item.text === "surviving visible row")!;
+      await page.waitForFunction((version) => Number(document.querySelector<HTMLElement>("#session-todo")?.dataset.version) >= version, {}, replacement.version);
+    }
+  }
+
+  // Adjacent deletions skip hidden descendants and choose the next visible snapshot row.
+  currentStage = "N02 next visible row after adjacent hidden deletions";
+  let seeded = await service.todoGet(owner, sessionId);
+  let scenario = await service.todoUpdate(owner, sessionId, seeded.version, [{ op: "add", text: "next-scenario parent" }]);
+  const nextParent = scenario.items.find((item) => item.text === "next-scenario parent")!;
+  scenario = await service.todoUpdate(owner, sessionId, scenario.version, [{ op: "add", text: "hidden child", parent_id: nextParent.id }, { op: "add", text: "visible next root" }]);
+  const hiddenChild = scenario.items.find((item) => item.text === "hidden child")!;
+  const visibleNext = scenario.items.find((item) => item.text === "visible next root")!;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction((version) => Number(document.querySelector<HTMLElement>("#session-todo")?.dataset.version) === version, {}, scenario.version);
+  await page.click(`${rowSelector(nextParent.id)} [data-todo-op="toggle-children"]`);
+  assert.equal(await page.$eval(rowSelector(hiddenChild.id), (row) => (row as HTMLElement).hidden), true);
+  const nextParentSave = `${rowSelector(nextParent.id)} [data-todo-op="save"]`;
+  await page.$eval(`${rowSelector(nextParent.id)} [data-todo-text]`, (field) => (field as HTMLTextAreaElement).focus());
+  const preAdjacentFocus = await page.evaluate(() => ({ tag: document.activeElement?.tagName, row: document.activeElement?.closest<HTMLElement>("li[data-todo-id]")?.dataset.todoId ?? null }));
+  assert.equal(preAdjacentFocus.row, nextParent.id);
+  const beforeAdjacentDelete = await service.todoGet(owner, sessionId);
+  const afterAdjacentDelete = await service.todoUpdate(owner, sessionId, beforeAdjacentDelete.version, [{ op: "delete", id: hiddenChild.id }, { op: "delete", id: nextParent.id }]);
+  const focusBeforeConflict = await page.evaluate(() => ({ tag: document.activeElement?.tagName, row: document.activeElement?.closest<HTMLElement>("li[data-todo-id]")?.dataset.todoId ?? null }));
+  assert.equal(focusBeforeConflict.row, nextParent.id);
+  const [adjacentConflict] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.$eval(nextParentSave, (button) => (button as HTMLButtonElement).click())]);
+  assert.equal(adjacentConflict.status(), 409);
+  checks.adjacent_delete_request = adjacentConflict.request().postData();
+  await page.waitForFunction((version) => Number(document.querySelector<HTMLElement>("#session-todo")?.dataset.version) === version, {}, afterAdjacentDelete.version);
+  checks.adjacent_delete_post_snapshot = await page.evaluate(() => ({ activeTag: document.activeElement?.tagName, activeRow: document.activeElement?.closest<HTMLElement>("li[data-todo-id]")?.dataset.todoId ?? null, rows: Array.from(document.querySelectorAll<HTMLElement>("#session-todo li[data-todo-id]")).map((row) => ({ id: row.dataset.todoId, hidden: row.hidden, deletedDraft: row.dataset.deletedDraft, conflictHidden: row.querySelector<HTMLElement>("[data-todo-conflict]")?.hidden })), message: document.querySelector<HTMLElement>("[data-todo-status-message]")?.textContent }));
+  const nextFocus = await page.evaluate((selector) => ({ row: document.activeElement?.closest<HTMLElement>("li[data-todo-id]")?.dataset.todoId ?? null, hidden: document.querySelector<HTMLElement>(selector)?.hidden ?? true, visibleRows: Array.from(document.querySelectorAll<HTMLElement>("#session-todo li[data-todo-id]")).filter((row) => !row.hidden).map((row) => row.dataset.todoId), message: document.querySelector<HTMLElement>("[data-todo-status-message]")?.textContent ?? "" }), rowSelector(visibleNext.id));
+  checks.adjacent_delete_skips_hidden_next_row = nextFocus;
+  assert.equal(nextFocus.row, visibleNext.id); assert.equal(nextFocus.hidden, false); assert.deepEqual(nextFocus.visibleRows, [visibleNext.id]);
+  assert.match(nextFocus.message, /表示中の項目へフォーカス/);
+  checks.adjacent_delete_skips_hidden_next_row = nextFocus;
+
+  // With no surviving next row, the previous visible row receives focus.
+  currentStage = "N02 previous visible row fallback";
+  seeded = await service.todoGet(owner, sessionId);
+  scenario = await service.todoUpdate(owner, sessionId, seeded.version, [{ op: "delete", id: visibleNext.id }]);
+  scenario = await service.todoUpdate(owner, sessionId, scenario.version, [{ op: "add", text: "previous root" }, { op: "add", text: "focused last root" }]);
+  const previousRoot = scenario.items.find((item) => item.text === "previous root")!;
+  const lastRoot = scenario.items.find((item) => item.text === "focused last root")!;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction((version) => Number(document.querySelector<HTMLElement>("#session-todo")?.dataset.version) === version, {}, scenario.version);
+  await page.$eval(`${rowSelector(lastRoot.id)} [data-todo-text]`, (field) => (field as HTMLTextAreaElement).focus());
+  const beforeLastDelete = await service.todoGet(owner, sessionId);
+  const afterLastDelete = await service.todoUpdate(owner, sessionId, beforeLastDelete.version, [{ op: "delete", id: lastRoot.id }]);
+  const [previousConflict] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.$eval(`${rowSelector(lastRoot.id)} [data-todo-op="save"]`, (button) => (button as HTMLButtonElement).click())]);
+  assert.equal(previousConflict.status(), 409);
+  await page.waitForFunction((version) => Number(document.querySelector<HTMLElement>("#session-todo")?.dataset.version) === version, {}, afterLastDelete.version);
+  const previousFocus = await page.evaluate(() => ({ row: document.activeElement?.closest<HTMLElement>("li[data-todo-id]")?.dataset.todoId ?? null, visibleRows: Array.from(document.querySelectorAll<HTMLElement>("#session-todo li[data-todo-id]")).filter((row) => !row.hidden).map((row) => row.dataset.todoId), message: document.querySelector<HTMLElement>("[data-todo-status-message]")?.textContent ?? "" }));
+  assert.equal(previousFocus.row, previousRoot.id); assert.deepEqual(previousFocus.visibleRows, [previousRoot.id]);
+  assert.match(previousFocus.message, /表示中の項目へフォーカス/);
+  checks.previous_visible_row_fallback = previousFocus;
+
+  // Deleting the last available row sends focus to the Todo heading.
+  currentStage = "N02 last row focuses heading";
+  seeded = await service.todoGet(owner, sessionId);
+  scenario = await service.todoUpdate(owner, sessionId, seeded.version, [{ op: "delete", id: previousRoot.id }]);
+  scenario = await service.todoUpdate(owner, sessionId, scenario.version, [{ op: "add", text: "only remaining row" }]);
+  const onlyRow = scenario.items[0]!;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction((version) => Number(document.querySelector<HTMLElement>("#session-todo")?.dataset.version) === version, {}, scenario.version);
+  await page.$eval(`${rowSelector(onlyRow.id)} [data-todo-text]`, (field) => (field as HTMLTextAreaElement).focus());
+  const beforeOnlyDelete = await service.todoGet(owner, sessionId);
+  const afterOnlyDelete = await service.todoUpdate(owner, sessionId, beforeOnlyDelete.version, [{ op: "delete", id: onlyRow.id }]);
+  const [onlyConflict] = await Promise.all([page.waitForResponse((response) => response.url() === todoUrl && response.request().method() === "PUT"), page.$eval(`${rowSelector(onlyRow.id)} [data-todo-op="save"]`, (button) => (button as HTMLButtonElement).click())]);
+  assert.equal(onlyConflict.status(), 409);
+  await page.waitForFunction((version) => Number(document.querySelector<HTMLElement>("#session-todo")?.dataset.version) === version, {}, afterOnlyDelete.version);
+  const headingFocus = await page.evaluate(() => ({ tag: document.activeElement?.tagName, text: document.activeElement?.textContent, rowCount: document.querySelectorAll("#session-todo li[data-todo-id]").length, message: document.querySelector<HTMLElement>("[data-todo-status-message]")?.textContent ?? "" }));
+  assert.equal(headingFocus.tag, "H2"); assert.equal(headingFocus.rowCount, 0); assert.match(headingFocus.message, /見出しへフォーカス/);
+  checks.last_row_focuses_heading = headingFocus;
+
   await originalField.dispose();
   assert.deepEqual(pageErrors, []); assert.deepEqual(consoleErrors, []); assert.deepEqual(interceptionErrors, []);
+  checks.expected_conflict_responses = expectedConflictConsoleMessages.length;
   result.ok = true;
 } catch (error) {
-  errors.push(error instanceof Error ? error.stack ?? error.message : String(error));
+  errors.push(`stage=${currentStage}\n${error instanceof Error ? error.stack ?? error.message : String(error)}`);
   result.ok = false;
 } finally {
   closing = true;

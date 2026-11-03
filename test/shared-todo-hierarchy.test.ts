@@ -160,3 +160,33 @@ test("親を指定しない従来の追加・編集・状態変更・並べ替�
   await h.update([{ op: "move", id: c, order: 999 }, { op: "delete", id: a }]);
   assert.deepEqual((await h.get()).items.map((item) => item.id), [b, c]);
 });
+
+test("MCP move updates its target timestamp and preserves descendants; a no-op move leaves it unchanged", async (t) => {
+  const h = await setup(t);
+  const moving = await h.add("moving");
+  const child = await h.add("child", moving, "in_progress");
+  const session = h.service.sessions.get(h.session)!;
+  const target = session.todo.items.find((item) => item.id === moving)!;
+  const descendant = session.todo.items.find((item) => item.id === child)!;
+  target.updatedAt = "2026-11-01T00:00:00.000Z";
+  descendant.updatedAt = "2026-11-01T00:00:00.000Z";
+  await h.update([{ op: "add", text: "before" }]);
+  const beforeMove = structuredClone(session.todo.items);
+  const moved = await h.update([{ op: "move", id: moving, order: 1 }]);
+  assert.notEqual(session.todo.items.find((item) => item.id === moving)?.updatedAt, "2026-11-01T00:00:00.000Z");
+  assert.equal(session.todo.items.find((item) => item.id === child)?.updatedAt, "2026-11-01T00:00:00.000Z");
+  const childAfter = moved.items.find((item) => item.id === child)!;
+  const childBefore = beforeMove.find((item) => item.id === child)!;
+  assert.deepEqual([childAfter.id, childAfter.text, childAfter.status, childAfter.parent_id, childAfter.order, session.todo.items.find((item) => item.id === child)?.updatedAt], [childBefore.id, childBefore.text, childBefore.status, childBefore.parent_id, childBefore.order, "2026-11-01T00:00:00.000Z"]);
+  const moveStamp = session.todo.items.find((item) => item.id === moving)?.updatedAt;
+  await h.update([{ op: "move", id: moving, order: 1 }]);
+  assert.equal(session.todo.items.find((item) => item.id === moving)?.updatedAt, moveStamp);
+  const current = await h.get();
+  const conflict = await h.update([{ op: "move", id: moving, order: 0 }], current.version - 1);
+  assert.equal(conflict.conflict, true);
+  assert.equal(session.todo.items.find((item) => item.id === moving)?.updatedAt, moveStamp);
+  const beforeRejectedBatch = await h.get();
+  await assert.rejects(h.update([{ op: "move", id: moving, order: 0 }, { op: "delete", id: "missing" }]), /TODO_ITEM_UNAVAILABLE/);
+  assert.deepEqual(await h.get(), beforeRejectedBatch);
+  assert.equal(session.todo.items.find((item) => item.id === moving)?.updatedAt, moveStamp);
+});

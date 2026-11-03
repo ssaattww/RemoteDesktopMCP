@@ -121,8 +121,11 @@ export function applyTodoChanges(input: readonly TodoItem[], changes: readonly T
         }
       } else {
         const siblings = items.filter((sibling) => sibling.parent_id === item.parent_id);
-        siblings.splice(siblings.findIndex((sibling) => sibling.id === item.id), 1);
-        siblings.splice(Math.min(change.order, siblings.length), 0, item);
+        const previousIndex = siblings.findIndex((sibling) => sibling.id === item.id);
+        siblings.splice(previousIndex, 1);
+        const nextIndex = Math.min(change.order, siblings.length);
+        siblings.splice(nextIndex, 0, item);
+        if (previousIndex !== nextIndex) item.updatedAt = context.timestamp;
         siblings.forEach((sibling, order) => { sibling.order = order; });
       }
     }

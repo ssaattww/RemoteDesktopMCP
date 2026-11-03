@@ -183,6 +183,7 @@ function clientBootstrap(): void {
   const rowStates = new WeakMap<HTMLElement, TodoRowState>();
   const boundRows = new WeakSet<HTMLElement>();
   const collapsedTodoIds = new Set<string>();
+  const snapshotRevealedTodoIds = new Set<string>();
   let todoItems: TodoItem[] = [];
   let todoItemById = new Map<string, TodoItem>();
   const addState: TodoAddState = { generation: 0, savedGeneration: 0, baseVersion: todoVersion };
@@ -283,7 +284,7 @@ function clientBootstrap(): void {
   const refreshTodoCollapse = () => {
     for (const row of todoRows()) {
       const id = row.dataset.todoId ?? "";
-      row.hidden = !stateFor(row).deletedDraft && todoAncestors(id).some((ancestor) => collapsedTodoIds.has(ancestor));
+      row.hidden = !stateFor(row).deletedDraft && !snapshotRevealedTodoIds.has(id) && todoAncestors(id).some((ancestor) => collapsedTodoIds.has(ancestor));
       const toggle = row.querySelector<HTMLButtonElement>('[data-todo-op="toggle-children"]');
       if (toggle) { toggle.hidden = Number(row.dataset.todoChildTotal ?? 0) === 0; toggle.textContent = collapsedTodoIds.has(id) ? "子を展開" : "子を折り畳む"; toggle.setAttribute("aria-expanded", String(!collapsedTodoIds.has(id))); }
     }
@@ -369,18 +370,22 @@ function clientBootstrap(): void {
     const latestStatus = row.querySelector<HTMLElement>("[data-todo-latest-status]"); if (latestStatus) latestStatus.textContent = latest ? `状態: ${statusLabel(latest.status)}` : "";
     const latestParent = row.querySelector<HTMLElement>("[data-todo-latest-parent]"); if (latestParent) latestParent.textContent = latest ? latest.parent_id ? `親: ${snapshot.items.find((item) => item.id === latest.parent_id)?.text ?? latest.parent_id}` : "親: 最上位（親なし）" : "";
   };
-  const focusAfterRowRemoval = (row: HTMLElement, previousOrder: HTMLElement[]) => {
+  const focusAfterRowRemoval = (row: HTMLElement, previousOrder: HTMLElement[], eligibleRows?: HTMLElement[]) => {
     const active = document.activeElement as HTMLElement | null;
-    if (!active || !row.contains(active)) return;
+    if (!active || !row.contains(active)) return undefined;
     const index = previousOrder.indexOf(row);
-    const destination = previousOrder.slice(index + 1).find((item) => Boolean(item.parentElement)) ?? previousOrder.slice(0, index).reverse().find((item) => Boolean(item.parentElement));
+    const eligible = new Set(eligibleRows ?? previousOrder.filter((item) => Boolean(item.parentElement) && !item.hidden));
+    const destination = previousOrder.slice(index + 1).find((item) => eligible.has(item)) ?? previousOrder.slice(0, index).reverse().find((item) => eligible.has(item)) ?? eligibleRows?.find((item) => !previousOrder.includes(item));
     const target = destination?.querySelector<HTMLElement>("[data-todo-text]") ?? todoPanel?.querySelector<HTMLElement>("h2");
-    const scrollY = window.scrollY;
-    if (target) target.focus({ preventScroll: true });
-    window.scrollTo(window.scrollX, scrollY);
-    const status = todoPanel?.querySelector<HTMLElement>("[data-todo-status-message]"); if (status) status.textContent = "削除された項目から次の利用可能な項目へ移動しました。";
+    const focus = target ? { target, scrollX: window.scrollX, scrollY: window.scrollY } : undefined;
+    const status = todoPanel?.querySelector<HTMLElement>("[data-todo-status-message]"); if (status) status.textContent = destination ? "削除された項目から表示中の項目へフォーカスを移動しました。" : "削除された項目から見出しへフォーカスを移動しました。";
+    return focus;
   };
-  const removeTodoRow = (row: HTMLElement, priorRows = todoRows()) => { focusAfterRowRemoval(row, priorRows); row.remove(); };
+  const removeTodoRow = (row: HTMLElement, priorRows = todoRows(), eligibleRows?: HTMLElement[], deferFocus = false) => {
+    const focus = focusAfterRowRemoval(row, priorRows, eligibleRows); row.remove();
+    if (focus && !deferFocus) { focus.target.focus({ preventScroll: true }); window.scrollTo(focus.scrollX, focus.scrollY); }
+    return focus;
+  };
   const markDeletedDraft = (row: HTMLElement) => {
     const state = stateFor(row); if (state.deletedDraft) return;
     state.deletedDraft = true; row.dataset.deletedDraft = "true";
@@ -395,6 +400,7 @@ function clientBootstrap(): void {
     const list = todoPanel.querySelector<HTMLElement>("[data-todo-items]");
     const oldRows = todoRows();
     const oldOrder = [...oldRows];
+    const oldHidden = new Map(oldRows.map((row) => [row, row.hidden]));
     const activeElement = document.activeElement as HTMLElement | null;
     const focusedRow = activeElement ? oldRows.find((row) => row.contains(activeElement)) : undefined;
     const activeControl = activeElement as (HTMLInputElement | HTMLTextAreaElement) | null;
@@ -404,10 +410,18 @@ function clientBootstrap(): void {
     const scrollX = window.scrollX; const scrollY = window.scrollY;
     const itemIds = new Set(snapshot.items.map((item) => item.id));
     setTodoItems(snapshot.items);
+    const snapshotIds = new Set(snapshot.items.map((item) => item.id));
+    const snapshotItemById = new Map(snapshot.items.map((item) => [item.id, item]));
+    const visibleSnapshotIds = new Set<string>();
+    for (const item of snapshot.items) {
+      let parentId = item.parent_id ?? null; const seen = new Set<string>(); let visible = true;
+      while (parentId && !seen.has(parentId)) { if (collapsedTodoIds.has(parentId)) { visible = false; break; } seen.add(parentId); parentId = snapshotItemById.get(parentId)?.parent_id ?? null; }
+      if (visible) visibleSnapshotIds.add(item.id);
+    }
     const orderedRows: HTMLElement[] = [];
     for (const item of snapshot.items) {
       let row = oldRows.find((candidate) => candidate.dataset.todoId === item.id);
-      if (!row) { row = makeTodoRow(item); bindTodoRow(row); }
+      if (!row) { row = makeTodoRow(item); bindTodoRow(row); list?.append(row); }
       const state = stateFor(row);
       const localTextDirty = isTextDirty(row, state); const localStatusDirty = isStatusDirty(row, state); const localParentDirty = isParentDirty(row, state);
       if (mutation?.row === row && mutation.operation === "edit") {
@@ -431,14 +445,25 @@ function clientBootstrap(): void {
       }
       orderedRows.push(row);
     }
+    let pendingRemovalFocus: { target: HTMLElement; scrollX: number; scrollY: number } | undefined;
+    for (const row of oldRows) {
+      const id = row.dataset.todoId ?? ""; const state = stateFor(row);
+      const newlyHidden = !oldHidden.get(row) && todoAncestors(id).some((ancestor) => collapsedTodoIds.has(ancestor));
+      if (newlyHidden && (row === focusedRow || state.conflict || isTextDirty(row, state) || isStatusDirty(row, state) || isParentDirty(row, state))) snapshotRevealedTodoIds.add(id);
+    }
+    for (const id of snapshotRevealedTodoIds) if (!snapshotIds.has(id) || !todoAncestors(id).some((ancestor) => collapsedTodoIds.has(ancestor))) snapshotRevealedTodoIds.delete(id);
+    const eligibleSnapshotRows = [...oldRows, ...orderedRows.filter((row) => !oldRows.includes(row))].filter((row) => {
+      const id = row.dataset.todoId ?? ""; const state = stateFor(row);
+      return Boolean(row.parentElement && ((snapshotIds.has(id) && visibleSnapshotIds.has(id)) || state.deletedDraft));
+    });
     for (const row of oldRows) {
       if (itemIds.has(row.dataset.todoId ?? "")) continue;
       const state = stateFor(row);
       const isSubmittedDelete = mutation?.row === row && mutation.operation === "delete";
       const editedAfterSubmit = isSubmittedDelete && (state.textGeneration !== mutation.textGeneration || state.statusGeneration !== mutation.statusGeneration || state.parentGeneration !== mutation.parentGeneration);
-      if (isSubmittedDelete && !editedAfterSubmit) removeTodoRow(row, oldOrder);
+      if (isSubmittedDelete && !editedAfterSubmit) { const focus = removeTodoRow(row, oldOrder, eligibleSnapshotRows, true); pendingRemovalFocus ??= focus; }
       else if (isTextDirty(row, state) || isStatusDirty(row, state) || isParentDirty(row, state) || editedAfterSubmit) markDeletedDraft(row);
-      else removeTodoRow(row, oldOrder);
+      else { const focus = removeTodoRow(row, oldOrder, eligibleSnapshotRows, true); pendingRemovalFocus ??= focus; }
     }
     const deletedRows = todoRows().filter((row) => stateFor(row).deletedDraft && !itemIds.has(row.dataset.todoId ?? ""));
     const desiredRows = [...orderedRows, ...deletedRows];
@@ -452,6 +477,10 @@ function clientBootstrap(): void {
       }
     }
     syncTodoHierarchy();
+    if (pendingRemovalFocus && pendingRemovalFocus.target.parentElement) {
+      pendingRemovalFocus.target.focus({ preventScroll: true });
+      window.scrollTo(pendingRemovalFocus.scrollX, pendingRemovalFocus.scrollY);
+    }
     const activeValueChanged = Boolean(selection && activeControl?.value !== selection.value);
     if (focusedRow && desiredRows.includes(focusedRow) && activeElement && (movedFocusedRow || activeValueChanged || document.activeElement !== activeElement)) {
       if (document.activeElement !== activeElement) activeElement.focus({ preventScroll: true });
@@ -540,7 +569,7 @@ function clientBootstrap(): void {
     const text = textField(row); if (text) { stateFor(row); resizeTodoText(text); text.addEventListener("input", () => { const state = stateFor(row); state.textGeneration += 1; resizeTodoText(text); refreshTodoControls(); }); }
     const stateField = statusField(row); if (stateField) { stateFor(row); stateField.addEventListener("change", () => { const state = stateFor(row); state.statusGeneration += 1; refreshTodoControls(); }); }
     const parent = parentField(row); if (parent) parent.addEventListener("change", () => { stateFor(row).parentGeneration += 1; refreshTodoControls(); });
-    row.querySelector<HTMLButtonElement>('[data-todo-op="toggle-children"]')?.addEventListener("click", () => { const id = row.dataset.todoId ?? ""; if (collapsedTodoIds.has(id)) collapsedTodoIds.delete(id); else collapsedTodoIds.add(id); refreshTodoCollapse(); });
+    row.querySelector<HTMLButtonElement>('[data-todo-op="toggle-children"]')?.addEventListener("click", (event) => { const id = row.dataset.todoId ?? ""; for (const revealedId of snapshotRevealedTodoIds) if (todoAncestors(revealedId).includes(id)) snapshotRevealedTodoIds.delete(revealedId); if (collapsedTodoIds.has(id)) collapsedTodoIds.delete(id); else collapsedTodoIds.add(id); (event?.currentTarget as HTMLButtonElement | null)?.focus({ preventScroll: true }); refreshTodoCollapse(); });
     row.querySelector<HTMLButtonElement>('[data-todo-op="add-child"]')?.addEventListener("click", () => {
       const addParent = todoPanel?.querySelector<HTMLSelectElement>("[data-todo-add-parent]"); const addText = todoPanel?.querySelector<HTMLTextAreaElement>("[data-todo-add-text]"); if (!addParent || !addText) return;
       const id = row.dataset.todoId ?? ""; if (addParent.value !== id) { syncTodoParentOptions(addParent, id); addState.generation += 1; }
@@ -604,7 +633,7 @@ function clientBootstrap(): void {
           applyTodoSnapshot(snapshot);
           if (row) showRowConflict(row, snapshot);
         }
-        const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]"); if (message) message.textContent = "競合しました。入力を保持しています。内容を選択してから再操作してください。";
+        const message = todoPanel.querySelector<HTMLElement>("[data-todo-status-message]"); if (message && (!row || todoRows().includes(row))) message.textContent = "競合しました。入力を保持しています。内容を選択してから再操作してください。";
       } else if (!response.ok) throw new Error("Todo update failed");
       else {
         applyTodoSnapshot(snapshot, context);
