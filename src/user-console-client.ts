@@ -245,7 +245,7 @@ function clientBootstrap(): void {
     const button = (op: string, label: string) => { const element = document.createElement("button"); element.type = "button"; element.dataset.todoOp = op; element.textContent = label; return element; };
     let heading = row.querySelector<HTMLElement>(".todo-hierarchy");
     if (!heading) { heading = document.createElement("div"); heading.className = "todo-hierarchy"; row.insertBefore(heading, row.children[0] ?? null); }
-    if (!row.querySelector('[data-todo-op="toggle-children"]')) heading.append(button("toggle-children", "子を折り畳む"));
+    if (!row.querySelector('[data-todo-op="toggle-children"]')) heading.append(button("toggle-children", "サブTodoを折りたたむ"));
     for (const key of ["todoParentLabel", "todoDepthLabel", "todoChildrenProgress"]) {
       const selector = key === "todoParentLabel" ? "[data-todo-parent-label]" : key === "todoDepthLabel" ? "[data-todo-depth-label]" : "[data-todo-children-progress]";
       if (!row.querySelector(selector)) { const label = document.createElement("span"); label.dataset[key] = "true"; heading.append(label); }
@@ -286,7 +286,14 @@ function clientBootstrap(): void {
       const id = row.dataset.todoId ?? "";
       row.hidden = !stateFor(row).deletedDraft && !snapshotRevealedTodoIds.has(id) && todoAncestors(id).some((ancestor) => collapsedTodoIds.has(ancestor));
       const toggle = row.querySelector<HTMLButtonElement>('[data-todo-op="toggle-children"]');
-      if (toggle) { toggle.hidden = Number(row.dataset.todoChildTotal ?? 0) === 0; toggle.textContent = collapsedTodoIds.has(id) ? "子を展開" : "子を折り畳む"; toggle.setAttribute("aria-expanded", String(!collapsedTodoIds.has(id))); }
+      if (toggle) {
+        const expanded = !collapsedTodoIds.has(id);
+        const label = expanded ? "サブTodoを折りたたむ" : "サブTodoを展開";
+        toggle.hidden = Number(row.dataset.todoChildTotal ?? 0) === 0;
+        toggle.textContent = label;
+        toggle.setAttribute("aria-label", `${label}: ${todoItemById.get(id)?.text ?? stateFor(row).baseText}`);
+        toggle.setAttribute("aria-expanded", String(expanded));
+      }
     }
   };
   // 移動先は一覧全体の位置ではなく、同じ親を持つ兄弟の位置で判定する。
