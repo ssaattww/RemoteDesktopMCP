@@ -2384,6 +2384,46 @@ test("subtask UI reconstructs hierarchy and distinguishes direct completion from
   assert.equal(h.writes.length, 0);
 });
 
+test("subtask UI toggles each parent independently and retains nested collapse and drafts across refresh", async () => {
+  const h = await bootSubtaskUi();
+  h.setReadSnapshot(subtaskUiSnapshot(3, subtaskUiReparentedItems()));
+  await h.refresh();
+  const outer = h.control(h.row("todo-1"), "toggle-children");
+  const inner = h.control(h.row("todo-2"), "toggle-children");
+  const other = h.control(h.row("todo-5"), "toggle-children");
+  const draft = h.row("todo-3").querySelector<FakeElement>("[data-todo-text]")!;
+  draft.value = "未保存の入力"; draft.click("input");
+  assert.equal(outer.textContent, "サブTodoを折りたたむ");
+  assert.equal(outer.ariaLabel, "サブTodoを折りたたむ: 全体作業");
+  assert.equal(h.control(h.row("todo-4"), "toggle-children").hidden, true);
+  inner.click();
+  assert.equal(h.row("todo-3").hidden, true);
+  assert.equal(h.row("todo-4").hidden, false);
+  outer.click();
+  assert.equal(h.row("todo-2").hidden, true);
+  assert.equal(h.row("todo-5").hidden, false);
+  assert.equal(h.row("todo-4").hidden, false, "another parent's children stay visible");
+  other.click();
+  assert.equal(h.row("todo-4").hidden, true);
+  assert.equal(other.textContent, "サブTodoを展開");
+  assert.equal(other.ariaLabel, "サブTodoを展開: 別の作業");
+  const next = subtaskUiReparentedItems();
+  next.find((item) => item.id === "todo-5")!.text = "別の親の新しい名前";
+  h.setReadSnapshot(subtaskUiSnapshot(4, next));
+  await h.refresh();
+  assert.equal(other.ariaLabel, "サブTodoを展開: 別の親の新しい名前");
+  outer.click();
+  assert.equal(h.row("todo-2").hidden, false);
+  assert.equal(h.row("todo-3").hidden, true, "nested parent retains its own collapse");
+  assert.equal(h.row("todo-4").hidden, true, "other root retains its own collapse");
+  inner.click();
+  assert.equal(h.row("todo-3").hidden, false);
+  assert.equal(draft.value, "未保存の入力");
+  other.click();
+  assert.equal(h.row("todo-4").hidden, false);
+  assert.equal(h.writes.length, 0);
+});
+
 test("subtask UI collapse preserves all rows and survives later snapshots without a mutation", async () => {
   const h = await bootSubtaskUi();
   const originalRows = [...h.fixture.list.children];
