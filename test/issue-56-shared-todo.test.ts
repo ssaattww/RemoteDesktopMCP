@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -902,5 +902,65 @@ test("Todo forms enforce CSRF and ownership while handling add, conflict, and en
     assert.equal(h.service.sessions.get(h.sessionId)?.todo.enabled, false);
     const notOwned = await fetch(`${h.baseUrl}/user/sessions/not-owned-session-00001/todo`, { method: "POST", headers, body: form({ expected_version: "0", op: "add", text: "x" }), redirect: "manual" });
     assert.equal(notOwned.status, 404);
+  } finally { await h.close(); }
+});
+
+
+test("subtask HTTP accepts parent changes and rejects deletion atomically", async () => {
+  const h = await consoleHarness();
+  try {
+    const endpoint = `${h.baseUrl}/api/sessions/${encodeURIComponent(h.sessionId)}/todo`;
+    const detail = await fetch(`${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`, { headers: { cookie: h.cookie } });
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await detail.text())?.[1]; assert.ok(csrf);
+    const update = (version: number, changes: unknown[]) => fetch(endpoint, { method: "PUT", headers: { cookie: h.cookie, origin: "http://127.0.0.1", "x-csrf-token": csrf, "content-type": "application/json" }, body: JSON.stringify({ expected_version: version, changes }) });
+    const initial = await update(0, [{ op: "add", text: "親" }, { op: "add", text: "別の親" }]);
+    assert.equal(initial.status, 200);
+    const first = await initial.json() as { version: number; items: Array<{ id: string }> };
+    const [parent, other] = first.items;
+    const added = await update(first.version, [{ op: "add", text: "子", parent_id: parent!.id }]);
+    assert.equal(added.status, 200);
+    const tree = await added.json() as { version: number; items: Array<{ id: string; text: string; parent_id: string | null; child_total: number }> };
+    const child = tree.items.find((item) => item.text === "子")!;
+    assert.equal(child.parent_id, parent!.id);
+    assert.equal(tree.items.find((item) => item.id === parent!.id)?.child_total, 1);
+    const rejected = await update(tree.version, [{ op: "edit", id: child.id, text: "保存されない" }, { op: "delete", id: parent!.id }]);
+    assert.equal(rejected.status, 400);
+    const reason = await rejected.json() as { error: string; message: string; applied: boolean };
+    assert.equal(reason.error, "TODO_HAS_CHILDREN");
+    assert.equal(reason.applied, false);
+    assert.match(reason.message, /子/);
+    const unchanged = await fetch(endpoint, { headers: { cookie: h.cookie } });
+    assert.deepEqual(await unchanged.json(), tree);
+    const moved = await update(tree.version, [{ op: "reparent", id: child.id, parent_id: other!.id }]);
+    assert.equal(moved.status, 200);
+    const movedTree = await moved.json() as typeof tree;
+    assert.equal(movedTree.items.find((item) => item.id === child.id)?.parent_id, other!.id);
+    const conflict = await update(tree.version, [{ op: "reparent", id: child.id, parent_id: null }]);
+    assert.equal(conflict.status, 409);
+    const latest = await conflict.json() as typeof tree;
+    assert.deepEqual(latest.items, movedTree.items);
+  } finally { await h.close(); }
+});
+
+test("subtask SSR renders the same parent-first hierarchy before client refresh", async () => {
+  const h = await consoleHarness();
+  try {
+    const stamp = new Date().toISOString();
+    const make = (id: string, text: string, parent_id: string | null, order: number, status = "not_started") => ({ id, text, parent_id, order, status, createdBy: "owner@example.test", createdAt: stamp, updatedAt: stamp });
+    h.service.sessions.get(h.sessionId)!.todo.items = [make("parent-a", "親<script>alert(1)</script>", null, 0), make("parent-b", "別の親", null, 1), make("child-a", "子", "parent-a", 0, "completed"), make("grandchild-a", "孫", "child-a", 0)] as never;
+    const detail = await fetch(`${h.baseUrl}/user/sessions/${encodeURIComponent(h.sessionId)}`, { headers: { cookie: h.cookie } });
+    assert.equal(detail.status, 200);
+    const html = await detail.text();
+    const rows = [...html.matchAll(/<li\b[^>]*data-todo-id="([^"]+)"[^>]*>/g)];
+    assert.deepEqual(rows.map((match) => match[1]), ["parent-a", "child-a", "grandchild-a", "parent-b"]);
+    assert.match(rows[0]![0], /data-todo-parent-id=""/);
+    assert.match(rows[1]![0], /data-todo-parent-id="parent-a"/);
+    assert.match(rows[2]![0], /data-todo-depth="3"/);
+    assert.match(html, /data-todo-children-progress/);
+    assert.match(html, /data-todo-parent-label/);
+    assert.match(html, /data-todo-add-parent/);
+    for (const operation of ["toggle-children", "add-child", "reparent", "detach", "move-up", "move-down"]) assert.ok(html.includes(`data-todo-op="${operation}"`));
+    assert.ok(html.includes("親&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert.ok(!html.includes("親<script>alert(1)</script>"));
   } finally { await h.close(); }
 });

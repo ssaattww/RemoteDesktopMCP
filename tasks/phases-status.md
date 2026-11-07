@@ -1,4 +1,4 @@
-# Phase 一覧
+﻿# Phase 一覧
 
 更新規則: このファイルは `task-breakdown-planner`、`task-consistency-manager`、`progress-sync-manager` を通してのみ更新する。
 
@@ -17,3 +17,15 @@
 現在の位置: Issue #24のR24-08はPR #69のexact-head CI成功後、親最終レビュー/merge判断待ち。独立作業のT12はR70-N01〜N17およびR70-F01/F02（N16と重複）の修正とローカル検証を完了後、同一通常reviewerの再確認待ち。実createApp fixtureのHTTP/SSRは確認したが、携帯幅の正規ブラウザ実画面確認は親へ依頼する。PR #69の成果は再実装せず、T12固有差分のみ作成した。
 最小動作版の独立判定と提出証拠は `reports/2026-09-25-independent-review.md` と PR #1 を参照する。
 公開用の通常指摘は `reports/2026-09-25-remote-normal-review.md` で追跡し、ChatGPT の実操作と公開用の独立レビューは未完了。複数PCの F02 は後続であり、単一 PC 接続の完了条件には含めない。
+
+## 共有作業一覧の親子構成
+
+| Phase | 内容 | 対象 | 完了条件 | 状態 |
+| --- | --- | --- | --- | --- |
+| TODO-HIER | 同一セッションの作業を親子で管理する | TODO-HIER-01〜04 | 承認仕様に沿う設計更新、テスト駆動の実装、回帰検証、PR と報告を揃え、第三者の確認を始める前で停止する | 設計先行とテスト駆動の実装、関連120件・実ブラウザー・実装 HEAD の CI 成功。Draft PR #90と報告を作成。実機全体の失敗を記録し、レビュー前で停止 |
+
+## Issue #85 review continuation (2026-11-04)
+
+| Phase | 内容 | 対象 | 完了条件 | 状態 |
+| --- | --- | --- | --- | --- |
+| TODO-HIER-REVIEW | 共有Todo親子構成のレビュー継続 | TODO-HIER-05 | 通常レビュー、指摘対応と検証、独立レビューの証拠を揃える。マージ・配置は対象外 | 同一通常reviewerの2回目はpass_with_held、全3件closed。関連123件と実HTTP/Edgeを記録。最終候補全体ゲート・独立終端と公開CIの結果は最終報告とPRコメントを参照 |
