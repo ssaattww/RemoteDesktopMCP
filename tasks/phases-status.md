@@ -40,6 +40,6 @@
 
 | Phase | 内容 | 対象 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- |
-| GHP | Issue #94 / Draft PR #95、GitHub Projects の専用読み書きと PC 操作を公開しない境界 | GHP-01〜GHP-05 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | 設計案は本人確認済み。第1段 PR #96 で固定 GraphQL クライアントを実装中。専用 MCP 入口・認証・保管・本番操作は未完了 |
+| GHP | Issue #94 / Draft PR #95、GitHub Projects の専用読み書きと PC 操作を公開しない境界 | GHP-01〜GHP-05 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | 第1段で専用 HTTP/MCP 経路、分離 audience/scope、Project metadata 操作を実装中。保護資格情報 provider、Project item/field/view、review は未完了 |
 
-GHP の設計確認は完了。第1段で固定 GraphQL API クライアントと契約試験を追加中。MCP 接続口と分離認証、Project 項目・field・view 操作、監査統合、実運用の資格情報検証は未完了。
+GHP の設計確認は完了。専用入口は scope 別 OAuth と Projects 用 MCP registry を持ち、PC MCP registry を経由しない。Project metadata API 操作を実装し、保護資格情報 provider と項目・欄・view 操作は未完了。

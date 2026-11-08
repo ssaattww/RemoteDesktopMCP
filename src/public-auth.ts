@@ -23,13 +23,15 @@ const MAX_RECENT_REFRESHES = 32;
 const MAX_ACTIVE_FAMILIES = 32;
 
 export type GoogleIdentity = { iss: string; sub: string; email?: string };
+export type OAuthResourceScope = "mcp" | "github-projects:read" | "github-projects:write" | "github-projects:read github-projects:write";
+export type GitHubProjectsScope = Exclude<OAuthResourceScope, "mcp">;
 export type OidcAuthorizationInput = { redirectUri: string; state: string; nonce: string };
 export type OidcExchangeInput = OidcAuthorizationInput & { code: string };
 export interface OidcVerifier {
   authorizationUrl(input: OidcAuthorizationInput): string;
   exchangeCode(input: OidcExchangeInput): Promise<GoogleIdentity>;
 }
-export type RefreshRecord = { hash: string; family: string; subject: GoogleIdentity; clientId: string; resource: string; scope: "mcp"; expires: number; epoch: number; id?: string; issuedAt?: number; recent?: Array<{ hash: string; until: number }>; used?: boolean };
+export type RefreshRecord = { hash: string; family: string; subject: GoogleIdentity; clientId: string; resource: string; scope: OAuthResourceScope; expires: number; epoch: number; id?: string; issuedAt?: number; recent?: Array<{ hash: string; until: number }>; used?: boolean };
 export type OAuthState = {
   version: 1;
   epoch: number;
@@ -43,7 +45,7 @@ export type PublicAuthOptions = { store?: OAuthStateStore; verifier?: OidcVerifi
 type TokenInput = { grantType: string; code?: string; verifier?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string };
 export type TokenRejectionReason = "authorization_code_invalid" | "refresh_request_invalid" | "refresh_grant_invalid" | "refresh_replay";
 type TokenRejectionObserver = (reason: TokenRejectionReason) => Promise<void>;
-type Transaction = { id: string; googleState: string; nonce: string; clientId: string; redirectUri: string; resource: string; state?: string; challenge: string; expires: number; subject?: GoogleIdentity; googleCallbackStarted?: boolean };
+type Transaction = { id: string; googleState: string; nonce: string; clientId: string; redirectUri: string; resource: string; scope: OAuthResourceScope; state?: string; challenge: string; expires: number; subject?: GoogleIdentity; googleCallbackStarted?: boolean };
 type Code = Omit<Transaction, "id" | "googleState" | "nonce"> & { subject: GoogleIdentity; epoch: number };
 
 const id = () => randomBytes(32).toString("base64url");
@@ -51,6 +53,11 @@ const same = (a: string, b: string) => { const left = Buffer.from(a); const righ
 const digest = (value: string) => createHash("sha256").update(value).digest("base64url");
 const freshState = (): OAuthState => ({ version: 1, epoch: 1, allowedSubjects: [], refreshes: [], families: {} });
 const isState = (value: unknown): value is OAuthState => typeof value === "object" && value !== null && (value as { version?: unknown }).version === 1 && typeof (value as { epoch?: unknown }).epoch === "number" && Array.isArray((value as { allowedSubjects?: unknown }).allowedSubjects) && Array.isArray((value as { refreshes?: unknown }).refreshes) && typeof (value as { families?: unknown }).families === "object";
+const projectResource = (baseUrl: string) => `${baseUrl}/github-projects/mcp`;
+const resourceForScope = (baseUrl: string, scope: OAuthResourceScope) => scope === "mcp" ? `${baseUrl}/mcp` : projectResource(baseUrl);
+const isProjectScope = (scope: unknown): scope is GitHubProjectsScope => scope === "github-projects:read" || scope === "github-projects:write" || scope === "github-projects:read github-projects:write";
+const isProjectResourceScope = (scope: unknown, resource: string, baseUrl: string) => resource === projectResource(baseUrl) && isProjectScope(scope);
+const projectScopeList = (scope: GitHubProjectsScope): GitHubProjectsScope[] => scope.split(" ") as GitHubProjectsScope[];
 
 export function createFileOAuthStateStore(dataDir: string): OAuthStateStore {
   const file = path.join(dataDir, "oauth-state.json");
@@ -166,11 +173,17 @@ export class PublicAuthService {
     if (!token || token.type !== "access" || token.iss !== this.cfg.baseUrl || token.aud !== `${this.cfg.baseUrl}/mcp` || token.client_id !== CHATGPT_CLIENT_ID || token.scope !== "mcp" || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.epoch !== "number" || typeof token.family !== "string" || typeof token.iat !== "number" || typeof token.nbf !== "number" || typeof token.exp !== "number") return undefined;
     return digest(raw);
   }
+  githubProjectsAdmissionKey(header?: string): string | undefined {
+    if (!header?.startsWith("Bearer ")) return undefined;
+    const raw = header.slice(7); const token = this.verify(raw);
+    if (!token || token.type !== "access" || token.iss !== this.cfg.baseUrl || token.aud !== projectResource(this.cfg.baseUrl) || token.client_id !== CHATGPT_CLIENT_ID || !isProjectScope(token.scope) || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.epoch !== "number" || typeof token.family !== "string" || typeof token.iat !== "number" || typeof token.nbf !== "number" || typeof token.exp !== "number") return undefined;
+    return digest(raw);
+  }
   /** Classifies a credential that this process minted without reading grant
    * state. The token endpoint still validates every binding and persistent
    * authorization condition before issuing a response. */
   tokenAdmissionKey(input: { grantType: string; code?: string; clientId: string; redirectUri?: string; resource?: string; refreshToken?: string }): string | undefined {
-    if (input.clientId !== CHATGPT_CLIENT_ID || input.resource !== `${this.cfg.baseUrl}/mcp`) return undefined;
+    if (input.clientId !== CHATGPT_CLIENT_ID || (input.resource !== `${this.cfg.baseUrl}/mcp` && input.resource !== projectResource(this.cfg.baseUrl))) return undefined;
     if (input.grantType === "authorization_code") {
       const code = input.code ?? ""; const authorization = this.codes.get(code);
       if (!authorization || authorization.expires <= this.now() || authorization.clientId !== input.clientId || authorization.redirectUri !== input.redirectUri || authorization.resource !== input.resource) return undefined;
@@ -178,7 +191,7 @@ export class PublicAuthService {
     }
     if (input.grantType !== "refresh_token" || !input.refreshToken) return undefined;
     const token = this.verify(input.refreshToken);
-    if (!token || token.type !== "refresh" || token.iss !== this.cfg.baseUrl || token.aud !== input.resource || token.client_id !== input.clientId || token.scope !== "mcp" || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.epoch !== "number" || typeof token.family !== "string" || typeof token.exp !== "number" || token.exp <= Math.floor(this.now() / 1000)) return undefined;
+    if (!token || token.type !== "refresh" || token.iss !== this.cfg.baseUrl || token.aud !== input.resource || token.client_id !== input.clientId || (input.resource === `${this.cfg.baseUrl}/mcp` ? token.scope !== "mcp" : !isProjectScope(token.scope)) || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.epoch !== "number" || typeof token.family !== "string" || typeof token.exp !== "number" || token.exp <= Math.floor(this.now() / 1000)) return undefined;
     return `refresh:${digest(input.refreshToken)}`;
   }
   /** Classifies only an existing, cookie-bound Google transaction without
@@ -195,13 +208,15 @@ export class PublicAuthService {
     if (!transaction || transaction.expires <= this.now() || !transaction.subject || !this.validCookie(input.cookie, transaction.id)) return undefined;
     return digest(transaction.id);
   }
-  async begin(input: { clientId: string; redirectUri: string; resource: string; state?: string; challenge: string }): Promise<{ redirect: string; cookie: string }> {
+  async begin(input: { clientId: string; redirectUri: string; resource: string; scope?: OAuthResourceScope; state?: string; challenge: string }): Promise<{ redirect: string; cookie: string }> {
     if (this.clientMetadataExpires <= this.now()) await this.verifyChatGptClientMetadata();
-    this.clean(); const transaction: Transaction = { id: this.makeId(), googleState: this.makeId(), nonce: this.makeId(), ...input, expires: this.now() + TRANSACTION_TTL }; this.transactions.set(transaction.id, transaction);
+    const scope = input.scope ?? "mcp";
+    if (input.resource !== resourceForScope(this.cfg.baseUrl, scope)) throw new Error("The OAuth scope and resource do not match.");
+    this.clean(); const transaction: Transaction = { id: this.makeId(), googleState: this.makeId(), nonce: this.makeId(), ...input, scope, expires: this.now() + TRANSACTION_TTL }; this.transactions.set(transaction.id, transaction);
     return { redirect: this.verifier.authorizationUrl({ redirectUri: this.cfg.googleRedirectUri, state: transaction.googleState, nonce: transaction.nonce }), cookie: this.cookie(transaction.id) };
   }
   private redirectFor(transaction: Transaction, values: Record<string, string>) { const redirect = new URL(transaction.redirectUri); for (const [key, value] of Object.entries(values)) redirect.searchParams.set(key, value); if (transaction.state) redirect.searchParams.set("state", transaction.state); redirect.searchParams.set("iss", this.cfg.baseUrl); return redirect.toString(); }
-  async googleCallback(input: { state: string; code?: string; error?: string; cookie?: string }): Promise<{ redirect?: string; transaction?: string; error?: string }> {
+  async googleCallback(input: { state: string; code?: string; error?: string; cookie?: string }): Promise<{ redirect?: string; transaction?: string; scope?: OAuthResourceScope; error?: string }> {
     this.clean(); const transaction = [...this.transactions.values()].find((item) => item.googleState === input.state); if (!transaction || !this.validCookie(input.cookie, transaction.id)) return { error: "The sign-in session was invalid." };
     if (transaction.subject || transaction.googleCallbackStarted) return { error: "The sign-in session was already used." };
     if (input.error || !input.code) { this.transactions.delete(transaction.id); return { redirect: this.redirectFor(transaction, { error: "access_denied" }) }; }
@@ -209,7 +224,7 @@ export class PublicAuthService {
     try { transaction.subject = await this.verifier.exchangeCode({ code: input.code, redirectUri: this.cfg.googleRedirectUri, state: transaction.googleState, nonce: transaction.nonce }); }
     catch { this.transactions.delete(transaction.id); return { redirect: this.redirectFor(transaction, { error: "access_denied" }) }; }
     if (!this.allowed(transaction.subject)) { this.transactions.delete(transaction.id); return { redirect: this.redirectFor(transaction, { error: "access_denied" }) }; }
-    return { transaction: transaction.id };
+    return { transaction: transaction.id, scope: transaction.scope };
   }
   async consent(input: { transaction: string; cookie?: string; allow: boolean }): Promise<{ redirect?: string; error?: string }> { return this.serialized(async () => {
     await this.reload(); const transaction = this.transactions.get(input.transaction); this.transactions.delete(input.transaction);
@@ -235,7 +250,7 @@ export class PublicAuthService {
     const access = this.sign({ type: "access", iss: this.cfg.baseUrl, sub: record.subject.sub, google_iss: record.subject.iss, aud: record.resource, client_id: record.clientId, scope: record.scope, epoch: record.epoch, family: record.family, iat: now, nbf: now, exp: now + ACCESS_TTL });
     return { access_token: access, refresh_token: this.refreshToken(record), token_type: "Bearer", expires_in: ACCESS_TTL, scope: record.scope };
   }
-  private async issue(subject: GoogleIdentity, clientId: string, resource: string, scope: "mcp", family = this.makeId(), prior?: RefreshRecord) {
+  private async issue(subject: GoogleIdentity, clientId: string, resource: string, scope: OAuthResourceScope, family = this.makeId(), prior?: RefreshRecord) {
     const state = this.current(); this.clean();
     if (!state.families[family] && Object.keys(state.families).length >= MAX_ACTIVE_FAMILIES) throw new Error("Too many active refresh-token families.");
     const now = this.now(); const expires = now + REFRESH_TTL; state.families[family] = { active: true, epoch: state.epoch, expires };
@@ -259,12 +274,13 @@ export class PublicAuthService {
       const code = input.code ?? ""; const authorization = this.codes.get(code); this.codes.delete(code);
       const verifier = input.verifier ?? "";
       if (!authorization || authorization.expires <= this.now() || authorization.epoch !== this.current().epoch || !this.allowed(authorization.subject) || authorization.clientId !== input.clientId || authorization.redirectUri !== input.redirectUri || authorization.resource !== input.resource || !/^[A-Za-z0-9\-._~]{43,128}$/.test(verifier) || !same(digest(verifier), authorization.challenge)) return reject("authorization_code_invalid");
-      return this.issue(authorization.subject, authorization.clientId, authorization.resource, "mcp");
+      return this.issue(authorization.subject, authorization.clientId, authorization.resource, authorization.scope);
     }
-    if (input.grantType !== "refresh_token" || !input.refreshToken || input.resource !== `${this.cfg.baseUrl}/mcp`) return reject("refresh_request_invalid");
+    if (input.grantType !== "refresh_token" || !input.refreshToken || (input.resource !== `${this.cfg.baseUrl}/mcp` && input.resource !== projectResource(this.cfg.baseUrl))) return reject("refresh_request_invalid");
     const state = this.current(); const presented = this.verify(input.refreshToken!); const family = typeof presented?.family === "string" ? presented.family : undefined; const item = family ? state.refreshes.find((token) => token.family === family) : undefined;
-    const validClaims = presented?.type === "refresh" && presented.iss === this.cfg.baseUrl && presented.aud === input.resource && presented.client_id === input.clientId && presented.scope === "mcp" && typeof presented.sub === "string" && typeof presented.google_iss === "string" && typeof presented.epoch === "number" && typeof presented.exp === "number" && presented.exp > Math.floor(this.now() / 1000);
-    if (!item || !family || !validClaims || item.clientId !== input.clientId || item.resource !== input.resource || item.expires <= this.now() || item.epoch !== state.epoch || !this.allowed(item.subject) || state.families[family]?.active !== true || state.families[family]?.epoch !== state.epoch) return reject("refresh_grant_invalid");
+    const resourceScopeMatches = input.resource === `${this.cfg.baseUrl}/mcp` ? presented?.scope === "mcp" : isProjectScope(presented?.scope);
+    const validClaims = presented?.type === "refresh" && presented.iss === this.cfg.baseUrl && presented.aud === input.resource && presented.client_id === input.clientId && resourceScopeMatches && typeof presented.sub === "string" && typeof presented.google_iss === "string" && typeof presented.epoch === "number" && typeof presented.exp === "number" && presented.exp > Math.floor(this.now() / 1000);
+    if (!item || !family || !validClaims || item.clientId !== input.clientId || item.resource !== input.resource || item.scope !== presented?.scope || item.expires <= this.now() || item.epoch !== state.epoch || !this.allowed(item.subject) || state.families[family]?.active !== true || state.families[family]?.epoch !== state.epoch) return reject("refresh_grant_invalid");
     const presentedHash = digest(input.refreshToken!);
     if (!same(item.hash, presentedHash)) {
       if (item.id && item.issuedAt !== undefined && item.recent?.some((recent) => recent.until > this.now() && same(recent.hash, presentedHash))) {
@@ -275,11 +291,19 @@ export class PublicAuthService {
     }
     return this.issue(item.subject, item.clientId, item.resource, item.scope, family, item);
   }
-  async authenticate(header?: string): Promise<string | undefined> { return this.serialized(async () => this.authenticateUnlocked(header)); }
-  private async authenticateUnlocked(header?: string): Promise<string | undefined> {
+  async authenticate(header?: string): Promise<string | undefined> { return this.serialized(async () => {
+    const token = await this.authenticateClaims(header, `${this.cfg.baseUrl}/mcp`, "mcp");
+    return token ? `google:${token.google_iss}:${token.sub}` : undefined;
+  }); }
+  async authenticateGitHubProjects(header?: string): Promise<{ principal: string; scopes: GitHubProjectsScope[] } | undefined> { return this.serialized(async () => {
+    const token = await this.authenticateClaims(header, projectResource(this.cfg.baseUrl));
+    if (!token || !isProjectScope(token.scope)) return undefined;
+    return { principal: `google:${token.google_iss}:${token.sub}`, scopes: projectScopeList(token.scope) };
+  }); }
+  private async authenticateClaims(header: string | undefined, resource: string, expectedScope?: "mcp") {
     await this.reload(); if (!header?.startsWith("Bearer ")) return undefined; const token = this.verify(header.slice(7)); const state = this.current();
     const now = Math.floor(this.now() / 1000);
-    if (!token || token.type !== "access" || token.iss !== this.cfg.baseUrl || token.aud !== `${this.cfg.baseUrl}/mcp` || token.client_id !== CHATGPT_CLIENT_ID || token.scope !== "mcp" || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.exp !== "number" || typeof token.iat !== "number" || typeof token.nbf !== "number" || typeof token.epoch !== "number" || typeof token.family !== "string" || token.iat > now + 10 || token.nbf > now + 10 || token.exp <= now || token.exp - token.iat > ACCESS_TTL || token.epoch !== state.epoch || state.families[token.family]?.active !== true || state.families[token.family]?.epoch !== state.epoch || !this.allowed({ iss: token.google_iss, sub: token.sub })) return undefined;
-    return `google:${token.google_iss}:${token.sub}`;
+    if (!token || token.type !== "access" || token.iss !== this.cfg.baseUrl || token.aud !== resource || token.client_id !== CHATGPT_CLIENT_ID || (expectedScope ? token.scope !== expectedScope : !isProjectResourceScope(token.scope, resource, this.cfg.baseUrl)) || typeof token.sub !== "string" || typeof token.google_iss !== "string" || typeof token.exp !== "number" || typeof token.iat !== "number" || typeof token.nbf !== "number" || typeof token.epoch !== "number" || typeof token.family !== "string" || token.iat > now + 10 || token.nbf > now + 10 || token.exp <= now || token.exp - token.iat > ACCESS_TTL || token.epoch !== state.epoch || state.families[token.family]?.active !== true || state.families[token.family]?.epoch !== state.epoch || !this.allowed({ iss: token.google_iss, sub: token.sub })) return undefined;
+    return token;
   }
 }
