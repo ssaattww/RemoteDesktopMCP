@@ -70,3 +70,11 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 - [GraphQL Projects schema](https://docs.github.com/en/graphql/reference/projects)
 - [REST Projects](https://docs.github.com/en/rest/projects/projects)
 - [REST Project views](https://docs.github.com/en/rest/projects/views)
+
+## 追加確定事項（最新要件）
+
+- Project の削除、公開／非公開の切替、メンバーの追加・削除、アクセス権の変更は人間のみが行い、RDMCP の公開ツールに含めない。
+- 上記操作をツール一覧の素直さだけに依存させず、サーバー側の許可操作を限定する。広い GitHub 権限が必要になる場合も、任意 GitHub API／コマンドをツールとして公開しない。
+- 前述「ユーザーと決める事項」3の削除・公開設定・アクセス管理は未決定ではなく、上記のとおり除外と確定した。通常メタデータの編集、作成・複製、close/reopen は未決定。
+- トークン権限の粒度や細分化を調査する作業はユーザー指示で保留した。したがって、ログイン／認証方式の実現可能性は一般の Projects API 操作があることまでを文書で確認した状態であり、このリポジトリのログイン環境・対象個人 Project #4 に対する書込みは未検証。credential の作成・設定・権限変更は行っていない。
+- 先の API 機能調査は一般的な読取調査に限られ、新たなトークン権限粒度の調査は実施しない。これを実証済みのログインとは扱わない。
