@@ -1,4 +1,6 @@
 ﻿import { createSessionTimeFormatter } from "./session-time.js";
+import { formatTodoHistory } from "./todo-history.js";
+import { initializeTodoHistory } from "./user-console-todo-history.js";
 
 const formatSessionTime = createSessionTimeFormatter();
 
@@ -29,6 +31,7 @@ export function slideLogWindow(current: ConsoleLogItem[], incoming: ConsoleLogIt
 }
 
 function clientBootstrap(): void {
+  initializeTodoHistory(formatTodoHistory);
   type SessionState = { session_id: string; working_directory?: string; purpose?: string; external_url?: string | null; external_title?: string | null; external_title_source?: string | null; external_title_status?: string; version?: number; created_at: string; last_used_at?: string; state: string; active: boolean };
   const renderExternalLink = (cell: HTMLElement, session: { external_url?: string | null; external_title?: string | null; external_title_source?: string | null; external_title_status?: string }) => {
     cell.replaceChildren();
@@ -1726,4 +1729,4 @@ function clientBootstrap(): void {
 
 // tsx/esbuild decorates function expressions with __name during tests. Define
 // the harmless helper in the emitted browser program as well as in tsc output.
-export const userConsoleClientScript = `const __name=(value)=>value;const formatSessionTime=(${createSessionTimeFormatter.toString()})();(${clientBootstrap.toString()})();`;
+export const userConsoleClientScript = `const __name=(value)=>value;const formatSessionTime=(${createSessionTimeFormatter.toString()})();const formatTodoHistory=(${formatTodoHistory.toString()});const initializeTodoHistory=(${initializeTodoHistory.toString()});(${clientBootstrap.toString()})();`;
