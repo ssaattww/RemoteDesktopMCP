@@ -29,6 +29,7 @@ export class GitHubProjectsApiError extends Error {
   constructor(
     readonly code: "credential_unavailable" | "credential_rejected" | "forbidden" | "rate_limited" | "api_error" | "invalid_response" | "identity_mismatch" | "request_failed",
     readonly applied: false | "unknown" = false,
+    readonly recoveryNotice = false,
   ) {
     super("The GitHub Projects operation could not be completed.");
     this.name = "GitHubProjectsApiError";
@@ -123,13 +124,13 @@ const SET_PROJECT_ITEM_FIELD = `mutation RdmcpSetProjectItemField($projectId: ID
 export class GitHubProjectsApi {
   private readonly request: typeof fetch;
   private readonly isCredentialRejected?: (principal: string, token: string) => boolean;
-  private readonly onCredentialRejected?: (principal: string, token: string) => void;
+  private readonly onCredentialRejected?: (principal: string, token: string) => boolean;
 
   constructor(
     private readonly principal: string,
     private readonly expectedLogin: string,
     private readonly credentials: GitHubProjectsCredentialProvider,
-    options: { request?: typeof fetch; isCredentialRejected?: (principal: string, token: string) => boolean; onCredentialRejected?: (principal: string, token: string) => void } = {},
+    options: { request?: typeof fetch; isCredentialRejected?: (principal: string, token: string) => boolean; onCredentialRejected?: (principal: string, token: string) => boolean } = {},
   ) {
     if (!principal || !expectedLogin || expectedLogin.trim() !== expectedLogin) throw new Error("A configured principal and GitHub login are required.");
     this.request = options.request ?? fetch;
@@ -161,7 +162,9 @@ export class GitHubProjectsApi {
     if (!ownerId) throw new GitHubProjectsApiError("invalid_response");
     const created = await this.#graphql<{ createProjectV2?: { projectV2?: unknown } }>("RdmcpCreateProject", CREATE_PROJECT, { ownerId, title: cleanTitle }, { token, mutation: true });
     if (!created.createProjectV2?.projectV2) throw new GitHubProjectsApiError("invalid_response", "unknown");
-    const projectId = parseProject(created.createProjectV2.projectV2).id;
+    const projectValue = created.createProjectV2.projectV2;
+    const projectId = typeof projectValue === "object" && projectValue !== null && typeof (projectValue as { id?: unknown }).id === "string" ? (projectValue as { id: string }).id : undefined;
+    if (!projectId) throw new GitHubProjectsApiError("invalid_response", "unknown");
     const project = await this.#verifyProject(projectId, { title: cleanTitle }, token);
     return { project, outcome: { applied: true } };
   }
@@ -296,7 +299,7 @@ export class GitHubProjectsApi {
     } catch {
       throw new GitHubProjectsApiError("request_failed", mutation ? "unknown" : false);
     }
-    if (response.status === 401) { this.onCredentialRejected?.(this.principal, token); throw new GitHubProjectsApiError("credential_rejected", mutation ? "unknown" : false); }
+    if (response.status === 401) { const recoveryNotice = this.onCredentialRejected?.(this.principal, token) ?? true; throw new GitHubProjectsApiError("credential_rejected", mutation ? "unknown" : false, recoveryNotice); }
     if (response.status === 403) throw new GitHubProjectsApiError(isRateLimitedResponse(response) ? "rate_limited" : "forbidden", mutation ? "unknown" : false);
     if (response.status === 429) throw new GitHubProjectsApiError("rate_limited", mutation ? "unknown" : false);
     if (!response.ok) throw new GitHubProjectsApiError("api_error", mutation ? "unknown" : false);

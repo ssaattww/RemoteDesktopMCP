@@ -53,13 +53,24 @@ test("mutation transport loss is reported as unknown and is not retried", async 
   assert.equal(requestCount, 2);
 });
 
+test("an incomplete project-creation response remains unknown", async () => {
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
+    request: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { operationName: string };
+      if (body.operationName === "RdmcpViewerId") return response({ data: { viewer: { id: "U_1", login: "example" } } });
+      return response({ data: { createProjectV2: { projectV2: { title: "New" } } } });
+    },
+  });
+  await assert.rejects(api.createProject("New"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "invalid_response" && error.applied === "unknown");
+});
+
 test("a rejected credential blocks later requests until the credential changes", async () => {
   let rejected = "";
   let requestCount = 0;
   const credentials = credentialProvider();
   const options = {
     isCredentialRejected: (_principal: string, candidate: string) => candidate === rejected,
-    onCredentialRejected: (_principal: string, candidate: string) => { rejected = candidate; },
+    onCredentialRejected: (_principal: string, candidate: string) => { const first = candidate !== rejected; rejected = candidate; return first; },
     request: async (_input: string | URL | Request, init?: RequestInit) => {
       requestCount += 1;
       const body = JSON.parse(String(init?.body)) as { operationName: string };
@@ -68,9 +79,9 @@ test("a rejected credential blocks later requests until the credential changes",
     },
   };
   const first = new GitHubProjectsApi("principal", "example", credentials, options);
-  await assert.rejects(first.createProject("New"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "credential_rejected" && error.applied === "unknown");
+  await assert.rejects(first.createProject("New"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "credential_rejected" && error.applied === "unknown" && error.recoveryNotice);
   const laterRequest = new GitHubProjectsApi("principal", "example", credentials, options);
-  await assert.rejects(laterRequest.createProject("Another"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "credential_rejected" && error.applied === false);
+  await assert.rejects(laterRequest.createProject("Another"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "credential_rejected" && error.applied === false && !error.recoveryNotice);
   assert.equal(requestCount, 2, "the same rejected PAT is not sent again");
 });
 

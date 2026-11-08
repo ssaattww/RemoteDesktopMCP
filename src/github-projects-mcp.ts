@@ -32,7 +32,7 @@ export function createGitHubProjectsServer(input: {
         return { content: [{ type: "text", text: JSON.stringify(projects) }] };
       } catch (error) {
         await auditFailure(input.audit, input.principal, "projects_list", error);
-        return { isError: true, content: [{ type: "text", text: "GitHub Projects could not be listed." }] };
+        return operationError("GitHub Projects could not be listed.", error, false);
       }
     });
 
@@ -49,7 +49,7 @@ export function createGitHubProjectsServer(input: {
         return { content: [{ type: "text", text: JSON.stringify(fields) }] };
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_fields_list", error, project_id);
-        return { isError: true, content: [{ type: "text", text: "Project fields could not be listed." }] };
+        return operationError("Project fields could not be listed.", error, false);
       }
     });
 
@@ -66,7 +66,7 @@ export function createGitHubProjectsServer(input: {
         return { content: [{ type: "text", text: JSON.stringify(items) }] };
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_items_list", error, project_id);
-        return { isError: true, content: [{ type: "text", text: "Project items could not be listed." }] };
+        return operationError("Project items could not be listed.", error, false);
       }
     });
   }
@@ -85,7 +85,7 @@ export function createGitHubProjectsServer(input: {
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_create", error);
-        return mutationError("The GitHub Project could not be created; check its current state before deciding whether to try again.", error);
+        return operationError("The GitHub Project could not be created; check its current state before deciding whether to try again.", error, true);
       }
     });
 
@@ -106,7 +106,7 @@ export function createGitHubProjectsServer(input: {
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_update", error, project_id);
-        return mutationError("The GitHub Project could not be updated; check its current state before deciding whether to try again.", error);
+        return operationError("The GitHub Project could not be updated; check its current state before deciding whether to try again.", error, true);
       }
     });
 
@@ -123,7 +123,7 @@ export function createGitHubProjectsServer(input: {
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_item_add", error, project_id);
-        return mutationError("The Issue or pull request could not be added; check its current state before deciding whether to try again.", error);
+        return operationError("The Issue or pull request could not be added; check its current state before deciding whether to try again.", error, true);
       }
     });
 
@@ -151,7 +151,7 @@ export function createGitHubProjectsServer(input: {
         return { content: [{ type: "text", text: JSON.stringify(outcome) }] };
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_item_set_field_value", error, project_id);
-        return mutationError("The Project field value could not be set; check its current state before deciding whether to try again.", error);
+        return operationError("The Project field value could not be set; check its current state before deciding whether to try again.", error, true);
       }
     });
   }
@@ -169,13 +169,15 @@ async function auditFailure(audit: GitHubProjectsAudit, principal: string, tool:
   });
 }
 
-function mutationError(message: string, error: unknown) {
+function operationError(message: string, error: unknown, mutation: boolean) {
   const apiError = error instanceof GitHubProjectsApiError ? error : undefined;
   const errorCode = apiError?.code ?? "operation_failed";
-  const applied = apiError?.applied ?? "unknown";
+  const applied = apiError?.applied ?? (mutation ? "unknown" : false);
+  const recoveryNotice = apiError?.recoveryNotice ?? false;
+  const recovery = recoveryNotice ? " RDMCP has stopped reusing this credential. Check its status before deciding whether to replace it." : "";
   return {
     isError: true,
-    structuredContent: { errorCode, applied },
-    content: [{ type: "text" as const, text: `${message} Outcome: ${applied}. Reference: ${errorCode}.` }],
+    structuredContent: { errorCode, applied, recoveryNotice },
+    content: [{ type: "text" as const, text: `${message} Outcome: ${applied}. Reference: ${errorCode}.${recovery}` }],
   };
 }

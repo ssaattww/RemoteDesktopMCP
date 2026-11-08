@@ -296,7 +296,12 @@ export class RemoteDesktopService {
         this.rejectedGitHubProjectsCredentials.delete(subject);
         return false;
       },
-      onCredentialRejected: (subject, token) => { this.rejectedGitHubProjectsCredentials.set(subject, fingerprint(token)); },
+      onCredentialRejected: (subject, token) => {
+        const next = fingerprint(token);
+        const previous = this.rejectedGitHubProjectsCredentials.get(subject);
+        this.rejectedGitHubProjectsCredentials.set(subject, next);
+        return previous !== next;
+      },
     });
   }
   async initialize(): Promise<void> {

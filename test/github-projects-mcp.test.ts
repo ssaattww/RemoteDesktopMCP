@@ -77,7 +77,7 @@ test("mutation failures expose a fixed code and outcome without leaking API deta
   try {
     const result = await connected.client.callTool({ name: "project_create", arguments: { title: "Sensitive title" } });
     assert.equal(result.isError, true);
-    assert.deepEqual(result.structuredContent, { errorCode: "api_error", applied: "unknown" });
+    assert.deepEqual(result.structuredContent, { errorCode: "api_error", applied: "unknown", recoveryNotice: false });
     assert.doesNotMatch(JSON.stringify(result), /private token|response details|Sensitive title/);
     const started = connected.audit.find((entry) => entry.event === "github_projects.started" && entry.detail.tool === "project_create");
     assert.deepEqual(started?.detail, { principal: "google:issuer:subject", tool: "project_create" });
