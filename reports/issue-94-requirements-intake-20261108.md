@@ -19,6 +19,7 @@
 | 安全境界 | 任意コマンド実行をこの機能の操作インターフェースにしない。PC 操作ツールを一覧から隠すだけでは呼出し禁止の保証にならない |
 | 人間専用操作 | Project 削除、公開／非公開の切替、メンバー追加・削除、アクセス権変更を RDMCP の公開ツールに含めない。サーバー側でも許可操作を制限し、任意 API／コマンドを公開しない |
 | 認証・認可 | 読み取りと更新を区別し、それとは別に GitHub の認証方式・実権限を確認する |
+| 初期利用者と将来拡張 | 当初は GitHub アカウント1つで利用できればよい。将来複数利用者になることを妨げず、credential と利用者の対応付けを可能にする。初期版の複数アカウント切替は要求しない |
 | 根拠 | 現行 API の対応範囲、未対応、既存 RDMCP との重複・共通基盤を調べ、未確定事項を確定扱いしない |
 | 開発手順 | implementation 前に Issue・branch・PR を正式に紐付け、development-orchestrator を入口にする |
 | 最新の順序 | ユーザーと要件をまとめることを優先し、製品設計・実装を先行させない |
@@ -46,7 +47,7 @@ UI のすべてが API から同じように操作できるとは未検証。API
 2. 初期の対象は既存の個人 Project #4「RDMCP」だけか、他の個人／organization Project にも広げるか。
 3. 削除・公開設定・メンバー／アクセス権管理は人間専用。通常メタデータ編集、作成・複製、close／reopen を含めるか。
 4. Issue／PR 本体の変更、views、自動化、可視化等を含めた到達範囲と段階。段階導入であっても最終目的を読み取り専用へ縮めない。
-5. 利用者は現在の本人1名か。複数利用者へのデータ・credential 隔離をどこまで要求するか。
+5. 初期は GitHub アカウント1つでよい。将来の複数利用者に備えた credential と利用者の対応付けは必要だが、初期版で複数アカウントを切り替える UI／操作は不要。RDMCP 利用者の範囲と隔離水準は未決定。
 6. 「PC 操作をしない」の保証対象はこの専用接続か、dot の他の PC 接続も含むか。サーバー内部の監査保存や secret 保護の I/O と任意操作を区別する。
 7. 認証方式、credential 保管、権限・失効、監査の保持と表示、既存 Emergency Stop と Todo の扱い。これらの構成採用は要件整理後に行う。トークン権限の細分化調査はユーザー指示により保留する。
 
@@ -70,6 +71,7 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 - ユーザーの「RDMCP の方進めませんか」は、製品設計・実装を先行する指示ではなく、未確定要件を音声で一緒に詰める意図と確認された。次は要件の選択肢をユーザーと確認し、合意まで設計・実装を保留する。
 - トークン権限の細分化調査は保留。一般 API 操作の存在と、実際の認証・対象個人 Project #4 での read/write 検証を区別する。
 - ユーザーは PAT 手動設定と GitHub App 認証を比較し、登録、安全な保管、ログ等への非露出、失効／更新、RDMCP 利用者との紐付けを要件として整理するよう追加した。以下の比較は公式資料からの事実と設計上の含意であり、認証方式の選定ではない。
+- 初期は GitHub アカウント1つで利用できればよく、将来の複数利用者に備えた対応付けを可能にする。初期版の複数アカウント切替は要求しない。GitHub App で利用者が token を直接入力せず認可できる利点は検討対象だが、方式は未決定。
 - GitHub Issue #94 本文には、branch／PR を作らず実装中として扱わないとする古い記述が残る。後のユーザー承認を受けて branch と Draft PR #95 は作成・正式紐付け済みである。Issue 本文の更新は自動審査で拒否され、リモート本文は未変更。現在の会話方針と合意内容に沿って Issue 本文を更新するかは未処理とする。
 - 要件メモのローカル変更は commit `8c05712` に含まれる。push は HTTPS 接続不可で未完了。新 credential、認証設定、権限拡張、製品設計・コードの変更は行っていない。
 
@@ -77,8 +79,8 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 
 | 観点 | PAT を手動登録 | GitHub App の user access token |
 | --- | --- | --- |
-| 発行・登録 | 利用者が GitHub の設定画面で発行し、RDMCP へ安全に登録する必要がある。入力・貼付け経路で token を履歴、clipboard、例外、監査ログへ残さない要件がある | App registration と callback／認可フローの準備後、利用者本人が GitHub で認可する。server-side confidential client の client secret と token を安全に扱う必要がある |
-| 利用者との紐付け | PAT は GitHub user account に属する。RDMCP 内でも token 所有者と RDMCP principal の対応を登録し、複数利用者なら credential・cache・監査を分離する必要がある | user access token は認可した GitHub user の代理で動作し、権限・到達 resource は App と本人の共通範囲。RDMCP principal と GitHub user ID を明示して対応させる必要がある |
+| 発行・登録 | 利用者が GitHub の設定画面で発行し、RDMCP へ安全に登録する必要がある。入力・貼付け経路で token を履歴、clipboard、例外、監査ログへ残さない要件がある | App registration と callback／認可フローの準備後、利用者本人が GitHub で認可するため、token 文字列を本人が RDMCP に直接入力しなくてよい。server-side confidential client の client secret と token は引き続き安全に扱う必要がある |
+| 利用者との紐付け | PAT は GitHub user account に属する。RDMCP 内でも token 所有者と RDMCP principal の対応を登録し、将来複数利用者を扱う場合は credential・cache・監査を分離する必要がある | user access token は認可した GitHub user の代理で動作し、権限・到達 resource は App と本人の共通範囲。RDMCP principal と GitHub user ID を明示して対応させる。初期は1 account でよいが将来複数の対応を阻害しない |
 | 保管・ログ | GitHub は PAT を秘密として管理するよう案内する。RDMCP の永続 secret store、暗号化、最小読み取り主体、redaction、バックアップ・削除方針は未決定 | GitHub は private key／client secret／token を安全に保管し、サーバーなら key vault 等を推奨する。access token と refresh token の分離保管も考慮事項。RDMCP の保管基盤は未決定 |
 | 期限・更新 | PAT は利用者が設定する期限まで継続する種類があり、期限切れ・失効時は利用者が再発行し、RDMCP に再登録する運用候補 | 期限付き user access token は既定で 8 時間、refresh token は 6 か月。refresh は新しい access／refresh token を返し、使用済み refresh token と旧 access token は無効になる。保管と更新の競合、refresh token expiry 後の再認可が必要 |
 | 失効 | 利用者が GitHub の PAT settings から削除できる。RDMCP は認証失敗を検出して使用を停止し、利用者に再登録を求める必要がある | 利用者は GitHub アカウントから App 認可を取り消せる。App は revoke webhook を受けた本人分の API 呼出しを停止し、401 でも停止・再認可へ誘導する必要がある |
