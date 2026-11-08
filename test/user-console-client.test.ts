@@ -230,6 +230,40 @@ function todoFixture(sessionId = "todo-session", version = 1, text = "server tex
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
+test("history arrows keep current drafts and version separate while refreshing a selected revision", async () => {
+  const fixture = todoFixture();
+  const history = new FakeElement(); history.dataset.sessionId = "todo-session";
+  const prev = new FakeElement("button"); prev.dataset.historyPrev = "true";
+  const next = new FakeElement("button"); next.dataset.historyNext = "true";
+  const refresh = new FakeElement("button"); refresh.dataset.historyRefresh = "true";
+  const body = new FakeElement(); body.dataset.historyBody = "true";
+  const notice = new FakeElement(); notice.dataset.historyNotice = "true";
+  history.append(prev, next, refresh, body, notice);
+  const revision = (version: number) => ({ version, previous_version: version - 1, at: "2026-11-08T00:00:00Z", actor: "owner", source: "mcp", snapshot: [{ id: "todo-1", text: `<script>revision ${version}</script>`, status: "completed", parent_id: null, order: 0 }], changes: [] });
+  const page = { revisions: [revision(1), revision(2)], attempts: [], current_version: 2, window: { limit: 50, index_limit: 20000, pre_feature_history: "unavailable", version_gaps: false } };
+  history.dataset.history = JSON.stringify(page);
+  let reads = 0;
+  const ui = boot(async (url, init) => {
+    const route = new URL(url, "http://local.test").pathname;
+    assert.notEqual(init?.method, "PUT");
+    if (route.endsWith("/todo/history")) { reads++; return response(200, { ...page, current_version: 3, revisions: [...page.revisions, revision(3)] }); }
+    if (route === "/api/console-state") return response(200, { stopped: false, sessions: [], activeSessions: 1, runningProcesses: 0 });
+    return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false });
+  }, [], { "session-todo": fixture.panel, "todo-history": history }, "todo-session");
+  await settle();
+  fixture.textarea.value = "unsent draft";
+  const currentVersion = fixture.panel.dataset.version;
+  assert.equal(next.disabled, true); assert.equal(prev.disabled, false);
+  prev.click(); assert.equal(prev.disabled, true); assert.equal(next.disabled, false);
+  assert.ok(body.textContent.includes("revision 1"));
+  refresh.click(); await settle();
+  assert.equal(reads, 1); assert.ok(body.textContent.includes("revision 1"));
+  assert.equal(fixture.textarea.value, "unsent draft"); assert.equal(fixture.panel.dataset.version, currentVersion);
+  next.click(); next.click(); assert.equal(next.disabled, true); assert.ok(body.textContent.includes("revision 3"));
+  assert.equal(body.children.length, 0, "history renders as text rather than executable markup or mutation controls");
+  ui.windowListeners.get("pagehide")?.();
+});
+
 function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; toString: () => string; getRangeAt?: (index: number) => { intersectsNode?: (node: FakeElement) => boolean }; setBaseAndExtent?: (...args: unknown[]) => void; collapse?: (node: FakeElement, offset: number) => void; extend?: (node: FakeElement, offset: number) => void; removeAllRanges: () => void; addRange: (...args: unknown[]) => void } } = {}) {
   FakeEventSource.instances = [];
   FakeElement.activeElement = null;

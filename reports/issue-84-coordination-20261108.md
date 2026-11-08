@@ -34,3 +34,5 @@
 実装開始後に親から、利用者ルールとして「実装前にブランチ・PR を作成し、Issue と紐付ける」条件が共有された。開始時点ではブランチのみ存在し、PR はなかった。追加実装を停止するよう担当に指示し、すでに生じた実装・試験差分を保護した。
 
 今回の準備コミットは設計・計画・本記録だけを含め、未検証の製品・試験差分を含めない。利用者ルールを優先し、通常の実装完了後の PR 手順に先立って Draft PR を用意する。本文に Issue #84 を明示し、PR の正式リンクとブランチを確認してから実装を再開する。機能の実装・検証・レビューが完了したとは表示しない。
+
+準備コミット `2933873c75d6f27022448604269229ebfaa277d4` を公開し、[Draft PR #93](https://github.com/ssaattww/RemoteDesktopMCP/pull/93) を作成した。取得した PR の `headRefName` は `feat/84-todo-history`、`baseRefName` は `main`、`headRefOid` は同コミット、`isDraft` は true、`state` は OPEN、`closingIssuesReferences` は Issue #84 の正式 URL を含む。これを確認して実装担当に再開を指示した。PR 作成直後の製品・試験差分はローカルに保持し、準備コミットには含めていない。

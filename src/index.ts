@@ -18,6 +18,7 @@ import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateFile } from "./private-storage.js";
 
 import { applyTodoChanges, snapshotTodoItems, todoChangesSchema, isTodoValidationError, type TodoItem } from "./shared-todo.js";
+import { todoAttemptSchema, todoRevisionSchema, todoItemChanges, type TodoHistoryPage, type TodoRevision, type TodoAttempt } from "./todo-history.js";
 import { mountAdmin } from "./admin.js";
 import { mountUserConsole } from "./user-console.js";
 import { applySessionLinkFetchResult, captureSessionLinkFetchLease, createSessionLink, fetchSessionLinkTitle, updateSessionLink, type SessionLinkOwnerState, type SessionLinkTransport } from "./session-links.js";
@@ -726,17 +727,48 @@ export class RemoteDesktopService {
     return { session_id: session.id, version: todo.version, items: snapshotTodoItems(todo.items), total: todo.items.length, completed: todo.items.filter((item) => item.status === "completed").length, last_updated_at: todo.lastUpdatedAt, enforcement_enabled: todo.enabled };
   }
   async todoGet(user: string, sessionId: string) { return this.todoLock.run(async () => this.todoSnapshot(this.session(user, sessionId))); }
-  async todoUpdate(user: string, sessionId: string, expectedVersion: number, inputChanges: unknown) {
-    const parsed = todoChangesSchema.safeParse(inputChanges);
-    if (!parsed.success) throw new Error("Invalid Todo changes.");
+  async todoHistory(user: string, sessionId: string): Promise<TodoHistoryPage> {
+    return this.todoLock.run(() => this.auditLock.run(async () => {
+      await this.refreshAuditIndexLocked();
+      const owned = this.auditEntries.filter(({ event }) => event.user === user && event.sessionId === sessionId);
+      const revisions = owned.flatMap(({ event }) => { const parsed = todoRevisionSchema.safeParse(event); return parsed.success && parsed.data.actor === user ? [parsed.data] : []; });
+      const session = this.sessions.get(sessionId);
+      if (session?.user !== user && !owned.some(({ event }) => event.event === "session.open") && revisions.length === 0) throw new Error("Todo history unavailable.");
+      // An active session owned by someone else must never be correlated with
+      // an injected or obsolete audit record for the same identifier.
+      if (session && session.user !== user) throw new Error("Todo history unavailable.");
+      const entries = owned.flatMap<TodoRevision | TodoAttempt>(({ event }) => {
+        const revision = todoRevisionSchema.safeParse(event); if (revision.success && revision.data.actor === user) return [revision.data];
+        const attempt = todoAttemptSchema.safeParse(event); return attempt.success && attempt.data.actor === user ? [attempt.data] : [];
+      });
+      const selected = entries.slice(-50);
+      const visibleRevisions = selected.filter((entry): entry is TodoRevision => entry.event === "todo.updated");
+      const currentVersion = session?.user === user ? session.todo.version : null;
+      const firstVersion = visibleRevisions[0]?.version ?? null;
+      const lastVersion = visibleRevisions.at(-1)?.version ?? null;
+      return {
+        session_id: sessionId, current_version: currentVersion, revisions: visibleRevisions, attempts: selected.filter((entry): entry is TodoAttempt => entry.event === "todo.update_attempt"),
+        window: { limit: 50, index_limit: MAX_AUDIT_EVENTS, index_truncated: this.auditSequence > this.auditEntries.length, response_truncated: entries.length > 50, pre_feature_history: "unavailable", complete: false, first_recorded_version: firstVersion, latest_recorded_version: lastVersion, version_gaps: visibleRevisions.some((entry, index) => entry.previous_version !== entry.version - 1 || (index > 0 && entry.previous_version !== visibleRevisions[index - 1]!.version)), current_version_unrecorded: currentVersion !== null && currentVersion > 0 && lastVersion !== currentVersion },
+      };
+    }));
+  }
+  async todoUpdate(user: string, sessionId: string, expectedVersion: number, inputChanges: unknown, source: "mcp" | "user_console" = "mcp") {
     return this.todoLock.run(async () => {
       const session = this.session(user, sessionId); const todo = session.todo;
-      if (todo.version !== expectedVersion) return { ...this.todoSnapshot(session), conflict: true, error: "TODO_VERSION_CONFLICT", message: "作業一覧が別の場所で更新されています。最新状態を読み直してください。" };
+      const attempt = async (outcome: "conflict" | "rejected" | "failed", reason: "version_conflict" | "invalid_changes" | "validation_rejected" | "update_failed") => {
+        try { await this.audit("todo.update_attempt", { user, sessionId, history_schema: 1, actor: user, source, expected_version: expectedVersion, outcome, reason }); } catch { /* Preserve the original rejection when attempt audit is unavailable. */ }
+      };
+      const parsed = todoChangesSchema.safeParse(inputChanges);
+      if (!parsed.success) { await attempt("rejected", "invalid_changes"); throw new Error("Invalid Todo changes."); }
+      if (todo.version !== expectedVersion) { await attempt("conflict", "version_conflict"); return { ...this.todoSnapshot(session), conflict: true, error: "TODO_VERSION_CONFLICT", message: "作業一覧が別の場所で更新されています。最新状態を読み直してください。" }; }
       const now = Date.now(); const mono = performance.now();
-      const items = applyTodoChanges(todo.items, parsed.data, { user, timestamp: new Date(now).toISOString(), makeId });
+      let items: TodoItem[];
+      try { items = applyTodoChanges(todo.items, parsed.data, { user, timestamp: new Date(now).toISOString(), makeId }); }
+      catch (error) { await attempt(isTodoValidationError(error) ? "rejected" : "failed", isTodoValidationError(error) ? "validation_rejected" : "update_failed"); throw error; }
+      const changes = todoItemChanges(todo.items, items); const previousVersion = todo.version;
       todo.items = items; todo.version += 1; todo.lastTodoUpdatedMono = mono; todo.lastUpdatedAt = new Date(now).toISOString(); todo.clockAnomaly = false; todo.lastGateMono = mono; todo.lastGateWall = now;
-      let auditWarning = false; try { await this.audit("todo.updated", { user, sessionId: session.id, version: todo.version, itemCount: items.length }); } catch { auditWarning = true; }
-      return { ...this.todoSnapshot(session), ...(auditWarning ? { audit_warning: true, applied: true } : {}) };
+      let auditWarning = false; try { await this.audit("todo.updated", { user, sessionId: session.id, version: todo.version, itemCount: items.length, history_schema: 1, actor: user, source, previous_version: previousVersion, snapshot: snapshotTodoItems(items), changes }); } catch { auditWarning = true; }
+      return { ...this.todoSnapshot(session), ...(auditWarning ? { audit_warning: true, applied: true, history_recorded: false } : {}) };
     });
   }
   async todoSetEnforcement(user: string, sessionId: string, enabled: boolean) {
@@ -1373,7 +1405,7 @@ export class RemoteDesktopService {
   }
   server(user: string): McpServer {
     const server = new McpServer({ name: "remote-desktop-mcp", version: "0.1.0" }, {
-      instructions: "All tools require an authenticated caller and a brief comment explaining what the call is intended to accomplish. Open a session with session_open and pass its session_id to file, transfer, and process operations that require it; session IDs belong to the authenticated caller, and operations are rejected while that caller's Emergency Stop is active. File and transfer tools use root_id as their path base: every relative_path is relative to that configured root, never to the session working_directory. node_list returns each root's absolute path. Search tools use root_id and query. process_start instead runs commands in the session working_directory. Prefer the dedicated root-scoped file tools for file operations. process_start runs commands needed for the current user-authorized task with the MCP server OS user's existing permissions.",
+      instructions: "All tools require an authenticated caller and a brief comment explaining what the call is intended to accomplish. The read-only todo_history does not retain that comment, write operation audit events, or touch session state. Open a session with session_open and pass its session_id to file, transfer, and process operations that require it; session IDs belong to the authenticated caller, and operations are rejected while that caller's Emergency Stop is active. File and transfer tools use root_id as their path base: every relative_path is relative to that configured root, never to the session working_directory. node_list returns each root's absolute path. Search tools use root_id and query. process_start instead runs commands in the session working_directory. Prefer the dedicated root-scoped file tools for file operations. process_start runs commands needed for the current user-authorized task with the MCP server OS user's existing permissions.",
     });
     type RequestHandler = (...args: unknown[]) => unknown;
     const underlying = server.server as unknown as { setRequestHandler: (schema: unknown, handler: RequestHandler) => unknown };
@@ -1387,6 +1419,7 @@ export class RemoteDesktopService {
       const response = await handler(...args);
       const request = isRecord(args[0]) ? args[0] : {};
       const params = isRecord(request.params) ? request.params : {};
+      if (params.name === "todo_history") return response;
       const rawRecord = isRecord(params.arguments) ? params.arguments : {};
       const errorText = isRecord(response) && response.isError === true && Array.isArray(response.content)
         ? response.content.map((item) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? item.text : undefined)
@@ -1413,6 +1446,7 @@ export class RemoteDesktopService {
     intercept.registerTool = (name, config, handler) => {
       const tagged = handler as { rdmcpSetToolName?: (tool: string) => void };
       tagged.rdmcpSetToolName?.(name);
+      if (name === "todo_history") return originalRegisterTool(name, { ...config, description: `${config.description ?? ""} A non-empty comment is required but is not retained by this read-only tool.`, inputSchema: { ...config.inputSchema, comment: z.string().trim().min(1).max(500) }, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
       return originalRegisterTool(name, { ...config, description: `${config.description ?? ""} A non-empty comment explaining what this call is intended to accomplish is required and is recorded with the operation.`, inputSchema: { ...config.inputSchema, comment: z.string().trim().min(1).max(500).describe("Briefly explain what this call is intended to accomplish.") }, _meta: { ...config._meta, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }], "openai/securitySchemes": [{ type: "oauth2", scopes: ["mcp"] }] } }, handler);
     };
     const sessionId = z.string().min(16); const nodeId = z.string().optional(); const transferId = z.string().min(16);
@@ -1460,6 +1494,7 @@ export class RemoteDesktopService {
     }));
     server.registerTool("session_close", { annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false }, description: "Close a local operation session.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.processLock.run(() => this.transferLock.run(async () => { await this.sweepExpiredLocked(); const session = this.session(user, session_id); session.state = "closed"; this.clearSessionLink(session); for (const item of this.transfers.values()) if (item.sessionId === session_id && item.state === "active") { item.state = "cancelled"; await this.cleanup(item); this.rememberTerminal(item); } let auditWarning = false; try { await this.audit("session.close", { user, sessionId: session_id }); } catch { auditWarning = true; } return { closed: true, ...(auditWarning ? { audit_warning: true, applied: true } : {}) }; }))));
     server.registerTool("todo_get", { annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }, description: "Read all shared Todo items for an owned session, including collapsed descendants. Items are parent-first with parent_id (null for roots), sibling-relative order, direct-child completion counts, and incomplete-descendant counts.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => this.todoGet(user, session_id)));
+    server.registerTool("todo_history", { annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }, description: "Read owned Todo revision snapshots and separate unsuccessful attempts, including ended sessions. Bounded to 50 history records within the latest 20,000 audit events; pre-feature and missing records cannot be reconstructed. Does not touch sessions, freshness clocks, or audit storage.", inputSchema: { session_id: sessionId } }, async ({ session_id }) => { try { return result(await this.todoHistory(user, session_id)); } catch { return failure("Todo history unavailable."); } });
     server.registerTool("todo_update", { annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false }, description: "Atomically add, edit, reorder, change status, reparent, or delete shared Todo items using an expected version. add accepts parent_id; reparent requires parent_id (null detaches to root). move uses sibling-relative order. Maximum depth is 8 including roots; maximum total is 200. Parents with children cannot be deleted; statuses remain independent.", inputSchema: { session_id: sessionId, expected_version: z.number().int().nonnegative(), changes: todoChangesSchema } }, this.tool(user, async ({ session_id, expected_version, changes }) => this.todoUpdate(user, session_id, expected_version, changes)));
     server.registerTool("todo_enforcement_set", { annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, description: "Enable or disable the session Todo freshness gate.", inputSchema: { session_id: sessionId, enabled: z.boolean() } }, this.tool(user, async ({ session_id, enabled }) => this.todoSetEnforcement(user, session_id, enabled)));
     server.registerTool("node_list", { annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }, description: "List the one supported local node and its configured file roots. Requires an active session_id belonging to the authenticated caller. roots contains each root_id and its canonical absolute_path; root_ids is retained for compatibility. File and transfer relative_path values are relative to the returned root, while process_start uses the session working_directory. node_id selects the local node for file and process operations.", inputSchema: { session_id: sessionId } }, this.tool(user, async ({ session_id }) => { this.session(user, session_id); return { nodes: [{ node_id: this.cfg.nodeId, label: this.cfg.nodeLabel, root_ids: this.cfg.roots.map((root) => root.id), roots: this.cfg.roots.map((root) => ({ root_id: root.id, absolute_path: root.path })), path_base: "root", connected: true, coordinator: true, operations: ["file", "process", "transfer"] }] }; }));

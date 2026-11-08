@@ -962,7 +962,7 @@ test("subtask SSR renders the same parent-first hierarchy before client refresh"
     for (const operation of ["toggle-children", "add-child", "reparent", "detach", "move-up", "move-down"]) assert.ok(html.includes(`data-todo-op="${operation}"`));
     assert.ok(html.includes("親&lt;script&gt;alert(1)&lt;/script&gt;"));
     assert.ok(html.includes('aria-label="サブTodoを折りたたむ: 親&lt;script&gt;alert(1)&lt;/script&gt;" aria-expanded="true"'));
-    assert.ok(html.includes("サブTodoは各親の「サブTodoを折りたたむ／展開」で個別に開閉できます。"));
+    assert.ok(!html.includes("サブTodoは各親の「サブTodoを折りたたむ／展開」で個別に開閉できます。"));
     assert.ok(!html.includes("親<script>alert(1)</script>"));
   } finally { await h.close(); }
 });
