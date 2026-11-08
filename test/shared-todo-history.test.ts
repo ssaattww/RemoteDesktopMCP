@@ -163,3 +163,47 @@ test("authenticated HTTP and SSR expose escaped readonly history and preserve ow
   h.service.sessions.get(sessionId)!.state = "closed";
   assert.equal((await fetch(route, { headers: { cookie } })).status, 200);
 });
+
+test("R84-N03 ended history remains accessible in SSR beyond 500 sessions before and after restart", async (t) => {
+  const h = await setup(t);
+  await h.update([{ op: "add", text: "<script>retained ended history</script>" }]);
+  h.service.sessions.get(sessionId)!.state = "closed";
+  await h.service.audit("session.close", { user: owner, sessionId });
+  h.service.sessions.delete(sessionId);
+  const later = Array.from({ length: 501 }, (_, index) => JSON.stringify({ at: "2026-11-08T00:00:00Z", event: "session.open", user: owner, sessionId: `later-owned-session-${index}` }) + "\n").join("");
+  await appendFile(path.join(h.dataDir, "audit.jsonl"), later);
+  const restarted = new RemoteDesktopService(h.cfg); t.after(() => restarted.close());
+  for (const service of [h.service, restarted]) {
+    const server = createApp(service).listen(0, "127.0.0.1"); await new Promise<void>((resolve) => server.once("listening", resolve));
+    try {
+      const address = server.address(); assert.ok(address && typeof address !== "string"); const baseUrl = `http://127.0.0.1:${address.port}`;
+      const login = async (email: string) => {
+        const result = await fetch(`${baseUrl}/user/login`, { method: "POST", headers: { origin: h.cfg.baseUrl, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email, password: "history-password" }), redirect: "manual" });
+        const token = /rdmcp_user=([^;,]+)/.exec(result.headers.get("set-cookie") ?? "")?.[1]; assert.ok(token); return `rdmcp_user=${token}`;
+      };
+      const cookie = await login(owner); const other = await login("other@example.test");
+      const sessionsBefore = structuredClone([...service.sessions]);
+      const auditBefore = await readFile(path.join(h.dataDir, "audit.jsonl"), "utf8");
+      const api = await fetch(`${baseUrl}/api/sessions/${sessionId}/todo/history`, { headers: { cookie } });
+      assert.equal(api.status, 200); const history = await api.json();
+      assert.equal(history.revisions.length, 1); assert.equal(history.window.index_truncated, false);
+      const shown = await fetch(`${baseUrl}/user/sessions/${sessionId}`, { headers: { cookie } });
+      assert.equal(shown.status, 200, "the UI must retain the same ended-session access as the history API");
+      const html = await shown.text(); const main = /<main>([\s\S]*?)<\/main>/.exec(html)?.[1] ?? "";
+      const encoded = /data-history="([^"]+)"/.exec(main)?.[1]; assert.ok(encoded);
+      const decoded = encoded.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+      assert.deepEqual(JSON.parse(decoded), history);
+      assert.ok(main.includes("&lt;script&gt;retained ended history&lt;/script&gt;"));
+      assert.ok(!main.includes("<script>retained ended history</script>"));
+      assert.ok(!main.includes('id="session-todo"')); assert.ok(!main.includes("作成日時:")); assert.ok(!main.includes("作業ディレクトリ:"));
+      assert.ok(main.includes('href="/user"')); assert.ok(html.includes("initializeTodoHistory"));
+      assert.equal((await fetch(`${baseUrl}/user/sessions/${sessionId}`, { headers: { cookie: other } })).status, 404);
+      assert.equal((await fetch(`${baseUrl}/api/sessions/${sessionId}/todo/history`, { headers: { cookie: other } })).status, 404);
+      assert.equal((await fetch(`${baseUrl}/user/sessions/unknown-session-0000`, { headers: { cookie } })).status, 404);
+      assert.equal((await fetch(`${baseUrl}/api/sessions/unknown-session-0000/todo/history`, { headers: { cookie } })).status, 404);
+      assert.equal((await fetch(`${baseUrl}/api/sessions/${sessionId}/todo`, { headers: { cookie } })).status, 404);
+      assert.deepEqual([...service.sessions], sessionsBefore); assert.equal(service.sessions.size, 0);
+      assert.equal(await readFile(path.join(h.dataDir, "audit.jsonl"), "utf8"), auditBefore);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  }
+});

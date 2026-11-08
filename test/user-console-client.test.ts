@@ -264,6 +264,49 @@ test("history arrows keep current drafts and version separate while refreshing a
   ui.windowListeners.get("pagehide")?.();
 });
 
+for (const delay of ["fetch", "json"] as const) for (const retained of [true, false]) {
+  test(`R84-N01 history refresh preserves latest navigation during delayed ${delay}; retained=${retained}`, async () => {
+    const fixture = todoFixture();
+    const history = new FakeElement(); history.dataset.sessionId = "todo-session";
+    const previous = new FakeElement("button"); previous.dataset.historyPrev = "true";
+    const next = new FakeElement("button"); next.dataset.historyNext = "true";
+    const refresh = new FakeElement("button"); refresh.dataset.historyRefresh = "true";
+    const body = new FakeElement(); body.dataset.historyBody = "true";
+    const notice = new FakeElement(); notice.dataset.historyNotice = "true";
+    history.append(previous, next, refresh, body, notice);
+    const revision = (version: number) => ({ version, previous_version: version - 1, at: "2026-11-08T00:00:00Z", actor: "owner", source: "mcp", snapshot: [], changes: [] });
+    const page = { revisions: [revision(1), revision(2)], attempts: [], current_version: 2, window: { limit: 50, index_limit: 20000, pre_feature_history: "unavailable", version_gaps: false } };
+    history.dataset.history = JSON.stringify(page);
+    const gate = deferred<void>();
+    const incoming = { ...page, current_version: 3, revisions: [...(retained ? page.revisions : [revision(2)]), revision(3)] };
+    let reads = 0;
+    boot(async (url, init) => {
+      assert.notEqual(init?.method, "PUT");
+      const route = new URL(url, "http://local.test").pathname;
+      if (route.endsWith("/todo/history")) {
+        reads++;
+        if (delay === "fetch") await gate.promise;
+        return { status: 200, ok: true, json: async () => { if (delay === "json") await gate.promise; return incoming; } };
+      }
+      if (route === "/api/console-state") return response(200, { stopped: false, sessions: [], activeSessions: 1, runningProcesses: 0 });
+      return response(200, { items: [], newestCursor: "c0", oldestCursor: "c0", hasMoreOlder: false });
+    }, [], { "session-todo": fixture.panel, "todo-history": history }, "todo-session");
+    await settle();
+    fixture.textarea.value = "draft remains untouched";
+    const currentVersion = fixture.panel.dataset.version; const currentStatus = fixture.status.value;
+    refresh.click(); await settle();
+    previous.click(); next.click(); previous.click();
+    assert.ok(body.textContent.includes("選択した版: 1"));
+    gate.resolve(); await settle(); await settle();
+    assert.equal(reads, 1);
+    assert.ok(body.textContent.includes(`選択した版: ${retained ? 1 : 3}`), "apply the response using the latest user selection, not the request-start selection");
+    assert.equal(notice.textContent.includes("選択していた版は取得範囲外"), !retained);
+    assert.equal(previous.disabled, retained); assert.equal(next.disabled, !retained);
+    assert.equal(fixture.textarea.value, "draft remains untouched");
+    assert.equal(fixture.panel.dataset.version, currentVersion); assert.equal(fixture.status.value, currentStatus);
+  });
+}
+
 function boot(fetchImpl: (url: string, init?: RequestInit) => Promise<ReturnType<typeof response>>, initialItems: ConsoleLogItem[] = [], extras: Record<string, FakeElement> = {}, sessionId = "", options: { clock?: FakeClock; hidden?: boolean; selection?: { anchorNode: FakeElement; focusNode: FakeElement; anchorOffset: number; focusOffset: number; isCollapsed: boolean; toString: () => string; getRangeAt?: (index: number) => { intersectsNode?: (node: FakeElement) => boolean }; setBaseAndExtent?: (...args: unknown[]) => void; collapse?: (node: FakeElement, offset: number) => void; extend?: (node: FakeElement, offset: number) => void; removeAllRanges: () => void; addRange: (...args: unknown[]) => void } } = {}) {
   FakeEventSource.instances = [];
   FakeElement.activeElement = null;

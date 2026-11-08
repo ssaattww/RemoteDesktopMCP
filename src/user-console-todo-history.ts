@@ -23,12 +23,12 @@ export function initializeTodoHistory(format: (page: TodoHistoryPage, index: num
   refresh?.addEventListener("click", async () => {
     if (pending || left) return;
     pending = true; refresh.disabled = true;
-    const version = page.revisions[index]?.version;
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(panel.dataset.sessionId ?? "")}/todo/history`, { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error("history unavailable");
       const result = await response.json() as TodoHistoryPage;
       if (left) return;
+      const version = page.revisions[index]?.version;
       const retained = result.revisions.findIndex((entry) => entry.version === version);
       page = result; index = retained >= 0 ? retained : page.revisions.length - 1;
       if (notice) notice.textContent = version !== undefined && retained < 0 ? "選択していた版は取得範囲外です。最新の記録を表示します。" : "履歴を更新しました。";
