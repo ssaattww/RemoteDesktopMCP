@@ -319,3 +319,15 @@ entries:
     description: 継続的な自動検証を表す一般的な略称。
   - term: リンク
     description: セッションが保持する外部URL参照を表す一般的な技術用語。
+  - term: DPAPI
+    description: Windows の利用者別データ保護 API の略称。
+  - term: GraphQL
+    description: GitHub API で使う問い合わせ言語と実行方式の名称。
+  - term: Linux
+    description: 対応対象となる OS の名称。
+  - term: PAT
+    description: GitHub の個人アクセストークンを指す略称。
+  - term: REST
+    description: HTTP の資源操作方式を表す API 設計様式の名称。
+  - term: プルリクエスト
+    description: GitHub で変更提案を行う機能名。

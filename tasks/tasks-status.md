@@ -160,7 +160,7 @@ DR-003 と NR-009 の完了は次候補の両 OS CI と同じ reviewer の確認
 
 | Task | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 着手前確認中 |
+| GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 設計案提示・本人確認待ち |
 | GHP-02 | GHP | 専用 MCP 入口と認証・GitHub API client | GHP-01 | L | PC backend 不使用、固定 API、対象照合、read/write/admin 隔離 | 未着手 |
 | GHP-03 | GHP | Project・項目・field・view 等の読み書き | GHP-02 | L | 型付き操作、schema、Status/Priority、draft、archive、管理操作の対応表と試験 | 未着手 |
 | GHP-04 | GHP | 監査・停止・結果不明・境界と回帰検証 | GHP-02,GHP-03 | L | mock 契約試験、公開定義、PC 経路拒否、必要な check/build/lint と review | 未着手 |
@@ -168,4 +168,4 @@ DR-003 と NR-009 の完了は次候補の両 OS CI と同じ reviewer の確認
 
 ### 最新の順序変更（Issue #94）
 
-ユーザーの最新指示により、GHP-01 は要件整理をユーザーと進める段階に戻す。製品設計の確定と GHP-02〜04 の実装・検証は先行させない。成果は reports/issue-94-requirements-intake-20261108.md に記録する。正式な branch・Draft PR #95・Issue #94 の対応は読戻し済み。新規の親・実装担当は Luna を明示し、設計には必要に応じて Sol を使用する。運用認証は未承認のまま保留する。
+ユーザー確認により、GHP-01 の具体設計案作成を承認済み。設計案は doc/design/github-projects-tools.md、API/API 未対応操作の根拠は reports/issue-94-requirements-intake-20261108.md に記録する。現在は設計案の本人確認待ちで、GHP-02〜05 の実装・実運用認証・credential 設定は開始しない。正式な branch・Draft PR #95・Issue #94 の対応は読戻し済み。新規の親・実装担当は Luna、設計レビューには必要に応じ Sol を使う指示を保持する。モデル設定の適用はこの runtime から確認できていない。
