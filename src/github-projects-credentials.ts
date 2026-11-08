@@ -141,7 +141,7 @@ async function windowsDpapi(operation: "protect" | "unprotect", data: string, ke
   const windows = process.env.WINDIR ?? process.env.SystemRoot ?? "C:\\Windows";
   const executable = path.join(windows, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const entropy = Buffer.from(key, "hex").toString("base64");
-  const response = await run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_SCRIPT], JSON.stringify({ operation, data, entropy }), ["WINDIR", "SystemRoot", "TEMP", "TMP", "PATH"]);
+  const response = await run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_SCRIPT], JSON.stringify({ operation, data, entropy }), ["WINDIR", "SystemRoot", "TEMP", "TMP", "PATH"], 30_000);
   if (response.code !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(response.stdout)) throw new Error("DPAPI operation failed.");
   const bytes = Buffer.from(response.stdout, "base64");
   return operation === "protect" ? response.stdout : bytes.toString("utf8");
@@ -151,12 +151,12 @@ async function secretTool(args: string[], input: string): Promise<{ code: number
   return run("secret-tool", args, input, ["PATH", "HOME", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_DATA_HOME"]);
 }
 
-function run(executable: string, args: string[], input: string, envNames: string[]): Promise<{ code: number; stdout: string }> {
+function run(executable: string, args: string[], input: string, envNames: string[], timeoutMs = 10_000): Promise<{ code: number; stdout: string }> {
   const env = Object.fromEntries(envNames.flatMap((name) => process.env[name] ? [[name, process.env[name]!]] : []));
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { env, stdio: ["pipe", "pipe", "ignore"], windowsHide: true, shell: false });
     const output: Buffer[] = []; let size = 0; let settled = false;
-    const timeout = setTimeout(() => child.kill(), 10_000);
+    const timeout = setTimeout(() => child.kill(), timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => { size += chunk.length; if (size > MAX_RESPONSE_BYTES) { child.kill(); if (!settled) { settled = true; reject(new Error("OS credential provider response was too large.")); } return; } output.push(chunk); });
     child.stdin.on("error", () => undefined);
     child.once("error", () => { clearTimeout(timeout); if (!settled) { settled = true; reject(new Error("OS credential provider is unavailable.")); } });
