@@ -327,7 +327,7 @@ function isRateLimitGraphQLError(error: GraphQLErrorShape): boolean {
 }
 
 function unknownAfterMutation(error: unknown): GitHubProjectsApiError {
-  return error instanceof GitHubProjectsApiError ? new GitHubProjectsApiError(error.code, "unknown") : new GitHubProjectsApiError("request_failed", "unknown");
+  return error instanceof GitHubProjectsApiError ? new GitHubProjectsApiError(error.code, "unknown", error.recoveryNotice) : new GitHubProjectsApiError("request_failed", "unknown");
 }
 
 function fieldValueMatches(field: GitHubProjectItem["fields"][number], value: Record<string, string | number>): boolean {

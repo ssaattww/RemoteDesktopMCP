@@ -64,6 +64,20 @@ test("an incomplete project-creation response remains unknown", async () => {
   await assert.rejects(api.createProject("New"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "invalid_response" && error.applied === "unknown");
 });
 
+test("a 401 during mutation readback preserves the one-time recovery notice and unknown outcome", async () => {
+  let recoveryNotice = false;
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
+    onCredentialRejected: () => { const first = !recoveryNotice; recoveryNotice = true; return first; },
+    request: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { operationName: string };
+      if (body.operationName === "RdmcpViewerId") return response({ data: { viewer: { id: "U_1", login: "example" } } });
+      if (body.operationName === "RdmcpCreateProject") return response({ data: { createProjectV2: { projectV2: { id: "PVT_1" } } } });
+      return response({}, 401);
+    },
+  });
+  await assert.rejects(api.createProject("New"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "credential_rejected" && error.applied === "unknown" && error.recoveryNotice);
+});
+
 test("a rejected credential blocks later requests until the credential changes", async () => {
   let rejected = "";
   let requestCount = 0;
