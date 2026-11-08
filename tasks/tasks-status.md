@@ -160,12 +160,12 @@ DR-003 と NR-009 の完了は次候補の両 OS CI と同じ reviewer の確認
 
 | Task | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 設計案確認済み。PR #95 の Issue 自動クローズ参照を修正後、レビュー・マージ待ち |
-| GHP-02 | GHP | 専用 MCP 入口と認証・GitHub API client | GHP-01 | L | PC backend 不使用、固定 API、対象照合、read/write/admin 隔離 | 未着手 |
+| GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 設計案確認済み。PR #95 は `Refs #94` に修正済み。レビュー・マージ待ち |
+| GHP-02 | GHP | 専用 MCP 入口と認証・GitHub API client | GHP-01 | L | PC backend 不使用、固定 API、対象照合、read/write/admin 隔離 | 実装中。固定 GraphQL クライアントと契約試験を追加。専用 MCP 入口・認証は未実装 |
 | GHP-03 | GHP | Project・項目・field・view 等の読み書き | GHP-02 | L | 型付き操作、schema、Status/Priority、draft、archive、管理操作の対応表と試験 | 未着手 |
 | GHP-04 | GHP | 監査・停止・結果不明・境界と回帰検証 | GHP-02,GHP-03 | L | mock 契約試験、公開定義、PC 経路拒否、必要な check/build/lint と review | 未着手 |
 | GHP-05 | GHP | 本番認証・credential と運用検証 | GHP-04、操作時の個別承認 | M | 承認済み検証環境で限定的 write/read-back、本番設定の個別判断 | 承認まで保留 |
 
 ### 最新の順序変更（Issue #94）
 
-本人は GHP-01 設計案と第1段の作業開始を承認済み。第1段ブランチ `codex/issue-94-stage1-core` を設計ブランチ `codex/issue-94-github-projects` から作成した。作業開始前に stacked PR を #94 へ正式に紐付け、PR #95 の `Closes #94` を関連参照へ直して本文を読み戻す。これらの確認が済むまで製品コードは変更しない。GHP-05 の実運用 credential 作成・設定、権限変更、GitHub 実書き込みは個別承認まで保留する。設計案は doc/design/github-projects-tools.md、API/API 未対応操作の根拠は reports/issue-94-requirements-intake-20261108.md に記録する。新規の親・実装担当は Luna、設計レビューには必要に応じ Sol を使う指示を保持する。モデル設定の適用はこの runtime から確認できていない。
+本人は GHP-01 設計案と第1段の作業開始を承認済み。第1段ブランチ `codex/issue-94-stage1-core` と Draft PR #96 を作成し、PR #96 は設計 PR #95 を base として `Refs #94` を記載する。PR #95 の `Closes #94` は `Refs #94` に変更して本文を読み戻し済み。現在の PR #96 差分は追跡記録と固定 GraphQL API クライアントまでであり、Projects 専用 MCP 入口・認証、API 資格情報の保護保存、Project 項目／field／view 操作は未実装。GHP-05 の実運用 credential 作成・設定、権限変更、GitHub 実書き込みは個別承認まで保留する。
