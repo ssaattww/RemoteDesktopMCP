@@ -17,6 +17,7 @@ import { verifyPassword } from "./hash-password.js";
 import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type GitHubProjectsScope, type OAuthResourceScope, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
 import { GitHubProjectsApi, type GitHubProjectsCredentialProvider } from "./github-projects-api.js";
 import { createGitHubProjectsServer } from "./github-projects-mcp.js";
+import { GitHubProjectsCredentialStore } from "./github-projects-credentials.js";
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateFile } from "./private-storage.js";
 
 import { applyTodoChanges, snapshotTodoItems, todoChangesSchema, isTodoValidationError, type TodoItem } from "./shared-todo.js";
@@ -122,11 +123,13 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   const googleClientSecret = env.GOOGLE_CLIENT_SECRET;
   const googleRedirectUri = env.GOOGLE_REDIRECT_URI ?? `${baseUrl}/google/callback`;
   if (authMode === "google" && (!googleClientId || !googleClientSecret || googleRedirectUri !== `${baseUrl}/google/callback`)) throw new Error("Google mode requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI=${BASE_URL}/google/callback.");
+  const githubProjectsLogin = env.GITHUB_PROJECTS_LOGIN;
+  if (githubProjectsLogin && (authMode !== "google" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(githubProjectsLogin))) throw new Error("GITHUB_PROJECTS_LOGIN requires Google authentication and a valid GitHub login.");
   // Owner-scoped termination depends on the fixed Desktop Commander module
   // layout. Arbitrary launchers cannot be verified to install that bridge.
   const customArgs = (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean);
   if (env.DESKTOP_COMMANDER_COMMAND || customArgs.length) throw new Error("Only the managed Desktop Commander launcher is supported because owner-scoped emergency stop requires the pinned backend.");
-  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: process.execPath, dcArgs: [bundled, "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
+  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: process.execPath, dcArgs: [bundled, "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}), ...(githubProjectsLogin ? { githubProjects: { login: githubProjectsLogin, credentials: new GitHubProjectsCredentialStore(dataDir) } } : {}) };
 }
 
 class Mutex {
