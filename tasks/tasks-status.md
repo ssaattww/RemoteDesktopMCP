@@ -1,4 +1,4 @@
-﻿# Task 一覧
+# Task 一覧
 
 更新規則: このファイルは `task-breakdown-planner`、`task-consistency-manager`、`progress-sync-manager` を通してのみ更新する。
 
@@ -163,8 +163,8 @@ DR-003 と NR-009 の完了は次候補の両 OS CI と同じ reviewer の確認
 | GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 完了。PR #95 は `Refs #94` のまま main へ squash merge（`d978fb5`） |
 | GHP-02 | GHP | 専用 MCP 入口と認証・GitHub API client | GHP-01 | L | PC backend 不使用、固定 API、対象照合、read/write/admin 隔離 | 第1段完了。PR #96 を main へ squash merge（`eef14f8`）。Projects 専用 HTTP/MCP、OAuth audience/scope 分離、Project metadata、Issue／PR 追加、欄の読み取りと値更新、DPAPI／Secret Service provider、ローカル登録 CLI を追加。実 credential 登録・設定は未実施 |
 | GHP-03 | GHP | Project・項目・field・view 等の読み書き | GHP-02 | L | 型付き操作、schema、Status/Priority、draft、archive、管理操作の対応表と試験 | 部分実装。Project の一覧・作成・題名／説明更新、Issue／PR 追加、項目と欄の読み取り、独自 text/number/date/single-select 欄の値更新まで。field schema、draft、archive、view の管理は未実装 |
-| GHP-04 | GHP | 監査・停止・結果不明・境界と回帰検証 | GHP-02,GHP-03 | L | mock 契約試験、公開定義、PC 経路拒否、必要な check/build/lint と review | 第1段の PR #96 は Ubuntu と Windows 8 shard の CI 成功後に merge 済み。実 GitHub 接続、Linux Secret Service 実環境、Stage 2 の検証、独立レビューは未確認 |
-| GHP-06 | GHP | Project の独自欄定義と view の管理 | GHP-02 | M | 対応する欄型と選択肢／iteration 定義の読み取り・作成・編集・削除、view の一覧・作成・編集・削除を固定 API で提供し、対象 Project と欄の所有を検証。選択肢／iteration ID と対象外設定を保持し、更新後を読み戻す。Project 削除・公開設定・アクセス管理は含めない | 承認済み設計範囲の次工程。branch `codex/issue-94-stage2-fields-views` で準備中。実 credential と実 Project 更新は行わない |
+| GHP-04 | GHP | 監査・停止・結果不明・境界と回帰検証 | GHP-02,GHP-03 | L | mock 契約試験、公開定義、PC 経路拒否、必要な check/build/lint と review | 第1段の PR #96 は Ubuntu と Windows 8 shard の CI 成功後に merge 済み。実 GitHub 接続、Linux Secret Service 実環境、PR #97 の CI とレビューは未確認 |
+| GHP-06 | GHP | Project の独自欄定義と view の管理 | GHP-02 | M | 対応する欄型と選択肢／iteration 定義の読み取り・作成・編集・削除、view の一覧・作成・編集・削除を固定 API で提供し、対象 Project と欄の所有を検証。選択肢／iteration ID と対象外設定を保持し、更新後を読み戻す。Project 削除・公開設定・アクセス管理は含めない | PR #97 の第2段を実装中。欄定義・view の固定操作とモック検証を追加。Focused Projects tests 17件、check/build/lint と差分検査が成功。全体 npm test は328件中326件成功、1件 skip、1件失敗。失敗した既存のプロセス終了タイミング検査は単独実行で5件成功。実 credential と実 Project 更新は行わない |
 | GHP-05 | GHP | 本番認証・credential と運用検証 | GHP-04、操作時の個別承認 | M | 承認済み検証環境で限定的 write/read-back、本番設定の個別判断 | 承認まで保留 |
 
 ### 最新の順序変更（Issue #94）

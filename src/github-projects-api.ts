@@ -19,7 +19,15 @@ export type GitHubProjectSummary = {
   public: boolean;
 };
 
-export type GitHubProjectField = { id: string; name: string; type: "TEXT" | "NUMBER" | "DATE" | "SINGLE_SELECT" | "ITERATION" | "UNKNOWN"; isIssueField: boolean; options?: Array<{ id: string; name: string }> };
+export type GitHubProjectField = { id: string; name: string; type: "TEXT" | "NUMBER" | "DATE" | "SINGLE_SELECT" | "MULTI_SELECT" | "ITERATION" | "UNKNOWN"; isIssueField: boolean; options?: Array<{ id: string; name: string; color: string; description: string }>; iterationConfiguration?: { duration: number; startDate: string | null; startDay: number; iterations: Array<{ id: string; title: string; startDate: string; duration: number }> } };
+export type GitHubProjectView = { id: string; name: string; layout: "TABLE_LAYOUT" | "BOARD_LAYOUT" | "ROADMAP_LAYOUT"; filter: string; visibleFieldIds: string[] };
+export type GitHubProjectFieldDefinition =
+  | { type: "TEXT" | "NUMBER" | "DATE"; name: string }
+  | { type: "SINGLE_SELECT"; name: string; options?: Array<{ id?: string; name: string; color?: string; description?: string }> }
+  | { type: "MULTI_SELECT"; name: string; options?: Array<{ id?: string; name: string; color?: string; description?: string }> }
+  | { type: "ITERATION"; name: string; iterationConfiguration?: { duration: number; startDate: string; iterations: Array<{ id?: string; title: string; startDate: string; duration: number }> } };
+export type GitHubProjectFieldUpdate = { name?: string; options?: Array<{ id?: string; name: string; color?: string; description?: string }>; iterationConfiguration?: { duration: number; startDate: string; iterations: Array<{ id?: string; title: string; startDate: string; duration: number }> } };
+export type GitHubProjectViewInput = { name?: string; layout?: GitHubProjectView["layout"]; filter?: string; visibleFieldIds?: string[] };
 export type GitHubProjectItem = { id: string; type: string; isArchived: boolean; content: { id: string; type: "Issue" | "PullRequest"; title: string; number: number; url: string } | null; fields: Array<{ id: string; name: string; type: string; value: string | number | null; optionId?: string }> };
 export type GitHubProjectFieldValue = { type: "TEXT"; text: string } | { type: "NUMBER"; number: number } | { type: "DATE"; date: string } | { type: "SINGLE_SELECT"; optionId: string };
 
@@ -69,9 +77,27 @@ const PROJECT_FIELDS = `query RdmcpProjectFields($projectId: ID!) {
   viewer { login }
   node(id: $projectId) { ... on ProjectV2 {
     id owner { ... on User { login } }
-    fields(first: 100) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType isIssueField } ... on ProjectV2SingleSelectField { options { id name } } } pageInfo { hasNextPage } }
+    fields(first: 100) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType isIssueField } ... on ProjectV2SingleSelectField { options { id name color description } } ... on ProjectV2MultiSelectField { multiSelectOptions { id name color description } } ... on ProjectV2IterationField { configuration { duration startDay iterations { id title startDate duration } } } } pageInfo { hasNextPage } }
   } }
 }`;
+const CREATE_PROJECT_FIELD = `mutation RdmcpCreateProjectField($projectId: ID!, $name: String!, $dataType: ProjectV2CustomFieldType!, $singleSelectOptions: [ProjectV2SingleSelectFieldOptionInput!], $multiSelectOptions: [ProjectV2MultiSelectFieldOptionInput!], $iterationConfiguration: ProjectV2IterationFieldConfigurationInput) {
+  createProjectV2Field(input: { projectId: $projectId, name: $name, dataType: $dataType, singleSelectOptions: $singleSelectOptions, multiSelectOptions: $multiSelectOptions, iterationConfiguration: $iterationConfiguration }) { projectV2Field { ... on ProjectV2FieldCommon { id name dataType isIssueField } ... on ProjectV2SingleSelectField { options { id name } } ... on ProjectV2MultiSelectField { multiSelectOptions { id name } } } }
+}`;
+const UPDATE_PROJECT_FIELD = `mutation RdmcpUpdateProjectField($fieldId: ID!, $name: String, $singleSelectOptions: [ProjectV2SingleSelectFieldOptionInput!], $multiSelectOptions: [ProjectV2MultiSelectFieldOptionInput!], $iterationConfiguration: ProjectV2IterationFieldConfigurationInput) {
+  updateProjectV2Field(input: { fieldId: $fieldId, name: $name, singleSelectOptions: $singleSelectOptions, multiSelectOptions: $multiSelectOptions, iterationConfiguration: $iterationConfiguration }) { projectV2Field { ... on ProjectV2FieldCommon { id name dataType isIssueField } ... on ProjectV2SingleSelectField { options { id name } } ... on ProjectV2MultiSelectField { multiSelectOptions { id name } } } }
+}`;
+const DELETE_PROJECT_FIELD = `mutation RdmcpDeleteProjectField($fieldId: ID!) { deleteProjectV2Field(input: { fieldId: $fieldId }) { projectV2Field { ... on ProjectV2FieldCommon { id } } } }`;
+const PROJECT_VIEWS = `query RdmcpProjectViews($projectId: ID!, $after: String) {
+  viewer { login }
+  node(id: $projectId) { ... on ProjectV2 { id owner { ... on User { login } } views(first: 100, after: $after) { nodes { id name layout filter configuration { visibleFields(first: 100) { nodes { id } pageInfo { hasNextPage } } } } pageInfo { hasNextPage endCursor } } } }
+}`;
+const CREATE_PROJECT_VIEW = `mutation RdmcpCreateProjectView($projectId: ID!, $name: String!, $layout: ProjectV2ViewLayout!, $filter: String, $configuration: ProjectV2ViewConfigurationInput) {
+  createProjectV2View(input: { projectId: $projectId, name: $name, layout: $layout, filter: $filter, configuration: $configuration }) { projectV2View { id name layout filter configuration { visibleFields(first: 100) { nodes { id } pageInfo { hasNextPage } } } } }
+}`;
+const UPDATE_PROJECT_VIEW = `mutation RdmcpUpdateProjectView($viewId: ID!, $name: String, $layout: ProjectV2ViewLayout, $filter: String, $configuration: ProjectV2ViewConfigurationInput) {
+  updateProjectV2View(input: { viewId: $viewId, name: $name, layout: $layout, filter: $filter, configuration: $configuration }) { projectV2View { id name layout filter configuration { visibleFields(first: 100) { nodes { id } pageInfo { hasNextPage } } } } }
+}`;
+const DELETE_PROJECT_VIEW = `mutation RdmcpDeleteProjectView($viewId: ID!) { deleteProjectV2View(input: { viewId: $viewId }) { projectV2View { id } } }`;
 const PROJECT_ITEMS = `query RdmcpProjectItems($projectId: ID!, $after: String) {
   viewer { login }
   node(id: $projectId) { ... on ProjectV2 {
@@ -190,6 +216,117 @@ export class GitHubProjectsApi {
     return result.node.fields.nodes.map(parseField).filter((field) => !field.isIssueField && field.type !== "UNKNOWN");
   }
 
+  async createProjectField(projectId: string, definition: GitHubProjectFieldDefinition): Promise<{ field: GitHubProjectField; outcome: GitHubMutationOutcome }> {
+    const project = requireText(projectId, "projectId", 200);
+    const clean = normalizeFieldDefinition(definition);
+    const token = await this.#getToken();
+    await this.#assertProjectOwner(project, token);
+    const result = await this.#graphql<{ createProjectV2Field?: { projectV2Field?: { id?: string } } }>("RdmcpCreateProjectField", CREATE_PROJECT_FIELD, {
+      projectId: project, name: clean.name, dataType: clean.dataType, singleSelectOptions: clean.singleSelectOptions, multiSelectOptions: clean.multiSelectOptions, iterationConfiguration: clean.iterationConfiguration,
+    }, { token, mutation: true });
+    const fieldId = result.createProjectV2Field?.projectV2Field?.id;
+    if (!fieldId) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const field = await this.#verifyProjectField(project, fieldId, clean);
+    return { field, outcome: { applied: true } };
+  }
+
+  async updateProjectField(projectId: string, fieldId: string, input: GitHubProjectFieldUpdate): Promise<{ field: GitHubProjectField; outcome: GitHubMutationOutcome }> {
+    const project = requireText(projectId, "projectId", 200);
+    const id = requireText(fieldId, "fieldId", 200);
+    if (input.name === undefined && input.options === undefined && input.iterationConfiguration === undefined) throw new Error("At least one Project field property must be provided.");
+    const token = await this.#getToken();
+    await this.#assertProjectOwner(project, token);
+    const currentFields = await this.#readProjectFields(project, token);
+    const current = currentFields.find((field) => field.id === id);
+    if (!current || current.isIssueField || current.type === "UNKNOWN") throw new GitHubProjectsApiError("forbidden");
+    const cleanName = input.name === undefined ? undefined : requireText(input.name, "name", 256);
+    const variables: Record<string, unknown> = { fieldId: id, ...(cleanName !== undefined ? { name: cleanName } : {}) };
+    let expected: NormalizedFieldDefinition = { dataType: fieldTypeToDataType(current.type), name: cleanName ?? current.name };
+    if (current.type === "SINGLE_SELECT" || current.type === "MULTI_SELECT") {
+      const requested = "options" in input ? input.options : undefined;
+      const options = requested === undefined ? current.options ?? [] : preserveOptionIds(current.options ?? [], requested);
+      if (requested !== undefined || input.name !== undefined) variables[current.type === "SINGLE_SELECT" ? "singleSelectOptions" : "multiSelectOptions"] = options;
+      expected = { dataType: current.type, name: cleanName ?? current.name, ...(current.type === "SINGLE_SELECT" ? { singleSelectOptions: options } : { multiSelectOptions: options }) };
+    } else if (current.type === "ITERATION") {
+      const requested = "iterationConfiguration" in input ? input.iterationConfiguration : undefined;
+      const configuration = requested === undefined ? undefined : preserveIterationIds(current.iterationConfiguration, requested);
+      if (requested !== undefined) variables.iterationConfiguration = configuration;
+      expected = { dataType: "ITERATION", name: cleanName ?? current.name, ...(configuration ? { iterationConfiguration: configuration } : {}) };
+    } else if (input.name === undefined) {
+      throw new Error("A field update must include a supported property.");
+    }
+    const result = await this.#graphql<{ updateProjectV2Field?: { projectV2Field?: { id?: string } } }>("RdmcpUpdateProjectField", UPDATE_PROJECT_FIELD, variables, { token, mutation: true });
+    if (result.updateProjectV2Field?.projectV2Field?.id !== id) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const field = await this.#verifyProjectField(project, id, expected);
+    return { field, outcome: { applied: true } };
+  }
+
+  async deleteProjectField(projectId: string, fieldId: string): Promise<GitHubMutationOutcome> {
+    const project = requireText(projectId, "projectId", 200);
+    const id = requireText(fieldId, "fieldId", 200);
+    const token = await this.#getToken();
+    await this.#assertProjectOwner(project, token);
+    const fields = await this.#readProjectFields(project, token);
+    const current = fields.find((field) => field.id === id);
+    if (!current || current.isIssueField || current.type === "UNKNOWN") throw new GitHubProjectsApiError("forbidden");
+    const result = await this.#graphql<{ deleteProjectV2Field?: { projectV2Field?: { id?: string } | null } }>("RdmcpDeleteProjectField", DELETE_PROJECT_FIELD, { fieldId: id }, { token, mutation: true });
+    if (result.deleteProjectV2Field?.projectV2Field?.id !== id) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    try {
+      if ((await this.#readProjectFields(project, token)).some((field) => field.id === id)) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    } catch (error) { throw unknownAfterMutation(error); }
+    return { applied: true };
+  }
+
+  async listProjectViews(projectId: string): Promise<GitHubProjectView[]> {
+    const project = requireText(projectId, "projectId", 200);
+    return this.#readProjectViews(project, await this.#getToken());
+  }
+
+  async createProjectView(projectId: string, input: Required<Pick<GitHubProjectViewInput, "name" | "layout">> & GitHubProjectViewInput): Promise<{ view: GitHubProjectView; outcome: GitHubMutationOutcome }> {
+    const project = requireText(projectId, "projectId", 200);
+    const clean = normalizeViewInput(input, true);
+    const token = await this.#getToken();
+    await this.#assertProjectOwner(project, token);
+    await this.#assertViewFields(project, clean.visibleFieldIds ?? [], token);
+    const result = await this.#graphql<{ createProjectV2View?: { projectV2View?: unknown } }>("RdmcpCreateProjectView", CREATE_PROJECT_VIEW, { projectId: project, name: clean.name, layout: clean.layout, filter: clean.filter ?? null, configuration: { visibleFieldIds: clean.visibleFieldIds ?? [] } }, { token, mutation: true });
+    const raw = result.createProjectV2View?.projectV2View;
+    if (typeof raw !== "object" || raw === null || typeof (raw as { id?: unknown }).id !== "string") throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const viewId = (raw as { id: string }).id;
+    const view = await this.#verifyProjectView(project, viewId, clean);
+    return { view, outcome: { applied: true } };
+  }
+
+  async updateProjectView(projectId: string, viewId: string, input: GitHubProjectViewInput): Promise<{ view: GitHubProjectView; outcome: GitHubMutationOutcome }> {
+    const project = requireText(projectId, "projectId", 200);
+    const id = requireText(viewId, "viewId", 200);
+    if (!Object.keys(input).length) throw new Error("At least one view property must be provided.");
+    const token = await this.#getToken();
+    await this.#assertProjectOwner(project, token);
+    const current = await this.#getProjectView(project, id, token);
+    if (!current) throw new GitHubProjectsApiError("forbidden");
+    const clean = normalizeViewInput({ ...current, ...input }, false);
+    await this.#assertViewFields(project, clean.visibleFieldIds ?? current.visibleFieldIds, token);
+    const variables = { viewId: id, name: clean.name, layout: clean.layout, filter: clean.filter ?? null, configuration: { visibleFieldIds: clean.visibleFieldIds ?? [] } };
+    const result = await this.#graphql<{ updateProjectV2View?: { projectV2View?: { id?: string } } }>("RdmcpUpdateProjectView", UPDATE_PROJECT_VIEW, variables, { token, mutation: true });
+    if (result.updateProjectV2View?.projectV2View?.id !== id) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const view = await this.#verifyProjectView(project, id, clean);
+    return { view, outcome: { applied: true } };
+  }
+
+  async deleteProjectView(projectId: string, viewId: string): Promise<GitHubMutationOutcome> {
+    const project = requireText(projectId, "projectId", 200);
+    const id = requireText(viewId, "viewId", 200);
+    const token = await this.#getToken();
+    await this.#assertProjectOwner(project, token);
+    await this.#getProjectView(project, id, token);
+    const result = await this.#graphql<{ deleteProjectV2View?: { projectV2View?: { id?: string } | null } }>("RdmcpDeleteProjectView", DELETE_PROJECT_VIEW, { viewId: id }, { token, mutation: true });
+    if (result.deleteProjectV2View?.projectV2View?.id !== id) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    try {
+      if ((await this.#getProjectView(project, id, token, true)) !== null) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    } catch (error) { throw unknownAfterMutation(error); }
+    return { applied: true };
+  }
+
   async listProjectItems(projectId: string): Promise<GitHubProjectItem[]> {
     const id = requireText(projectId, "projectId", 200);
     const all: GitHubProjectItem[] = [];
@@ -244,6 +381,65 @@ export class GitHubProjectsApi {
     const verified = await this.#verifyProjectItem(item, project, token);
     if (!verified.fields.some((entry) => entry.id === field && fieldValueMatches(entry, normalized.value))) throw new GitHubProjectsApiError("invalid_response", "unknown");
     return { applied: true };
+  }
+
+  async #readProjectFields(projectId: string, token: string): Promise<GitHubProjectField[]> {
+    const result = await this.#graphql<{ node?: { id?: string; owner?: { login?: string }; fields?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean } } } | null }>("RdmcpProjectFields", PROJECT_FIELDS, { projectId }, { token });
+    const fields = result.node?.fields;
+    if (result.node?.id !== projectId || result.node.owner?.login?.toLowerCase() !== this.expectedLogin.toLowerCase() || !Array.isArray(fields?.nodes) || fields.pageInfo?.hasNextPage !== false) throw new GitHubProjectsApiError("forbidden");
+    return fields.nodes.map(parseField);
+  }
+
+  async #assertViewFields(projectId: string, fieldIds: readonly string[], token: string): Promise<void> {
+    if (new Set(fieldIds).size !== fieldIds.length || fieldIds.some((id) => typeof id !== "string" || !id.trim())) throw new Error("Visible Project fields are invalid.");
+    const fields = await this.#readProjectFields(projectId, token);
+    const available = new Set(fields.map((field) => field.id));
+    if (fieldIds.some((id) => !available.has(id))) throw new GitHubProjectsApiError("forbidden");
+  }
+
+  async #getProjectView(projectId: string, viewId: string, token: string, allowMissing = false): Promise<GitHubProjectView | null> {
+    const views = await this.#readProjectViews(projectId, token);
+    const found = views.find((entry) => entry.id === viewId);
+    if (!found) {
+      if (allowMissing) return null;
+      throw new GitHubProjectsApiError("forbidden");
+    }
+    return found;
+  }
+
+  async #readProjectViews(projectId: string, token: string): Promise<GitHubProjectView[]> {
+    const all: GitHubProjectView[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < 100; page += 1) {
+      const result: { node?: { id?: string; owner?: { login?: string }; views?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } } } | null } = await this.#graphql("RdmcpProjectViews", PROJECT_VIEWS, { projectId, after }, { token });
+      const views = result.node?.views;
+      if (result.node?.id !== projectId || result.node.owner?.login?.toLowerCase() !== this.expectedLogin.toLowerCase() || !Array.isArray(views?.nodes) || typeof views.pageInfo?.hasNextPage !== "boolean") throw new GitHubProjectsApiError("forbidden");
+      all.push(...views.nodes.map(parseProjectView));
+      if (!views.pageInfo.hasNextPage) return all;
+      if (typeof views.pageInfo.endCursor !== "string" || !views.pageInfo.endCursor || views.pageInfo.endCursor === after) throw new GitHubProjectsApiError("invalid_response");
+      after = views.pageInfo.endCursor;
+    }
+    throw new GitHubProjectsApiError("invalid_response");
+  }
+
+  async #verifyProjectField(projectId: string, fieldId: string, expected: NormalizedFieldDefinition): Promise<GitHubProjectField> {
+    let fields: GitHubProjectField[];
+    try { fields = await this.#readProjectFields(projectId, await this.#getToken()); }
+    catch (error) { throw unknownAfterMutation(error); }
+    const field = fields.find((entry) => entry.id === fieldId);
+    if (!field || field.isIssueField || field.name !== expected.name || field.type !== dataTypeToFieldType(expected.dataType)) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    if (expected.singleSelectOptions && !sameOptions(field.options ?? [], expected.singleSelectOptions)) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    if (expected.multiSelectOptions && !sameOptions(field.options ?? [], expected.multiSelectOptions)) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    if (expected.iterationConfiguration && !sameIterationConfiguration(field.iterationConfiguration, expected.iterationConfiguration)) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    return field;
+  }
+
+  async #verifyProjectView(projectId: string, viewId: string, expected: Partial<GitHubProjectViewInput>): Promise<GitHubProjectView> {
+    let view: GitHubProjectView | null;
+    try { view = await this.#getProjectView(projectId, viewId, await this.#getToken()); }
+    catch (error) { throw unknownAfterMutation(error); }
+    if (!view || (expected.name !== undefined && view.name !== expected.name) || (expected.layout !== undefined && view.layout !== expected.layout) || (expected.filter !== undefined && view.filter !== expected.filter) || (expected.visibleFieldIds !== undefined && !sameStringArray(view.visibleFieldIds, expected.visibleFieldIds))) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    return view;
   }
 
   async #verifyProject(projectId: string, expected: { title?: string; shortDescription?: string }, token: string): Promise<GitHubProjectSummary> {
@@ -355,16 +551,146 @@ function parseField(value: unknown): GitHubProjectField {
   const item = value as Record<string, unknown>;
   if (typeof item.id !== "string" || typeof item.name !== "string" || typeof item.__typename !== "string" || typeof item.isIssueField !== "boolean") throw new GitHubProjectsApiError("invalid_response");
   const type = item.__typename === "ProjectV2SingleSelectField" ? "SINGLE_SELECT"
+    : item.__typename === "ProjectV2MultiSelectField" ? "MULTI_SELECT"
     : item.__typename === "ProjectV2IterationField" ? "ITERATION"
     : item.__typename === "ProjectV2Field" && item.dataType === "TEXT" ? "TEXT"
     : item.__typename === "ProjectV2Field" && item.dataType === "NUMBER" ? "NUMBER"
     : item.__typename === "ProjectV2Field" && item.dataType === "DATE" ? "DATE"
     : "UNKNOWN";
-  const options = item.options === undefined ? undefined : Array.isArray(item.options) ? item.options.map((option) => {
+  const rawOptions = item.__typename === "ProjectV2MultiSelectField" ? item.multiSelectOptions : item.options;
+  const options = rawOptions === undefined ? undefined : Array.isArray(rawOptions) ? rawOptions.map((option) => {
     if (typeof option !== "object" || option === null || typeof (option as Record<string, unknown>).id !== "string" || typeof (option as Record<string, unknown>).name !== "string") throw new GitHubProjectsApiError("invalid_response");
-    return { id: (option as { id: string }).id, name: (option as { name: string }).name };
+    const record = option as { id: string; name: string; color?: unknown; description?: unknown };
+    if (typeof record.color !== "string" || typeof record.description !== "string") throw new GitHubProjectsApiError("invalid_response");
+    return { id: record.id, name: record.name, color: record.color, description: record.description };
   }) : (() => { throw new GitHubProjectsApiError("invalid_response"); })();
-  return { id: item.id, name: item.name, type, isIssueField: item.isIssueField, ...(options ? { options } : {}) };
+  let iterationConfiguration: GitHubProjectField["iterationConfiguration"];
+  if (item.configuration !== undefined && item.configuration !== null) {
+    if (typeof item.configuration !== "object") throw new GitHubProjectsApiError("invalid_response");
+    const config = item.configuration as Record<string, unknown>;
+    if (typeof config.duration !== "number" || typeof config.startDay !== "number" || !Array.isArray(config.iterations)) throw new GitHubProjectsApiError("invalid_response");
+    const iterations = config.iterations.map((value) => {
+      if (typeof value !== "object" || value === null) throw new GitHubProjectsApiError("invalid_response");
+      const iteration = value as Record<string, unknown>;
+      if (typeof iteration.id !== "string" || typeof iteration.title !== "string" || typeof iteration.startDate !== "string" || typeof iteration.duration !== "number") throw new GitHubProjectsApiError("invalid_response");
+      return { id: iteration.id, title: iteration.title, startDate: iteration.startDate, duration: iteration.duration };
+    });
+    iterationConfiguration = { duration: config.duration, startDate: iterations[0]?.startDate ?? null, startDay: config.startDay, iterations };
+  }
+  return { id: item.id, name: item.name, type, isIssueField: item.isIssueField, ...(options ? { options } : {}), ...(iterationConfiguration ? { iterationConfiguration } : {}) };
+}
+
+type NormalizedFieldDefinition = {
+  dataType: "TEXT" | "NUMBER" | "DATE" | "SINGLE_SELECT" | "MULTI_SELECT" | "ITERATION";
+  name: string;
+  singleSelectOptions?: Array<{ id?: string; name: string; color: string; description: string }>;
+  multiSelectOptions?: Array<{ id?: string; name: string; color: string; description: string }>;
+  iterationConfiguration?: { duration: number; startDate: string; iterations: Array<{ id?: string; title: string; startDate: string; duration?: number }> };
+};
+
+function normalizeFieldDefinition(input: GitHubProjectFieldDefinition): NormalizedFieldDefinition {
+  if (typeof input !== "object" || input === null) throw new Error("The Project field definition is invalid.");
+  const name = requireText(input.name, "name", 256);
+  if (input.type === "TEXT" || input.type === "NUMBER" || input.type === "DATE") return { dataType: input.type, name };
+  if (input.type === "SINGLE_SELECT" || input.type === "MULTI_SELECT") {
+    const options = normalizeOptions(input.options ?? []);
+    if (!options.length) throw new Error("A single-select field needs at least one option.");
+    return { dataType: input.type, name, ...(input.type === "SINGLE_SELECT" ? { singleSelectOptions: options } : { multiSelectOptions: options }) };
+  }
+  if (input.type === "ITERATION") {
+    if (!input.iterationConfiguration) throw new Error("An iteration field needs an iteration configuration.");
+    return { dataType: input.type, name, iterationConfiguration: normalizeIterationConfiguration(input.iterationConfiguration) };
+  }
+  throw new Error("The Project field type is unsupported.");
+}
+
+function preserveOptionIds(current: Array<{ id: string; name: string; color: string; description: string }>, requested: Array<{ id?: string; name: string; color?: string; description?: string }>): Array<{ id?: string; name: string; color: string; description: string }> {
+  const options = normalizeOptions(requested);
+  const byId = new Map(current.map((option) => [option.id, option]));
+  const byName = new Map(current.map((option) => [option.name.toLocaleLowerCase(), option]));
+  return options.map((option, index) => {
+    const requestedOption = requested[index]!;
+    const prior = option.id ? byId.get(option.id) : byName.get(option.name.toLocaleLowerCase());
+    if (option.id && !prior) throw new Error("A single-select option ID does not belong to this Project field.");
+    return { ...(prior ? { id: prior.id } : option.id ? { id: option.id } : {}), name: option.name, color: requestedOption.color ?? prior?.color ?? "GRAY", description: requestedOption.description ?? prior?.description ?? "" };
+  });
+}
+
+function normalizeOptions(options: Array<{ id?: string; name: string; color?: string; description?: string }>): Array<{ id?: string; name: string; color: string; description: string }> {
+  if (!Array.isArray(options) || options.length > 100) throw new Error("Project field options are invalid.");
+  const colors = ["BLUE", "GRAY", "GREEN", "ORANGE", "PINK", "PURPLE", "RED", "YELLOW"];
+  const result = options.map((option) => {
+    const color = option.color ?? "GRAY";
+    if (!colors.includes(color) || (option.description !== undefined && (typeof option.description !== "string" || option.description.length > 1000))) throw new Error("Project field option metadata is invalid.");
+    return { ...(option.id !== undefined ? { id: requireText(option.id, "optionId", 200) } : {}), name: requireText(option.name, "optionName", 256), color, description: option.description ?? "" };
+  });
+  if (new Set(result.map((option) => option.id).filter(Boolean)).size !== result.filter((option) => option.id).length || new Set(result.map((option) => option.name.toLocaleLowerCase())).size !== result.length) throw new Error("Project field options must be unique.");
+  return result;
+}
+
+function normalizeIterationConfiguration(input: NonNullable<Extract<GitHubProjectFieldDefinition, { type: "ITERATION" }>["iterationConfiguration"]>): NonNullable<NormalizedFieldDefinition["iterationConfiguration"]> {
+  if (!Number.isInteger(input.duration) || input.duration < 1 || input.duration > 365 || !validDate(input.startDate) || !Array.isArray(input.iterations) || input.iterations.length > 100) throw new Error("The iteration configuration is invalid.");
+  const iterations = input.iterations.map((iteration) => ({ ...(iteration.id !== undefined ? { id: requireText(iteration.id, "iterationId", 200) } : {}), title: requireText(iteration.title, "iterationTitle", 256), startDate: requireText(iteration.startDate, "iterationStartDate", 10), ...(iteration.duration !== undefined ? { duration: iteration.duration } : {}) }));
+  if (iterations.some((iteration) => !validDate(iteration.startDate) || (iteration.duration !== undefined && (!Number.isInteger(iteration.duration) || iteration.duration < 1 || iteration.duration > 365)))) throw new Error("The iteration configuration is invalid.");
+  return { duration: input.duration, startDate: input.startDate, iterations };
+}
+
+function preserveIterationIds(current: GitHubProjectField["iterationConfiguration"], requested: NonNullable<Extract<GitHubProjectFieldDefinition, { type: "ITERATION" }>["iterationConfiguration"]>) {
+  const normalized = normalizeIterationConfiguration(requested);
+  const byId = new Map((current?.iterations ?? []).map((iteration) => [iteration.id, iteration]));
+  const byTitle = new Map((current?.iterations ?? []).map((iteration) => [iteration.title.toLocaleLowerCase(), iteration]));
+  normalized.iterations = normalized.iterations.map((iteration) => {
+    const prior = iteration.id ? byId.get(iteration.id) : byTitle.get(iteration.title.toLocaleLowerCase());
+    if (iteration.id && !prior) throw new Error("An iteration ID does not belong to this Project field.");
+    return prior ? { ...iteration, id: prior.id } : iteration;
+  });
+  return normalized;
+}
+
+function fieldTypeToDataType(type: GitHubProjectField["type"]): NormalizedFieldDefinition["dataType"] {
+  if (type === "TEXT" || type === "NUMBER" || type === "DATE" || type === "SINGLE_SELECT" || type === "MULTI_SELECT" || type === "ITERATION") return type;
+  throw new Error("The Project field type is unsupported.");
+}
+
+function dataTypeToFieldType(type: NormalizedFieldDefinition["dataType"]): GitHubProjectField["type"] { return type; }
+
+function sameOptions(actual: Array<{ id: string; name: string; color: string; description: string }>, expected: Array<{ id?: string; name: string; color: string; description: string }>): boolean {
+  return actual.length === expected.length && expected.every((option, index) => actual[index]?.name === option.name && actual[index]?.color === option.color && actual[index]?.description === option.description && (!option.id || actual[index]?.id === option.id));
+}
+
+function sameIterationConfiguration(actual: GitHubProjectField["iterationConfiguration"], expected: NonNullable<NormalizedFieldDefinition["iterationConfiguration"]>): boolean {
+  return Boolean(actual && actual.duration === expected.duration && actual.startDate === expected.startDate && actual.iterations.length === expected.iterations.length && expected.iterations.every((iteration, index) => actual.iterations[index]?.title === iteration.title && actual.iterations[index]?.startDate === iteration.startDate && (!iteration.id || actual.iterations[index]?.id === iteration.id) && actual.iterations[index]?.duration === iteration.duration));
+}
+
+function sameStringArray(actual: string[], expected: string[]): boolean { return actual.length === expected.length && actual.every((value, index) => value === expected[index]); }
+
+function validDate(value: string): boolean { return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value; }
+
+function parseProjectView(value: unknown): GitHubProjectView {
+  if (typeof value !== "object" || value === null) throw new GitHubProjectsApiError("invalid_response");
+  const item = value as Record<string, unknown>;
+  const visibleFields = (item.configuration as { visibleFields?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean } } } | undefined)?.visibleFields;
+  if (typeof item.id !== "string" || typeof item.name !== "string" || !["TABLE_LAYOUT", "BOARD_LAYOUT", "ROADMAP_LAYOUT"].includes(String(item.layout)) || (item.filter !== null && item.filter !== undefined && typeof item.filter !== "string") || !Array.isArray(visibleFields?.nodes) || visibleFields.pageInfo?.hasNextPage !== false || visibleFields.nodes.some((field) => typeof field !== "object" || field === null || typeof (field as { id?: unknown }).id !== "string")) throw new GitHubProjectsApiError("invalid_response");
+  return { id: item.id, name: item.name, layout: item.layout as GitHubProjectView["layout"], filter: typeof item.filter === "string" ? item.filter : "", visibleFieldIds: visibleFields.nodes.map((field) => (field as { id: string }).id) };
+}
+
+function normalizeViewInput(input: GitHubProjectViewInput, creating: boolean): GitHubProjectViewInput {
+  const result: GitHubProjectViewInput = {};
+  if (input.name !== undefined) result.name = requireText(input.name, "name", 256);
+  else if (creating) throw new Error("A view name is required.");
+  if (input.layout !== undefined) {
+    if (!["TABLE_LAYOUT", "BOARD_LAYOUT", "ROADMAP_LAYOUT"].includes(input.layout)) throw new Error("The Project view layout is invalid.");
+    result.layout = input.layout;
+  } else if (creating) throw new Error("A view layout is required.");
+  if (input.filter !== undefined) {
+    if (typeof input.filter !== "string" || input.filter.length > 10_000) throw new Error("The Project view filter is invalid.");
+    result.filter = input.filter;
+  }
+  if (input.visibleFieldIds !== undefined) {
+    if (!Array.isArray(input.visibleFieldIds) || input.visibleFieldIds.length > 100 || input.visibleFieldIds.some((id) => typeof id !== "string" || !id.trim())) throw new Error("Visible Project fields are invalid.");
+    result.visibleFieldIds = [...input.visibleFieldIds];
+  }
+  return result;
 }
 
 function parseProjectItem(value: unknown): GitHubProjectItem {

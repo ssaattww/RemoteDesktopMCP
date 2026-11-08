@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { GitHubProjectsApi, GitHubProjectsApiError, type GitHubProjectFieldValue } from "./github-projects-api.js";
+import { GitHubProjectsApi, GitHubProjectsApiError, type GitHubProjectFieldDefinition, type GitHubProjectFieldValue, type GitHubProjectViewInput } from "./github-projects-api.js";
 
 export type GitHubProjectsScope = "github-projects:read" | "github-projects:write" | "github-projects:read github-projects:write";
 export type GitHubProjectsAudit = (event: string, detail: Record<string, unknown>) => Promise<void>;
@@ -50,6 +50,23 @@ export function createGitHubProjectsServer(input: {
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_fields_list", error, project_id);
         return operationError("Project fields could not be listed.", error, false);
+      }
+    });
+
+    server.registerTool("project_views_list", {
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      description: "List views of a personal Project, including layout, filter, and visible fields.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200) },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_views_list", projectId: project_id });
+      try {
+        const views = await input.api.listProjectViews(project_id);
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_views_list", projectId: project_id, count: views.length });
+        return { content: [{ type: "text", text: JSON.stringify(views) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_views_list", error, project_id);
+        return operationError("Project views could not be listed.", error, false);
       }
     });
 
@@ -152,6 +169,133 @@ export function createGitHubProjectsServer(input: {
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_item_set_field_value", error, project_id);
         return operationError("The Project field value could not be set; check its current state before deciding whether to try again.", error, true);
+      }
+    });
+
+    const iterationConfigurationSchema = z.object({
+      duration: z.number().int().min(1).max(365),
+      start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      iterations: z.array(z.object({ id: z.string().trim().min(1).max(200).optional(), title: z.string().trim().min(1).max(256), start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), duration: z.number().int().min(1).max(365) })).max(100),
+    });
+    const fieldDefinitionSchema = z.discriminatedUnion("type", [
+      z.object({ type: z.enum(["TEXT", "NUMBER", "DATE"]), name: z.string().trim().min(1).max(256) }),
+      z.object({ type: z.literal("SINGLE_SELECT"), name: z.string().trim().min(1).max(256), options: z.array(z.object({ id: z.string().trim().min(1).max(200).optional(), name: z.string().trim().min(1).max(256), color: z.enum(["BLUE", "GRAY", "GREEN", "ORANGE", "PINK", "PURPLE", "RED", "YELLOW"]).optional(), description: z.string().max(1000).optional() })).min(1).max(100) }),
+      z.object({ type: z.literal("MULTI_SELECT"), name: z.string().trim().min(1).max(256), options: z.array(z.object({ id: z.string().trim().min(1).max(200).optional(), name: z.string().trim().min(1).max(256), color: z.enum(["BLUE", "GRAY", "GREEN", "ORANGE", "PINK", "PURPLE", "RED", "YELLOW"]).optional(), description: z.string().max(1000).optional() })).min(1).max(100) }),
+      z.object({ type: z.literal("ITERATION"), name: z.string().trim().min(1).max(256), iteration_configuration: iterationConfigurationSchema }),
+    ]);
+    const toFieldDefinition = (definition: z.infer<typeof fieldDefinitionSchema>): GitHubProjectFieldDefinition => {
+      if (definition.type !== "ITERATION") return definition;
+      const config = definition.iteration_configuration;
+      return { type: definition.type, name: definition.name, ...(config ? { iterationConfiguration: { duration: config.duration, startDate: config.start_date, iterations: config.iterations.map((iteration) => ({ ...(iteration.id ? { id: iteration.id } : {}), title: iteration.title, startDate: iteration.start_date, duration: iteration.duration })) } } : {}) };
+    };
+
+    server.registerTool("project_field_create", {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      description: "Create a supported custom text, number, date, single-select, or iteration field for a personal Project.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), definition: fieldDefinitionSchema },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, definition }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_field_create", projectId: project_id });
+      try {
+        const result = await input.api.createProjectField(project_id, toFieldDefinition(definition));
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_field_create", projectId: project_id, fieldId: result.field.id, applied: result.outcome.applied });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_field_create", error, project_id);
+        return operationError("The Project field could not be created; check its current state before deciding whether to try again.", error, true);
+      }
+    });
+
+    server.registerTool("project_field_update", {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      description: "Update a supported custom Project field. Existing option or iteration IDs can be supplied to preserve their identities.",
+      inputSchema: {
+        project_id: z.string().trim().min(1).max(200), field_id: z.string().trim().min(1).max(200),
+        definition: z.object({ name: z.string().trim().min(1).max(256).optional(), options: z.array(z.object({ id: z.string().trim().min(1).max(200).optional(), name: z.string().trim().min(1).max(256), color: z.enum(["BLUE", "GRAY", "GREEN", "ORANGE", "PINK", "PURPLE", "RED", "YELLOW"]).optional(), description: z.string().max(1000).optional() })).max(100).optional(), iteration_configuration: iterationConfigurationSchema.optional() }),
+      },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, field_id, definition }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_field_update", projectId: project_id, fieldId: field_id });
+      try {
+        const result = await input.api.updateProjectField(project_id, field_id, {
+          ...(definition.name ? { name: definition.name } : {}), ...(definition.options ? { options: definition.options } : {}),
+          ...(definition.iteration_configuration ? { iterationConfiguration: { duration: definition.iteration_configuration.duration, startDate: definition.iteration_configuration.start_date, iterations: definition.iteration_configuration.iterations.map((iteration) => ({ ...(iteration.id ? { id: iteration.id } : {}), title: iteration.title, startDate: iteration.start_date, duration: iteration.duration })) } } : {}),
+        });
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_field_update", projectId: project_id, fieldId: field_id, applied: result.outcome.applied });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_field_update", error, project_id);
+        return operationError("The Project field could not be updated; check its current state before deciding whether to try again.", error, true);
+      }
+    });
+
+    server.registerTool("project_field_delete", {
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      description: "Delete a supported custom Project field. Existing values for this field may be removed.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), field_id: z.string().trim().min(1).max(200) },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, field_id }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_field_delete", projectId: project_id, fieldId: field_id });
+      try {
+        const result = await input.api.deleteProjectField(project_id, field_id);
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_field_delete", projectId: project_id, fieldId: field_id, applied: result.applied });
+        return { content: [{ type: "text", text: JSON.stringify({ ...result, warning: "Existing values for the deleted field may have been removed." }) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_field_delete", error, project_id);
+        return operationError("The Project field could not be deleted; check its current state before deciding whether to try again.", error, true);
+      }
+    });
+
+    const viewInputSchema = z.object({ name: z.string().trim().min(1).max(256).optional(), layout: z.enum(["TABLE_LAYOUT", "BOARD_LAYOUT", "ROADMAP_LAYOUT"]).optional(), filter: z.string().max(10_000).optional(), visible_field_ids: z.array(z.string().trim().min(1).max(200)).max(100).optional() });
+    const toViewInput = (value: z.infer<typeof viewInputSchema>): GitHubProjectViewInput => ({ ...(value.name ? { name: value.name } : {}), ...(value.layout ? { layout: value.layout } : {}), ...(value.filter !== undefined ? { filter: value.filter } : {}), ...(value.visible_field_ids ? { visibleFieldIds: value.visible_field_ids } : {}) });
+    server.registerTool("project_view_create", {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      description: "Create a Project view with a supported layout, filter, and visible-field selection.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), name: z.string().trim().min(1).max(256), layout: z.enum(["TABLE_LAYOUT", "BOARD_LAYOUT", "ROADMAP_LAYOUT"]), filter: z.string().max(10_000).optional(), visible_field_ids: z.array(z.string().trim().min(1).max(200)).max(100).optional() },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, name, layout, filter, visible_field_ids }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_view_create", projectId: project_id });
+      try {
+        const result = await input.api.createProjectView(project_id, { name, layout, ...(filter !== undefined ? { filter } : {}), ...(visible_field_ids ? { visibleFieldIds: visible_field_ids } : {}) });
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_view_create", projectId: project_id, viewId: result.view.id, applied: result.outcome.applied });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_view_create", error, project_id);
+        return operationError("The Project view could not be created; check its current state before deciding whether to try again.", error, true);
+      }
+    });
+
+    server.registerTool("project_view_update", {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      description: "Update a Project view's name, layout, filter, or visible fields. Sorting and grouping changes are not exposed.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), view_id: z.string().trim().min(1).max(200), changes: viewInputSchema },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, view_id, changes }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_view_update", projectId: project_id, viewId: view_id });
+      try {
+        const result = await input.api.updateProjectView(project_id, view_id, toViewInput(changes));
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_view_update", projectId: project_id, viewId: view_id, applied: result.outcome.applied });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_view_update", error, project_id);
+        return operationError("The Project view could not be updated; check its current state before deciding whether to try again.", error, true);
+      }
+    });
+
+    server.registerTool("project_view_delete", {
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      description: "Delete a Project view without deleting or changing the Project itself.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), view_id: z.string().trim().min(1).max(200) },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, view_id }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_view_delete", projectId: project_id, viewId: view_id });
+      try {
+        const result = await input.api.deleteProjectView(project_id, view_id);
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_view_delete", projectId: project_id, viewId: view_id, applied: result.applied });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_view_delete", error, project_id);
+        return operationError("The Project view could not be deleted; check its current state before deciding whether to try again.", error, true);
       }
     });
   }

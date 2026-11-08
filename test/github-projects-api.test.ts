@@ -142,7 +142,7 @@ test("Project fields and Issue or pull request links use fixed read and add oper
     request: async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { operationName: string };
       operations.push(body.operationName);
-      if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2Field", id: "F_TEXT", name: "Notes", dataType: "TEXT", isIssueField: false }, { __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: "Status", dataType: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo" }] }, { __typename: "ProjectV2Field", id: "F_ISSUE_BODY", name: "Body", dataType: "TEXT", isIssueField: true }], pageInfo: { hasNextPage: false } } } } });
+      if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2Field", id: "F_TEXT", name: "Notes", dataType: "TEXT", isIssueField: false }, { __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: "Status", dataType: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo", color: "GRAY", description: "" }] }, { __typename: "ProjectV2Field", id: "F_ISSUE_BODY", name: "Body", dataType: "TEXT", isIssueField: true }], pageInfo: { hasNextPage: false } } } } });
       if (body.operationName === "RdmcpIssueOrPullRequest") return response({ data: { viewer: { login: "example" }, node: { __typename: "PullRequest", id: "PR_1" } } });
       if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
       if (body.operationName === "RdmcpAddProjectItem") return response({ data: { addProjectV2ItemById: { item: { id: "ITEM_1", type: "PULL_REQUEST" } } } });
@@ -151,7 +151,7 @@ test("Project fields and Issue or pull request links use fixed read and add oper
     },
   });
   const fields = await api.listProjectFields("PVT_1");
-  assert.deepEqual(fields, [{ id: "F_TEXT", name: "Notes", type: "TEXT", isIssueField: false }, { id: "F_STATUS", name: "Status", type: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo" }] }]);
+  assert.deepEqual(fields, [{ id: "F_TEXT", name: "Notes", type: "TEXT", isIssueField: false }, { id: "F_STATUS", name: "Status", type: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo", color: "GRAY", description: "" }] }]);
   assert.deepEqual(await api.addIssueOrPullRequest("PVT_1", "PR_1"), { itemId: "ITEM_1", outcome: { applied: true } });
   assert.deepEqual(operations, ["RdmcpProjectFields", "RdmcpProjectOwner", "RdmcpIssueOrPullRequest", "RdmcpAddProjectItem", "RdmcpProjectItemState"]);
 });
@@ -175,7 +175,7 @@ test("Project item field values are changed only for a supported field in the sa
       operations.push(body);
       if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
       if (body.operationName === "RdmcpProjectItemOwner") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", project: { id: "PVT_1" }, isArchived: false } } });
-      if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: "Status", dataType: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo" }] }], pageInfo: { hasNextPage: false } } } } });
+      if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: "Status", dataType: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo", color: "GRAY", description: "" }] }], pageInfo: { hasNextPage: false } } } } });
       if (body.operationName === "RdmcpSetProjectItemField") return response({ data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: "ITEM_1" } } } });
       if (body.operationName === "RdmcpProjectItemState") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", type: "ISSUE", project: { id: "PVT_1" }, isArchived: false, content: null, fieldValues: { nodes: [{ __typename: "ProjectV2ItemFieldSingleSelectValue", name: "Todo", optionId: "O_TODO", field: { id: "F_STATUS", name: "Status" } }], pageInfo: { hasNextPage: false } } } } });
       throw new Error(`Unexpected operation ${body.operationName}`);
@@ -195,4 +195,86 @@ test("Project item field values are changed only for a supported field in the sa
     },
   });
   await assert.rejects(rejected.setProjectItemField("PVT_1", "ITEM_1", "F_ISSUE_TEXT", { type: "TEXT", text: "must not edit Issue fields" }), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "forbidden");
+});
+
+test("custom field and view definitions use fixed Project-scoped mutations with readback", async () => {
+  const calls: Array<{ operationName: string; variables: Record<string, unknown>; query: string }> = [];
+  let field: Record<string, unknown> | undefined;
+  let view: Record<string, unknown> | undefined;
+  const fieldNodes = () => [{ __typename: "ProjectV2Field", id: "F_TITLE", name: "Title", dataType: "TEXT", isIssueField: false }, ...(field ? [{ ...field }] : [])];
+  const viewNode = () => view ? { ...view, configuration: { visibleFields: { nodes: (view.visibleFieldIds as string[]).map((id) => ({ id })), pageInfo: { hasNextPage: false } } } } : null;
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
+    request: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown>; query: string };
+      calls.push(body);
+      if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+      if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: fieldNodes(), pageInfo: { hasNextPage: false } } } } });
+      if (body.operationName === "RdmcpCreateProjectField") {
+        assert.equal(body.variables.dataType, "SINGLE_SELECT");
+        const options = body.variables.singleSelectOptions as Array<{ id?: string; name: string; color: string; description: string }>;
+        field = { __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: body.variables.name, dataType: "SINGLE_SELECT", isIssueField: false, options: options.map((option, index) => ({ ...option, id: option.id ?? `O_NEW_${index}` })) };
+        return response({ data: { createProjectV2Field: { projectV2Field: { id: "F_STATUS" } } } });
+      }
+      if (body.operationName === "RdmcpUpdateProjectField") {
+        const options = body.variables.singleSelectOptions as Array<{ id?: string; name: string; color: string; description: string }>;
+        field = { ...(field ?? {}), ...(typeof body.variables.name === "string" ? { name: body.variables.name } : {}), options: options.map((option, index) => ({ ...option, id: option.id ?? `O_NEW_${index}` })) };
+        return response({ data: { updateProjectV2Field: { projectV2Field: { id: "F_STATUS" } } } });
+      }
+      if (body.operationName === "RdmcpDeleteProjectField") { field = undefined; return response({ data: { deleteProjectV2Field: { projectV2Field: { id: "F_STATUS" } } } }); }
+      if (body.operationName === "RdmcpProjectViews") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, views: { nodes: view ? [viewNode()] : [], pageInfo: { hasNextPage: false } } } } });
+      if (body.operationName === "RdmcpCreateProjectView") {
+        const configuration = body.variables.configuration as { visibleFieldIds: string[] };
+        view = { id: "V_1", name: body.variables.name, layout: body.variables.layout, filter: body.variables.filter, visibleFieldIds: configuration.visibleFieldIds };
+        return response({ data: { createProjectV2View: { projectV2View: viewNode() } } });
+      }
+      if (body.operationName === "RdmcpUpdateProjectView") {
+        const configuration = body.variables.configuration as { visibleFieldIds: string[] };
+        view = { ...(view ?? {}), name: body.variables.name, layout: body.variables.layout, filter: body.variables.filter, visibleFieldIds: configuration.visibleFieldIds };
+        return response({ data: { updateProjectV2View: { projectV2View: { id: "V_1" } } } });
+      }
+      if (body.operationName === "RdmcpDeleteProjectView") { view = undefined; return response({ data: { deleteProjectV2View: { projectV2View: { id: "V_1" } } } }); }
+      throw new Error(`Unexpected operation ${body.operationName}`);
+    },
+  });
+
+  const createdField = await api.createProjectField("PVT_1", { type: "SINGLE_SELECT", name: "Status", options: [{ name: "Todo", color: "BLUE", description: "Not started" }] });
+  assert.deepEqual(createdField.field.options, [{ id: "O_NEW_0", name: "Todo", color: "BLUE", description: "Not started" }]);
+  const updatedField = await api.updateProjectField("PVT_1", "F_STATUS", { options: [{ id: "O_NEW_0", name: "Ready" }] });
+  assert.deepEqual(updatedField.field.options, [{ id: "O_NEW_0", name: "Ready", color: "BLUE", description: "Not started" }], "renaming preserves option identity and metadata");
+  assert.deepEqual(await api.deleteProjectField("PVT_1", "F_STATUS"), { applied: true });
+
+  const createdView = await api.createProjectView("PVT_1", { name: "Board", layout: "BOARD_LAYOUT", filter: "status:Todo", visibleFieldIds: ["F_TITLE"] });
+  assert.deepEqual(createdView.view, { id: "V_1", name: "Board", layout: "BOARD_LAYOUT", filter: "status:Todo", visibleFieldIds: ["F_TITLE"] });
+  const updatedView = await api.updateProjectView("PVT_1", "V_1", { name: "Roadmap", layout: "ROADMAP_LAYOUT" });
+  assert.equal(updatedView.view.name, "Roadmap");
+  assert.equal(updatedView.view.filter, "status:Todo", "unmodified view settings are retained");
+  assert.deepEqual(updatedView.view.visibleFieldIds, ["F_TITLE"]);
+  assert.deepEqual(await api.deleteProjectView("PVT_1", "V_1"), { applied: true });
+  assert.ok(calls.every((call) => call.query.startsWith("query Rdmcp") || call.query.startsWith("mutation Rdmcp")));
+  assert.ok(calls.some((call) => call.operationName === "RdmcpCreateProjectView" && /configuration/.test(call.query)));
+  assert.ok(calls.every((call) => !/deleteProjectV2\(/.test(call.query)), "Project deletion remains unavailable");
+});
+
+test("iteration field updates retain existing iteration IDs and verify the replacement", async () => {
+  const operations: Array<{ operationName: string; variables: Record<string, unknown> }> = [];
+  let configuration = { duration: 7, startDay: 1, iterations: [{ id: "ITER_1", title: "Week 1", startDate: "2026-11-02", duration: 7 }] };
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
+    request: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown> };
+      operations.push(body);
+      if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+      if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2IterationField", id: "F_ITER", name: "Sprint", dataType: "ITERATION", isIssueField: false, configuration }], pageInfo: { hasNextPage: false } } } } });
+      if (body.operationName === "RdmcpUpdateProjectField") {
+        const requested = body.variables.iterationConfiguration as typeof configuration;
+        configuration = { ...requested, startDay: 1, iterations: requested.iterations.map((iteration, index) => ({ ...iteration, id: iteration.id ?? `ITER_${index + 1}` })) };
+        return response({ data: { updateProjectV2Field: { projectV2Field: { id: "F_ITER" } } } });
+      }
+      throw new Error(`Unexpected operation ${body.operationName}`);
+    },
+  });
+  await api.updateProjectField("PVT_1", "F_ITER", { iterationConfiguration: { duration: 7, startDate: "2026-11-02", iterations: [{ title: "Week 1", startDate: "2026-11-02", duration: 7 }, { title: "Week 2", startDate: "2026-11-09", duration: 7 }] } });
+  const sent = operations.find((operation) => operation.operationName === "RdmcpUpdateProjectField")?.variables.iterationConfiguration as { iterations: Array<{ id?: string }> };
+  assert.equal(sent.iterations[0]?.id, "ITER_1");
+  assert.equal(sent.iterations.length, 2);
+  assert.equal(operations.at(-1)?.operationName, "RdmcpProjectFields", "the field is read back after replacement");
 });

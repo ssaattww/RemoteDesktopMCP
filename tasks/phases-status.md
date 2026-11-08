@@ -1,4 +1,4 @@
-﻿# Phase 一覧
+# Phase 一覧
 
 更新規則: このファイルは `task-breakdown-planner`、`task-consistency-manager`、`progress-sync-manager` を通してのみ更新する。
 
@@ -40,6 +40,6 @@
 
 | Phase | 内容 | 対象 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- |
-| GHP | Issue #94、PR #95・#96 merged、Stage 2 Draft PR pending | GHP-01〜GHP-06 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | GHP-01 設計と GHP-02 第1段はそれぞれ PR #95 / #96 として main に squash merge 済み。GHP-03 は部分実装で、欄定義・draft/archive・view が残る。GHP-06 は既存設計範囲の欄定義管理と view 操作を次工程として進行中。実 credential 設定・実 Project 書き込みは未実施 |
+| GHP | Issue #94、PR #95・#96 merged、第2段 PR #97 | GHP-01〜GHP-06 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | GHP-01 設計と第1段 GHP-02 は PR #95 / #96 として main に squash merge 済み。GHP-06 の独自欄定義と view 操作を PR #97 で実装中。Focused Projects tests 17件、check/build/lint、差分検査は成功。全体 npm test は328件中326件成功、1件 skip、1件失敗。既存のプロセス終了タイミング検査は単独実行で5件成功。実 credential 設定・実 Project 書き込みは未実施 |
 
-GHP の設計確認は完了。PR #95 の設計、PR #96 の第1段実装は main に統合済み。専用入口は scope 別 OAuth と Projects 用 MCP registry を持ち、PC MCP registry を経由しない。OS 保護資格情報 provider とローカル登録 CLI を追加したが、実際の登録・設定は行っていない。Project metadata、Issue／PR の追加、項目・対応欄の読取、対応する独自欄の更新を実装した。次工程 GHP-06 は欄定義管理と view 操作で、field schema、draft/archive、view は未実装。Linux Secret Service 実環境、実 GitHub 接続と書き込み、GHP-06 の検証・レビューは未確認または未完了。
+GHP の設計確認は完了。PR #95 の設計、PR #96 の第1段実装は main に統合済み。専用入口は scope 別 OAuth と Projects 用 MCP registry を持ち、PC MCP registry を経由しない。OS 保護資格情報 provider とローカル登録 CLI を追加したが、実際の登録・設定は行っていない。第2段 PR #97 で独自欄定義（text／number／date／single-select／multi-select／iteration）と view の固定 GraphQL 操作を実装中。Focused Projects tests、check、build、lint、差分検査は成功。全体テストは328件中326件成功、1件 skip、1件失敗。失敗した既存のプロセス終了タイミング検査は単独実行で5件成功。Linux Secret Service 実環境、実 GitHub 接続・書き込み、PR #97 の CI と通常・独立レビューは未確認または未完了。
