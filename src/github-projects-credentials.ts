@@ -141,7 +141,7 @@ async function windowsDpapi(operation: "protect" | "unprotect", data: string, ke
   const windows = process.env.WINDIR ?? process.env.SystemRoot ?? "C:\\Windows";
   const executable = path.join(windows, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const entropy = Buffer.from(key, "hex").toString("base64");
-  const response = await run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_SCRIPT], JSON.stringify({ operation, data, entropy }), ["WINDIR", "SystemRoot", "TEMP", "TMP", "PATH"], 30_000);
+  const response = await run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_SCRIPT], JSON.stringify({ operation, data, entropy }), ["WINDIR", "SystemRoot", "TEMP", "TMP", "PATH"], 60_000);
   if (response.code !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(response.stdout)) throw new Error("DPAPI operation failed.");
   const bytes = Buffer.from(response.stdout, "base64");
   return operation === "protect" ? response.stdout : bytes.toString("utf8");
