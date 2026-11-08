@@ -12,7 +12,8 @@ function credentialProvider(calls: string[] = []): GitHubProjectsCredentialProvi
 
 test("GitHub Projects client exposes only fixed self-owned project operations", async () => {
   const calls: Array<{ url: string; body: Record<string, unknown>; authorization: string | null }> = [];
-  const api = new GitHubProjectsApi("google:issuer:subject", "example", credentialProvider(), {
+  const credentialCalls: string[] = [];
+  const api = new GitHubProjectsApi("google:issuer:subject", "example", credentialProvider(credentialCalls), {
     request: async (input, init) => {
       calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, authorization: new Headers(init?.headers).get("authorization") });
       if (calls.length === 1) return response({ data: { viewer: { login: "example", projectsV2: { nodes: [project], pageInfo: { hasNextPage: false, endCursor: null } } } } });
@@ -31,7 +32,9 @@ test("GitHub Projects client exposes only fixed self-owned project operations", 
   assert.match(String(calls[0]?.body.query), /projectsV2/);
   assert.match(String(calls[1]?.body.query), /viewer \{ id login \}/);
   assert.doesNotMatch(String(calls[2]?.body.query), /deleteProjectV2|updateProjectV2Field|clearProjectV2ItemFieldValue/);
+  assert.doesNotMatch(String(calls[2]?.body.query), /viewer/);
   assert.equal(calls[2]?.body.variables && (calls[2]?.body.variables as Record<string, unknown>).ownerId, "U_1");
+  assert.deepEqual(credentialCalls, ["google:issuer:subject", "google:issuer:subject"], "the create flow pins the checked credential for its mutation");
   assert.equal("graphql" in api, false, "no public generic GraphQL method is exposed");
 });
 
@@ -73,6 +76,7 @@ test("project updates check owner before the fixed title/description mutation", 
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       calls.push(body);
       if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { owner: { login: "someone-else" } } } });
+      assert.doesNotMatch(String(body.query), /viewer/);
       return response({ data: { viewer: { login: "example" }, updateProjectV2: { projectV2: project } } });
     },
   });

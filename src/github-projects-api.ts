@@ -42,13 +42,11 @@ const LIST_PROJECTS = `query RdmcpListProjects($after: String) {
   } }
 }`;
 const CREATE_PROJECT = `mutation RdmcpCreateProject($ownerId: ID!, $title: String!) {
-  viewer { login }
   createProjectV2(input: { ownerId: $ownerId, title: $title }) {
     projectV2 { id title number url closed public }
   }
 }`;
 const UPDATE_PROJECT = `mutation RdmcpUpdateProject($projectId: ID!, $title: String, $shortDescription: String) {
-  viewer { login }
   updateProjectV2(input: { projectId: $projectId, title: $title, shortDescription: $shortDescription }) {
     projectV2 { id title number url closed public }
   }
@@ -92,10 +90,11 @@ export class GitHubProjectsApi {
 
   async createProject(title: string): Promise<{ project: GitHubProjectSummary; outcome: GitHubMutationOutcome }> {
     const cleanTitle = requireText(title, "title", 256);
-    const viewer = await this.#graphql<{ viewer?: { id?: string } }>("RdmcpViewerId", VIEWER_ID, {});
+    const token = await this.#getToken();
+    const viewer = await this.#graphql<{ viewer?: { id?: string } }>("RdmcpViewerId", VIEWER_ID, {}, { token });
     const ownerId = viewer.viewer?.id;
     if (!ownerId) throw new GitHubProjectsApiError("invalid_response");
-    const created = await this.#graphql<{ viewer?: { login?: string }; createProjectV2?: { projectV2?: unknown } }>("RdmcpCreateProject", CREATE_PROJECT, { ownerId, title: cleanTitle }, true);
+    const created = await this.#graphql<{ createProjectV2?: { projectV2?: unknown } }>("RdmcpCreateProject", CREATE_PROJECT, { ownerId, title: cleanTitle }, { token, mutation: true });
     if (!created.createProjectV2?.projectV2) throw new GitHubProjectsApiError("invalid_response", "unknown");
     return { project: parseProject(created.createProjectV2.projectV2), outcome: { applied: true } };
   }
@@ -105,16 +104,23 @@ export class GitHubProjectsApi {
     const title = input.title === undefined ? null : requireText(input.title, "title", 256);
     const shortDescription = input.shortDescription === undefined ? null : requireText(input.shortDescription, "shortDescription", 2000);
     if (title === null && shortDescription === null) throw new Error("At least one project property must be provided.");
-    const owner = await this.#graphql<{ node?: { owner?: { login?: string } } | null }>("RdmcpProjectOwner", PROJECT_OWNER, { projectId: id });
+    const token = await this.#getToken();
+    const owner = await this.#graphql<{ node?: { owner?: { login?: string } } | null }>("RdmcpProjectOwner", PROJECT_OWNER, { projectId: id }, { token });
     if (owner.node?.owner?.login !== this.expectedLogin) throw new GitHubProjectsApiError("forbidden");
-    const response = await this.#graphql<{ viewer?: { login?: string }; updateProjectV2?: { projectV2?: unknown } }>("RdmcpUpdateProject", UPDATE_PROJECT, { projectId: id, title, shortDescription }, true);
+    const response = await this.#graphql<{ updateProjectV2?: { projectV2?: unknown } }>("RdmcpUpdateProject", UPDATE_PROJECT, { projectId: id, title, shortDescription }, { token, mutation: true });
     if (!response.updateProjectV2?.projectV2) throw new GitHubProjectsApiError("invalid_response", "unknown");
     return { project: parseProject(response.updateProjectV2.projectV2), outcome: { applied: true } };
   }
 
-  async #graphql<T>(operation: string, query: string, variables: Record<string, unknown>, mutation = false): Promise<T> {
+  async #getToken(): Promise<string> {
     const token = await this.credentials.getToken(this.principal);
     if (!token || token.length > 16_384 || /[\r\n]/.test(token)) throw new GitHubProjectsApiError("credential_unavailable");
+    return token;
+  }
+
+  async #graphql<T>(operation: string, query: string, variables: Record<string, unknown>, options: { token?: string; mutation?: boolean } = {}): Promise<T> {
+    const token = options.token ?? await this.#getToken();
+    const mutation = options.mutation ?? false;
     let response: Response;
     try {
       response = await this.request(GRAPHQL_URL, {
@@ -137,8 +143,10 @@ export class GitHubProjectsApi {
     catch { throw new GitHubProjectsApiError("invalid_response", mutation ? "unknown" : false); }
     if (Array.isArray(payload.errors) && payload.errors.length > 0) throw new GitHubProjectsApiError("api_error", mutation ? "unknown" : false);
     if (!payload.data) throw new GitHubProjectsApiError("invalid_response", mutation ? "unknown" : false);
-    const viewer = (payload.data as { viewer?: Viewer }).viewer;
-    if (!viewer || viewer.login !== this.expectedLogin) throw new GitHubProjectsApiError("identity_mismatch", mutation ? "unknown" : false);
+    if (!mutation) {
+      const viewer = (payload.data as { viewer?: Viewer }).viewer;
+      if (!viewer || viewer.login !== this.expectedLogin) throw new GitHubProjectsApiError("identity_mismatch");
+    }
     return payload.data;
   }
 }
