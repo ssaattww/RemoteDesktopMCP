@@ -153,3 +153,19 @@ DR-003 と NR-009 の完了は次候補の両 OS CI と同じ reviewer の確認
 | TODO-HISTORY-02 | TODO-HISTORY | 履歴記録、MCP・HTTP参照、矢印切替とサブTodo案内文削除 | TODO-HISTORY-01 | L | 正常更新の前後値、削除、終了セッション、所有者境界、読み取り専用、矢印の端点を回帰検証 | 必須指摘 R84-N01・N03 の修正と関連検証を実施。P2 の R84-N02 は頻度不明・任意強化として保留。同じ担当の修正確認結果は通常レビュー報告を参照 |
 | TODO-HISTORY-03 | TODO-HISTORY | 検証・通常レビュー・独立レビュー・PR公開 | TODO-HISTORY-02 | M | 検証証拠、レビュー、コミット、PR、HEAD一致CIを区別して報告 | Draft PR #93 公開済み。通常レビューと修正確認は報告に記録。全体検証・独立レビュー・最終 CI の完了は最終の証拠と区別して確認する |
 | TODO-HISTORY-04 | TODO-HISTORY | 全体検証の公開ツール一覧の期待値を新しい読み取りツールに整合させる | TODO-HISTORY-02 | S | 実際の公開ツールの一覧・読み取り専用属性・OAuth・必須入力の検証を維持して成功し、同じレビュー担当が確認 | V84-01 は期待一覧1項目のみ整合し対象1件成功。未変更 NR003/NR004 は単独で親子2件成功。初回全体試験の2失敗と原因不明を保持し、同じ担当の確認後に新候補を全体検証する |
+
+## GitHub Projects 専用操作（Issue #94 / Draft PR #95）
+
+この節は task-consistency-manager と progress-sync-manager により追加する。branch は codex/issue-94-github-projects。既存の他タスクの状態は変更しない。
+
+| Task | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
+| --- | --- | --- | --- | --- | --- | --- |
+| GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 着手前確認中 |
+| GHP-02 | GHP | 専用 MCP 入口と認証・GitHub API client | GHP-01 | L | PC backend 不使用、固定 API、対象照合、read/write/admin 隔離 | 未着手 |
+| GHP-03 | GHP | Project・項目・field・view 等の読み書き | GHP-02 | L | 型付き操作、schema、Status/Priority、draft、archive、管理操作の対応表と試験 | 未着手 |
+| GHP-04 | GHP | 監査・停止・結果不明・境界と回帰検証 | GHP-02,GHP-03 | L | mock 契約試験、公開定義、PC 経路拒否、必要な check/build/lint と review | 未着手 |
+| GHP-05 | GHP | 本番認証・credential と運用検証 | GHP-04、操作時の個別承認 | M | 承認済み検証環境で限定的 write/read-back、本番設定の個別判断 | 承認まで保留 |
+
+### 最新の順序変更（Issue #94）
+
+ユーザーの最新指示により、GHP-01 は要件整理をユーザーと進める段階に戻す。製品設計の確定と GHP-02〜04 の実装・検証は先行させない。成果は reports/issue-94-requirements-intake-20261108.md に記録する。正式な branch・Draft PR #95・Issue #94 の対応は読戻し済み。新規の親・実装担当は Luna を明示し、設計には必要に応じて Sol を使用する。運用認証は未承認のまま保留する。

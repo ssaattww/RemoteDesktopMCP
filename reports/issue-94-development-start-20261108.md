@@ -2,7 +2,7 @@
 
 ## 対象と権限
 
-- Issue: https://github.com/ssaattww/RemoteDesktopMCP/issues/94
+- Issue: <https://github.com/ssaattww/RemoteDesktopMCP/issues/94>
 - branch: codex/issue-94-github-projects
 - base: main、45d73947dc7f2e56546eb3c2e6c028ff1cc54759
 - ユーザーは専用 branch、Draft PR、Issue との紐付け、開発開始を承認した。
