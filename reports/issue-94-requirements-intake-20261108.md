@@ -94,17 +94,19 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 ### 採用方針と具体案（実装・credential 設定は未承認）
 
 - 認証方式は、利用者本人が GitHub で発行した個人 PAT を RDMCP に直接設定する。GitHub App は今回採用しない。RDMCP アカウントと GitHub user account は一対一で結び、credential を他アカウントと共有しない。将来の複数連携・アカウント切替の仕様や実装は今回決めない。
-- PAT は ChatGPT／MCP 会話・tool 引数ではなく既存 `.env` 設定に一度登録する案。`src/bootstrap.ts` は起動時に `.env` と親 folder の ACL を検査してから読み込み、`src/remote-auth-cli.ts` は `createPrivateFile` を使って `.env` を作成する。新しい credential UI や vault は追加しない。
-- 既存方式は OS ACL／file mode で `.env` の読み書きを制限するが、secret は暗号化されず平文でディスクにある。これを既存境界として再利用し、`.env` が workspace/repository/共有領域に入らず、permission 検査に通ることを使う。サービスアカウントまたはその管理者権限を得た攻撃者への at-rest 秘匿は保証しない。
-- PAT は server process 内だけで使い、GitHub API の Authorization header に限って渡す。`src/private-storage.ts` の child environment filter で PAT env name を除外し、`src/index.ts` の admin `get_config` filter でも秘匿する。API body、Authorization header、PAT を audit／operation detail／error に残さず、既存の固定 error code を用いる。現在の filter は Google client secret 等だけを対象にしており、PAT 除外は未実装。
+- 既存 `.env` は OS ACL／file mode で読取りを制限するが、secret は平文でディスクにある。期限なし classic PAT の保管先としては、ファイル ACL だけを安全策とする案を既定にしない。
+- 保管方式の比較：Windows DPAPI の CurrentUser 保護は OS が鍵を管理し、アプリ独自の暗号鍵設定や追加 npm 依存を避けられる。対象ホストの同じ Windows 利用者でサービスを常時実行できる場合に適するが、プロファイル・アカウント・ホストの移行や破損では復号できず PAT の再登録が必要になる。Credential Manager も OS 管理だが、現行コードに連携がなく API／運用を新設する必要がある。Linux の Secret Service はログインセッション上の keyring に保管できる一方、headless／自動起動環境で D-Bus サービスや unlock が利用可能かを確認できていない。暗号化ファイルと鍵を同じ `.env` に置く案は、両方のファイルを取得された場合に復号され、今回の目的への改善が限定的である。
+- 実用的な最小案は、運用先が現在の Windows PC であることを確認したうえで、PAT を DPAPI CurrentUser で暗号化した versioned blob として `DATA_DIR` 内に保存し、既存 `createPrivateFile`／private ACL と原子的なファイル更新を併用すること。復号権限を持つ Windows 利用者とサービスの実行主体を一致させる。DPAPI はファイル ACL の代替ではなく補完であり、同じ利用者権限で実行される悪意あるプロセスや管理者権限からは秘匿できない。RDMCP が Linux 等で稼働する場合は Secret Service が実際に利用可能かを確認するまで、平文 `.env` にフォールバックせず起動時に未対応として失敗させる案とする。
+- PAT の登録入力には既存 `remote-auth-cli` を使う候補だが、現行 `ask()` は通常の readline で入力を隠さない。実装する場合は秘密入力を画面表示せず、PAT をコマンド引数・shell history・MCP 会話・ログに載せない経路を設ける。保管後は server process 内でのみ復号し、GitHub API の Authorization header にだけ使う。child process、admin `get_config`、audit／operation detail／error へ渡さない。実行中の同一プロセス侵害に対する秘匿は保証しない。
+- PAT は server process 内だけで復号し、GitHub API の Authorization header に限って渡す。PAT を環境変数に置かず、`src/index.ts` の admin `get_config` に保存情報を出さない。API body、Authorization header、PAT を audit／operation detail／error に残さず、既存の固定 error code を用いる。既存 child environment filter は Google client secret 等を除外するが、PAT 保管・復号機能は未実装。
 - 一対一対応は PAT 登録時の GitHub user ID を検証して記録する案。GitHub `GET /user` の owner check は Project #4 の read/write 権限検証とは別。今回の初期運用対象は一 account のみとし、複数利用者用 UI・mapping・切替を追加しない。
 - 401 が返ったら GitHub Projects 操作を止め、繰り返し retry/prompt しない。credential を自動削除・自動更新せず、一度だけ利用停止と原因を知らせる。403 は権限または org policy による拒否の可能性を示し、token 再設定を促さない。PAT の失効・期限切れ後に GitHub が復活を許さないため、例外時の再発行は利用者が明示的に再開を選んだ場合だけ案内する。
-- 外部設定は GitHub で本人が PAT を一度発行し、既存 `.env` に安全に登録すること。期限なしの classic PAT が選べ、利用元の組織ポリシーにも反しない場合は、通常の期限切れ再入力を避ける運用候補。ただし classic PAT は fine-grained PAT より広く、GitHub は本人がアクセスできる repository を広く扱えると注意している。実際の範囲は付与 scope にも依存するが、必要 scope の選定は権限粒度調査の保留対象であり、今回は確定しない。fine-grained PAT は personal Project #4 を含む user-owned Projects に使えないという現行資料上の制約がある。classic PAT の広い access を許容できるかは残る協議事項。
+- 外部設定は GitHub で本人が PAT を一度発行し、実装時に承認された安全な登録手順で保管すること。期限なしの classic PAT が選べ、利用元の組織ポリシーにも反しない場合は、通常の期限切れ再入力を避ける運用候補。ただし classic PAT は fine-grained PAT より広く、GitHub は本人がアクセスできる repository を広く扱えると注意している。実際の範囲は付与 scope にも依存するが、必要 scope の選定は権限粒度調査の保留対象であり、今回は確定しない。fine-grained PAT は personal Project #4 を含む user-owned Projects に使えないという現行資料上の制約がある。classic PAT の広い access を許容できるかは残る協議事項。
 - 期限なし PAT でも放置すれば無期限に有効とは限らない。GitHub は PAT を1年間未使用の場合に自動削除する。通常の Projects 操作を使う間は token 使用が継続する想定だが、長期間 RDMCP を使わなかった後の再開では新 token が必要になる可能性を残す。
 - 組織リソースについて、組織 owner は classic／fine-grained 両 PAT を拒否できる。fine-grained PAT は管理者承認必須にもでき、期限ポリシーに合わない token はその組織への API 呼出し時に拒否され得る。これらは organization resource へのアクセス制限であり、個人 Project #4 の利用可否とは分けて扱う。将来 organization Project を対象にするときは、organization／enterprise policy・SSO・承認状態の確認が必要。
 - credential 発行・設定・継続利用・権限変更は操作時の個別確認を得る。
 
-上記は本人の認証方式決定に沿った既存 `.env` 利用案であり、PAT env support、GitHub ID owner check、secret exclusion、401/403 分類は未実装。`.env` は既存 ACL 保護下でも暗号化されない。通常利用で token の再入力を求めない方針は確定したが、PAT の失効後に再入力なしで復活できると約束することはできない。PAT が期限切れまたは revoke された場合 GitHub は復活を許さず、新しい PAT が必要と明記している。よって「例外時も絶対再設定なし」と「PAT 直設定」は両立しない。
+上記の DPAPI／Secret Service 案、非表示入力、PAT env support、GitHub ID owner check、secret exclusion、401/403 分類はいずれも未実装。Windows 運用先であること、サービス実行主体と DPAPI profile の一致、再起動・バックアップ復元・アカウント移行時の動作、Linux の secret store 可用性は未検証である。通常利用で token の再入力を求めない方針は確定したが、PAT の失効後または DPAPI 鍵を利用できなくなった後に再入力なしで復活できると約束することはできない。PAT が期限切れまたは revoke された場合 GitHub は復活を許さず、新しい PAT が必要と明記している。よって「例外時も絶対再設定なし」と「PAT 直設定」は両立しない。
 
 ## 根拠資料
 
@@ -115,6 +117,9 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 - [PAT の作成・管理と user-owned Projects の制約](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 - [PAT 期限切れ・失効](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation)
 - [組織の PAT policy](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization)
+- [Windows DPAPI による保護と復旧制約](https://learn.microsoft.com/en-us/windows/uwp/security/data-protection)
+- [Windows ProtectedData／DPAPI の platform・profile 依存](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.protecteddata?view=netframework-4.7.2)
+- [freedesktop Secret Service API と login-session / unlock の前提](https://specifications.freedesktop.org/secret-service/latest-single/)
 
 ## 追加確定事項（最新要件）
 
