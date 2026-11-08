@@ -89,3 +89,33 @@ R84-N02 / P2 は頻度不明の非阻害の保留のままであり、保存画�
 実際の生成スクリプトは試験のDOMで実行し、画面の所有境界は実HTTPと初期HTMLで検証した。実ブラウザーの保存画面・画素描画や運用頻度を検証したとは主張しない。Windows / Node24での局所検証であり、後続の全面検証・対象HEADの公開検証・同じ通常レビュー担当の閉鎖確認は親に残る。
 
 一覧の500件上限は維持する。一覧外の既知の詳細URLは共通の履歴認可が成功する場合に履歴だけを表示し、開始日時・用途・作業場所のない対象を通常接続として復元しない。導入前、保存未確認、最新50件・監査20,000件の範囲外など、既存設計の履歴不足の制約は変えない。
+
+## V84-01 全体検証後の契約試験整合
+
+本節は上記の実装・局所検証履歴に追加する後続記録である。元の重大度はすべてP2のまま、親から通知された通常レビューの後続結果は `0309e0b` に対して `pass_with_held`、R84-N01とR84-N03は `closed`、R84-N02は `held`・非阻害である。過去の閉鎖確認待ちという記述は当時の記録として残す。本節でそれらの重大度や採否を変更しない。
+
+最終候補 `75fb1d16ee784829f772c0907204f11574ae4e01` に対する全面ゲートは、305件中302件成功・2件失敗・1件skip、`npm test` 終了値1であった。`test/tool-root-contracts.test.ts:162` の公開ツール契約では期待一覧に `todo_history` がなく、`test/search-process-lifecycle.test.ts:145` では `killed.state` が許容状態であるという条件に失敗した。この初回結果は `reference/issue84-full-gate/results.json` と `test.stdout.log` に保持しており、本節の成功結果で上書きしない。
+
+親が取得したCIの証拠も、`ea5c563` の実行42434947724と、同じ候補 `75fb1d16ee784829f772c0907204f11574ae4e01` の実行42436335657について、UbuntuとWindowsの区画4で同じ期待一覧漏れを示す。証拠は `reference/issue84-full-gate/prior-ci-ea5c563-failed.log` と `ci-75fb1d1-failed.log`。同候補のCIではプロセス試験の失敗表示がないと親から通知されたが、それを理由にローカル初回失敗を否定しない。
+
+V84-01の発生条件は、新しく公開した `todo_history` を登録した一方、公開一覧・注釈の必須契約を検証する期待一覧を更新していないことである。影響は必須ゲートの失敗と、この新ツールの公開契約を当該試験で網羅できないことである。運用頻度は `unknown` とし、「1000人の利用全体で月1回程度以上」を満たすとは断定しない。今回は利用頻度の推測ではなく、必須の公開ツール契約に直接関係する検証不足の整合として採用した。
+
+変更した試験入力は `test/tool-root-contracts.test.ts` の `expected` へ `todo_history: [true, false, false]` を1項目追加しただけである。製品の登録・認可・注釈・OAuthメタデータ・操作説明要件を変更していない。公開一覧の完全一致、全ツールの注釈、OAuthの両メタデータ、必須 `comment` の既存assertionはすべて保持した。既存のプロセス試験も変更していない。
+
+| 必須対応 | 製品登録（変更なし） | 実際の組み合わせ試験 | focused証拠 | 結果 |
+| --- | --- | --- | --- | --- |
+| 公開済み履歴ツールを期待一覧へ含め、読み取り専用の注釈を検証する | `src/index.ts:1497` の `todo_history`、`readOnlyHint: true`、`destructiveHint: false`、`openWorldHint: false` | 実際のMCP `tools/list` を認証メタデータの包み込みごと取得。公開一覧の完全一致、全ツールの注釈、OAuth両メタデータと必須commentを従来どおり照合 | 全面ゲート・同候補CIの失敗を正式な実装前証拠とし、`inventory.*.log` で対象1件成功、終了値0 | 1項目追加で局所成功。全面再検証は未実施 |
+| 未変更のプロセス試験を単独で1回だけ確認する | 製品処理・`test/search-process-lifecycle.test.ts` とも変更なし | 指定のNR003/NR004の名前だけを単独で選び、実際の検索・Nodeプロセスと監査を従来のfixtureで実行 | `process-single.*.log`、親ケースと子ケースの計2件成功、終了値0、実行回数1 | 単独成功。初回全面失敗の原因・実値は未確定のまま |
+
+検証の保存先は `reference/issue84-tool-inventory/`。各接頭辞に `.stdout.log`、`.stderr.log`、`.result.json` を分け、実行時刻・終了値を保存した。
+
+- `npx --no-install tsx --test --test-name-pattern='published tools explicitly distinguish' test/tool-root-contracts.test.ts`: 1件成功、終了値0、`inventory.*`。
+- `npx --no-install tsx --test --test-name-pattern='NR003 and NR004' test/search-process-lifecycle.test.ts`: 単独1回、親子2件成功、終了値0、`process-single.*`。追加の再試験・計測は行っていない。
+- `npm run check`、`npm run build`、`npm run lint`: それぞれ終了値0、`check.*`、`build.*`、`lint.*`。必須の全体Markdown構文検査は168ファイル、問題0件。
+- 追記後の本報告を明示指定した構文検査と `git diff --check` は `report-md.*`、`diff-check.*` に保存する。設定対象外の報告用語検査は追加せず、設定変更も行わない。
+
+開始時の実行者は `fa780\donabe`、端末は `FA780`、Windows / PowerShell、Node v24.20.0。基準HEADは `75fb1d16ee784829f772c0907204f11574ae4e01` で、開始前の56入力は全面ゲートの指紋 `6b23129c9fc200a987479a5cf7797f594ac3a875b49145fb32fcdfeb2ec38dda` と一致した。修正後の56入力の指紋は `bfe3203634a608f402bd21e721822ce756951f253895be4c6b150eac94e97951`。この中の差分は期待一覧を持つ試験ファイル1件だけであり、製品・プロセス試験・設定・設計は変わっていない。`environment.start.json`、`source-fingerprint.json` と `source.diff` に入力と環境を保持した。親管理の進捗2ファイル、通常レビュー報告の保護用ハッシュも開始時に保存した。
+
+初回プロセス失敗の実値は出力されておらず、単独成功やCIで失敗表示がないことだけで、今回の変更と無関係とも、偶発的な失敗とも断定しない。初回全面ゲート失敗の評価は保持し、原因は `unknown` のままである。任意修正、長時間の原因調査、追加の再試験は実施していない。
+
+本節の局所成功は、旧候補の全面ゲート失敗を成功へ変えるものではない。製品変更、正常レビュー報告や親管理の進捗の編集、依存・設定変更、全面ゲートの反復、コミット、送信、統合は行っていない。次の候補での全面ゲートと同じ通常レビュー担当による確認は親の後続工程である。
