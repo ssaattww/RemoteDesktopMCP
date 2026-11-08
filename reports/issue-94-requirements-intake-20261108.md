@@ -49,7 +49,7 @@ UI のすべてが API から同じように操作できるとは未検証。API
 4. Issue／PR 本体の変更、views、自動化、可視化等を含めた到達範囲と段階。段階導入であっても最終目的を読み取り専用へ縮めない。
 5. RDMCP アカウントと GitHub アカウントは一対一に対応させる。初期は GitHub アカウント1つでよい。複数連携・アカウント切替の仕様は今回は決めず、先行実装しない。credential はアカウント間で分離する。
 6. 「PC 操作をしない」の保証対象はこの専用接続か、dot の他の PC 接続も含むか。サーバー内部の監査保存や secret 保護の I/O と任意操作を区別する。
-7. 認証方式、credential 保管、権限・失効、監査の保持と表示、既存 Emergency Stop と Todo の扱い。これらの構成採用は要件整理後に行う。トークン権限の細分化調査はユーザー指示により保留する。
+7. PAT の安全な登録・保管・更新・失効、監査の保持と表示、既存 Emergency Stop と Todo の扱い。PAT の subtype と必要な GitHub 権限は細分化調査の保留が解除されるまで未決定。
 
 ## 調査済みの事実
 
@@ -70,19 +70,19 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 
 - ユーザーの「RDMCP の方進めませんか」は、製品設計・実装を先行する指示ではなく、未確定要件を音声で一緒に詰める意図と確認された。次は要件の選択肢をユーザーと確認し、合意まで設計・実装を保留する。
 - トークン権限の細分化調査は保留。一般 API 操作の存在と、実際の認証・対象個人 Project #4 での read/write 検証を区別する。
-- ユーザーは PAT 手動設定と GitHub App 認証を比較し、登録、安全な保管、ログ等への非露出、失効／更新、RDMCP 利用者との紐付けを要件として整理するよう追加した。以下の比較は公式資料からの事実と設計上の含意であり、認証方式の選定ではない。
-- 初期は GitHub アカウント1つで利用する。RDMCP アカウントと GitHub アカウントを一対一で結び、credential をアカウント間で分離する。複数連携は今回決めず、先行実装・仕様化しない。GitHub App で利用者が token を直接入力せず認可できる利点は検討対象だが、方式は未決定。
+- ユーザーは PAT 手動設定と GitHub App 認証の比較後、しばらく本人一人が利用する前提で PAT を直接設定する方式を明示決定した。以下の比較は方式選定の根拠を残すもので、GitHub App は現時点で採用しない。
+- 初期は GitHub アカウント1つで利用する。RDMCP アカウントと GitHub アカウントを一対一で結び、credential をアカウント間で分離する。複数連携は今回決めず、先行実装・仕様化しない。
 - GitHub Issue #94 本文には、branch／PR を作らず実装中として扱わないとする古い記述が残る。後のユーザー承認を受けて branch と Draft PR #95 は作成・正式紐付け済みである。Issue 本文の更新は自動審査で拒否され、リモート本文は未変更。現在の会話方針と合意内容に沿って Issue 本文を更新するかは未処理とする。
 - 要件メモのローカル変更は commit `8c05712` に含まれる。push は HTTPS 接続不可で未完了。新 credential、認証設定、権限拡張、製品設計・コードの変更は行っていない。
 
-## 認証候補の要件比較（方式未決定）
+## 認証候補の要件比較（PAT を採用）
 
 | 観点 | PAT を手動登録 | GitHub App の user access token |
 | --- | --- | --- |
 | 発行・登録 | 利用者が GitHub の設定画面で発行し、RDMCP へ安全に登録する必要がある。入力・貼付け経路で token を履歴、clipboard、例外、監査ログへ残さない要件がある | App registration と callback／認可フローの準備後、利用者本人が GitHub で認可するため、token 文字列を本人が RDMCP に直接入力しなくてよい。server-side confidential client の client secret と token は引き続き安全に扱う必要がある |
 | 利用者との紐付け | PAT は GitHub user account に属する。RDMCP アカウントと PAT 所有者を一対一で結び、credential をアカウント間で共有しない | user access token は認可した GitHub user の代理で動作し、権限・到達 resource は App と本人の共通範囲。RDMCP アカウントと GitHub user ID を一対一で対応させ、credential を分離する |
-| 保管・ログ | GitHub は PAT を秘密として管理するよう案内する。RDMCP の永続 secret store、暗号化、最小読み取り主体、redaction、バックアップ・削除方針は未決定 | GitHub は private key／client secret／token を安全に保管し、サーバーなら key vault 等を推奨する。access token と refresh token の分離保管も考慮事項。RDMCP の保管基盤は未決定 |
-| 期限・更新 | PAT は利用者が設定する期限まで継続する種類があり、期限切れ・失効時は利用者が再発行し、RDMCP に再登録する運用候補 | 期限付き user access token は既定で 8 時間、refresh token は 6 か月。refresh は新しい access／refresh token を返し、使用済み refresh token と旧 access token は無効になる。保管と更新の競合、refresh token expiry 後の再認可が必要 |
+| 保管・ログ | PAT は RDMCP の認証済み設定経路から登録し、アカウント ID ごとに暗号化保管する案。secret／UI／HTTP logging の具体策は下記に記録 | GitHub は private key／client secret／token の安全な保管を推奨。App user token は今回は採用しない |
+| 期限・更新 | PAT に期限を設定し、期限前の利用者主導の再発行・安全な再登録を要件とする。期限値や更新時期は未決定 | 期限付き user access token は既定で 8 時間、refresh token は 6 か月。GitHub App は今回は採用しない |
 | 失効 | 利用者が GitHub の PAT settings から削除できる。RDMCP は認証失敗を検出して使用を停止し、利用者に再登録を求める必要がある | 利用者は GitHub アカウントから App 認可を取り消せる。App は revoke webhook を受けた本人分の API 呼出しを停止し、401 でも停止・再認可へ誘導する必要がある |
 | 主な運用負担 | App registration が不要で立ち上げは単純だが、手動共有・更新・失効確認を利用者が担い、長期 secret の漏えい影響を管理する | 初期登録・認可・安全な client secret／refresh token 管理と更新処理が必要だが、GitHub user との帰属や期限付き更新を flow に組み込める |
 
@@ -90,16 +90,16 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 
 資料: [PAT の作成・管理](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)、[GitHub App のセキュリティベストプラクティス](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app)、[user access token の発行](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)、[user token の更新](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)、[期限切れ・失効](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation)。
 
-### 推薦案（協議用。認証設定・実装は未実施）
+### 採用方針と具体案（実装・credential 設定は未承認）
 
-- GitHub App の user-to-server authorization を第一候補とする。本人が長期 token をコピー・入力しなくてよく、GitHub user identity と RDMCP アカウントを一対一で結びつけられ、App と利用者の共通権限・resource に制限されるため。PAT は短期の検証には単純だが、利用者による発行・貼付け・期限管理が残るため、運用方式としては第二候補。
-- GitHub App は期限付き user token を有効化する。短命 access token と refresh token を使い、期限なし token は選ばない。refresh は単一使用として競合を直列化し、新しい組を安全に保存した後にのみ切り替える。refresh token の失効／期限切れまたは revoke 後は GitHub 再認可を要求し、期限切れ access token を再送しない。
-- token／refresh token は RDMCP アカウントIDと GitHub user ID を記録したサーバー側 credential record に紐付け、アカウント間で共有しない。at-rest は AES-256-GCM で暗号化し、暗号鍵は `DATA_DIR` の外にあるサービス設定／secret store に置く。既存の `src/private-storage.ts` はファイル ACL／mode と private directory を検査するが、暗号化までは行わないため、DATA_DIR の保護だけを encrypted vault とみなさない。Node の標準 `crypto` を使う案なら暗号ライブラリの追加依存は不要だが、暗号文の形式・鍵 versioning／rotation は実装設計時に検証する。
-- App client secret と暗号鍵はソース、Issue、通常ログ、child process、MCP 引数・結果に出さず、authorization code／device code／access token／refresh token／Authorization header も監査・例外・HTTP debug に記録しない。監査には RDMCP account ID、GitHub user ID、操作、対象 ID、固定 error code 等のみを残す。既存 `private-storage.ts` の子プロセス環境除外にも GitHub secret 名を含める必要がある。
-- GitHub 側の外部設定候補は、GitHub App の登録、callback URL と `state`／PKCE の準備（headless flow を使うなら Device Flow 有効化）、expiration の有効化、App client secret の保護登録、個人アカウントによる App 認可、revoke 通知用 webhook secret／URL である。Projects に必要な権限を選ぶ作業は、保留中の権限粒度調査が再開され、Project #4 の API 対応を確認するまで実施しない。
-- GitHub App は公式資料上 user token／refresh token／権限の仕組みがあるが、個人 Project #4 の read/write がこの App token で可能かは未確認。そこが成立しない場合は、PAT または別の API 認証案を同条件で再評価し、代替として自動的に token 入力へ戻さない。
+- 認証方式は、利用者本人が GitHub で発行した個人 PAT を RDMCP に直接設定する。GitHub App は今回採用しない。RDMCP アカウントと GitHub user account は一対一で結び、credential を他アカウントと共有しない。将来の複数連携・アカウント切替の仕様や実装は今回決めない。
+- token の登録場所は ChatGPT／MCP 会話・tool 引数ではなく、RDMCP の認証済み HTTPS 設定画面とする案。画面では password 入力を使い、TLS・認証・CSRF 検証を行う。token を URL、browser storage、画面再表示、response、通常 log、監査、例外、HTTP debug に含めず、登録 request body も記録しない。UI は browser の password 保存を要求しないが、browser 側の保存挙動は完全には制御できないため、token を会話・clipboard・履歴へ残さず安全な入力経路を使う案を確認する。GitHub の `GET /user` で token 所有者を確認して RDMCP アカウントへ一対一で固定する。Project #4 の read/write 権限試験とは分ける。
+- PAT はサーバー側のみで扱い、GitHub API の Authorization header にだけ渡す。at-rest は AES-256-GCM で暗号化した credential record とし、暗号鍵は `DATA_DIR` 外のサービス secret store に分離する。既存の `src/private-storage.ts` はファイル ACL／mode と private directory を検査するが、暗号化までは行わないため、DATA_DIR の保護だけを encrypted vault とみなさない。Node 標準 `crypto` を使えば暗号ライブラリ追加は不要。token は子 process・Desktop Commander に渡さず、必要時のみ server memory で復号し、再起動時にも暗号文と別置き鍵から復旧する。鍵の形式・rotation は実装時に検証する。
+- token は password manager がフォームを保存しないよう設定し、貼付け履歴や clipboard へ残る可能性は利用者へ説明する。登録成功後は token を再表示せず、監査には RDMCP account ID、GitHub user ID、設定・削除操作、結果、固定 error code のみを記録する。request/response body と Authorization header は既存の監査／operation detail 経路へ送らない。
+- 再設定では新 token を server memory で一時検証し、既存の GitHub user ID と一致する場合だけ暗号文を原子的に置換する。認証失敗・429 等で新 token が検証できない場合は既存値を保持し、値を echo しない。削除では保存済み暗号文を消し、memory reference を破棄して以降の API 呼出しを停止する。GitHub 側で PAT を revoke した場合も 401 を検出して自動再試行・別 credential への fallback をせず、利用者に再設定を求める。
+- 外部設定は GitHub で本人が PAT を発行し、有効期限を設定すること、RDMCP 運用者が暗号化鍵を `DATA_DIR` 外の secret store に安全に登録すること。token subtype と Projects に必要な権限範囲は、権限粒度調査の保留が解除されるまで選ばない。credential 発行・設定・継続利用・権限変更は操作時の個別確認を得る。
 
-この推薦は認証方式と保存方針についてユーザーが具体案を委任したことに基づく候補であり、GitHub App 作成・permission 変更・credential 登録・サーバー実装への承認とは扱わない。期限・refresh 特性の根拠は上記 GitHub 公式資料に限る。認証設定の実変更は操作時に個別確認する。
+上記は本人の認証方式決定に沿った実装提案であり、設定画面・保存形式の最終設計または実装承認ではない。Project #4 での PAT による read/write は未検証のため、token 設定前に権限粒度調査の再開と検証範囲の確認が必要。PAT の一般的な期限設定・失効動作の根拠は上記 GitHub 公式資料に限る。
 
 ## 根拠資料
 
