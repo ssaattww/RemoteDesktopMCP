@@ -154,18 +154,19 @@ DR-003 と NR-009 の完了は次候補の両 OS CI と同じ reviewer の確認
 | TODO-HISTORY-03 | TODO-HISTORY | 検証・通常レビュー・独立レビュー・PR公開 | TODO-HISTORY-02 | M | 検証証拠、レビュー、コミット、PR、HEAD一致CIを区別して報告 | Draft PR #93 公開済み。通常レビューと修正確認は報告に記録。全体検証・独立レビュー・最終 CI の完了は最終の証拠と区別して確認する |
 | TODO-HISTORY-04 | TODO-HISTORY | 全体検証の公開ツール一覧の期待値を新しい読み取りツールに整合させる | TODO-HISTORY-02 | S | 実際の公開ツールの一覧・読み取り専用属性・OAuth・必須入力の検証を維持して成功し、同じレビュー担当が確認 | V84-01 は期待一覧1項目のみ整合し対象1件成功。未変更 NR003/NR004 は単独で親子2件成功。初回全体試験の2失敗と原因不明を保持し、同じ担当の確認後に新候補を全体検証する |
 
-## GitHub Projects 専用操作（Issue #94 / Draft PR #95）
+## GitHub Projects 専用操作（Issue #94）
 
 この節は task-consistency-manager と progress-sync-manager により追加する。branch は codex/issue-94-github-projects。既存の他タスクの状態は変更しない。
 
 | Task | Phase | 内容 | 依存 | 規模 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 設計案確認済み。PR #95 は `Refs #94` に修正済み。レビュー・マージ待ち |
-| GHP-02 | GHP | 専用 MCP 入口と認証・GitHub API client | GHP-01 | L | PC backend 不使用、固定 API、対象照合、read/write/admin 隔離 | 実装中。Projects 専用 HTTP/MCP 入口、OAuth audience/scope 分離、固定 GraphQL クライアントを追加。Windows DPAPI CurrentUser／Linux Secret Service の保管 provider とローカル登録 CLI を追加。実行時設定は未実施 |
-| GHP-03 | GHP | Project・項目・field・view 等の読み書き | GHP-02 | L | 型付き操作、schema、Status/Priority、draft、archive、管理操作の対応表と試験 | 部分実装。個人 Project の一覧・作成・題名／説明更新に加え、Issue／PR の Project 追加、項目と対応欄の読み取り、独自 text/number/date/single-select 欄の更新まで。field schema、draft、archive、view は未実装 |
-| GHP-04 | GHP | 監査・停止・結果不明・境界と回帰検証 | GHP-02,GHP-03 | L | mock 契約試験、公開定義、PC 経路拒否、必要な check/build/lint と review | 実装中。Projects API／MCP／HTTP と credential store のテストを追加し、Windows DPAPI の合成値保存・再読込を確認。Linux Secret Service 実環境、実 GitHub、独立レビューは未確認 |
+| GHP-01 | GHP | API・認証・PC 操作禁止の設計と対応表 | #94 / #95 の正式な紐付け | M | 専用入口、操作別権限、未対応、停止・監査・競合を設計に記録 | 完了。PR #95 は `Refs #94` のまま main へ squash merge（`d978fb5`） |
+| GHP-02 | GHP | 専用 MCP 入口と認証・GitHub API client | GHP-01 | L | PC backend 不使用、固定 API、対象照合、read/write/admin 隔離 | 第1段完了。PR #96 を main へ squash merge（`eef14f8`）。Projects 専用 HTTP/MCP、OAuth audience/scope 分離、Project metadata、Issue／PR 追加、欄の読み取りと値更新、DPAPI／Secret Service provider、ローカル登録 CLI を追加。実 credential 登録・設定は未実施 |
+| GHP-03 | GHP | Project・項目・field・view 等の読み書き | GHP-02 | L | 型付き操作、schema、Status/Priority、draft、archive、管理操作の対応表と試験 | 部分実装。Project の一覧・作成・題名／説明更新、Issue／PR 追加、項目と欄の読み取り、独自 text/number/date/single-select 欄の値更新まで。field schema、draft、archive、view の管理は未実装 |
+| GHP-04 | GHP | 監査・停止・結果不明・境界と回帰検証 | GHP-02,GHP-03 | L | mock 契約試験、公開定義、PC 経路拒否、必要な check/build/lint と review | 第1段の PR #96 は Ubuntu と Windows 8 shard の CI 成功後に merge 済み。実 GitHub 接続、Linux Secret Service 実環境、Stage 2 の検証、独立レビューは未確認 |
+| GHP-06 | GHP | Project の独自欄定義と view の管理 | GHP-02 | M | 対応する欄型と選択肢／iteration 定義の読み取り・作成・編集・削除、view の一覧・作成・編集・削除を固定 API で提供し、対象 Project と欄の所有を検証。選択肢／iteration ID と対象外設定を保持し、更新後を読み戻す。Project 削除・公開設定・アクセス管理は含めない | 承認済み設計範囲の次工程。branch `codex/issue-94-stage2-fields-views` で準備中。実 credential と実 Project 更新は行わない |
 | GHP-05 | GHP | 本番認証・credential と運用検証 | GHP-04、操作時の個別承認 | M | 承認済み検証環境で限定的 write/read-back、本番設定の個別判断 | 承認まで保留 |
 
 ### 最新の順序変更（Issue #94）
 
-本人は GHP-01 設計案と第1段の作業開始を承認済み。第1段ブランチ `codex/issue-94-stage1-core` と Draft PR #96 を作成し、PR #96 は設計 PR #95 を base として `Refs #94` を記載する。PR #95 の `Closes #94` は `Refs #94` に変更して本文を読み戻し済み。第1段に Projects 専用 HTTP/MCP 入口、OAuth audience/scope 分離、個人 Project metadata、Issue／PR の追加、項目・対応欄の読み取り、独自 text/number/date/single-select 欄の更新を追加。Windows DPAPI CurrentUser と Linux Secret Service の保管 provider、隠し入力を使うローカル登録 CLI を実装したが、実行時設定と登録は行っていない。Project field schema・draft・archive・view、Linux Secret Service 実環境、独立レビューは未確認。GHP-05 の実 credential 設定、権限変更、GitHub 実書き込みは個別承認まで保留する。
+GHP-01 と第1段の GHP-02 を完了し、PR #95・#96 は main へ squash merge 済み。Issue #94 は継続するため両 PR は `Refs #94` とし、issue を close しない。GHP-03 の次工程として、既存設計で扱う欄定義管理と view 操作を GHP-06 にまとめ、専用 branch `codex/issue-94-stage2-fields-views` で進める。field schema、draft、archive、view のうち、今回の実装対象は欄定義と view に限る。実 credential 設定、権限変更、実 GitHub 接続・書き込みは個別承認まで保留する。

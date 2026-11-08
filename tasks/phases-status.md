@@ -40,6 +40,6 @@
 
 | Phase | 内容 | 対象 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- |
-| GHP | Issue #94 / Draft PR #95、GitHub Projects の専用読み書きと PC 操作を公開しない境界 | GHP-01〜GHP-05 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | 第1段で専用 HTTP/MCP 経路、分離 audience/scope、Project metadata、Issue／PR の Project 追加、項目と対応欄の読み取り、独自 text/number/date/single-select 欄の更新を実装。保護資格情報 provider は追加し Windows DPAPI の合成値 round-trip を確認。実行時設定、Linux Secret Service 実環境、Project field schema/view、review は未確認または未完了 |
+| GHP | Issue #94、PR #95・#96 merged、Stage 2 Draft PR pending | GHP-01〜GHP-06 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | GHP-01 設計と GHP-02 第1段はそれぞれ PR #95 / #96 として main に squash merge 済み。GHP-03 は部分実装で、欄定義・draft/archive・view が残る。GHP-06 は既存設計範囲の欄定義管理と view 操作を次工程として進行中。実 credential 設定・実 Project 書き込みは未実施 |
 
-GHP の設計確認は完了。専用入口は scope 別 OAuth と Projects 用 MCP registry を持ち、PC MCP registry を経由しない。OS 保護資格情報 provider とローカル登録 CLI を追加し、実際の登録・設定は行っていない。Project metadata、Issue／PR の追加、項目・対応欄の読取、対応する独自欄の更新を実装した。Linux Secret Service 実環境、Project field schema/view、実 GitHub 接続と書き込み、独立レビューは未確認または未完了。
+GHP の設計確認は完了。PR #95 の設計、PR #96 の第1段実装は main に統合済み。専用入口は scope 別 OAuth と Projects 用 MCP registry を持ち、PC MCP registry を経由しない。OS 保護資格情報 provider とローカル登録 CLI を追加したが、実際の登録・設定は行っていない。Project metadata、Issue／PR の追加、項目・対応欄の読取、対応する独自欄の更新を実装した。次工程 GHP-06 は欄定義管理と view 操作で、field schema、draft/archive、view は未実装。Linux Secret Service 実環境、実 GitHub 接続と書き込み、GHP-06 の検証・レビューは未確認または未完了。
