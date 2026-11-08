@@ -89,13 +89,13 @@ const UPDATE_PROJECT_FIELD = `mutation RdmcpUpdateProjectField($fieldId: ID!, $n
 const DELETE_PROJECT_FIELD = `mutation RdmcpDeleteProjectField($fieldId: ID!) { deleteProjectV2Field(input: { fieldId: $fieldId }) { projectV2Field { ... on ProjectV2FieldCommon { id } } } }`;
 const PROJECT_VIEWS = `query RdmcpProjectViews($projectId: ID!, $after: String) {
   viewer { login }
-  node(id: $projectId) { ... on ProjectV2 { id owner { ... on User { login } } views(first: 100, after: $after) { nodes { id name layout filter configuration { visibleFields(first: 100) { nodes { id } pageInfo { hasNextPage } } } } pageInfo { hasNextPage endCursor } } } }
+  node(id: $projectId) { ... on ProjectV2 { id owner { ... on User { login } } views(first: 100, after: $after) { nodes { id name layout filter configuration { visibleFields(first: 100) { nodes { ... on ProjectV2Field { id } ... on ProjectV2IterationField { id } ... on ProjectV2MultiSelectField { id } ... on ProjectV2SingleSelectField { id } } pageInfo { hasNextPage } } } } pageInfo { hasNextPage endCursor } } } }
 }`;
-const CREATE_PROJECT_VIEW = `mutation RdmcpCreateProjectView($projectId: ID!, $name: String!, $layout: ProjectV2ViewLayout!, $filter: String, $configuration: ProjectV2ViewConfigurationInput) {
-  createProjectV2View(input: { projectId: $projectId, name: $name, layout: $layout, filter: $filter, configuration: $configuration }) { projectV2View { id name layout filter configuration { visibleFields(first: 100) { nodes { id } pageInfo { hasNextPage } } } } }
+const CREATE_PROJECT_VIEW = `mutation RdmcpCreateProjectView($projectId: ID!, $name: String!, $layout: ProjectV2ViewLayout!, $configuration: ProjectV2ViewConfigurationInput) {
+  createProjectV2View(input: { projectId: $projectId, name: $name, layout: $layout, configuration: $configuration }) { projectV2View { id name layout filter configuration { visibleFields(first: 100) { nodes { ... on ProjectV2Field { id } ... on ProjectV2IterationField { id } ... on ProjectV2MultiSelectField { id } ... on ProjectV2SingleSelectField { id } } pageInfo { hasNextPage } } } } }
 }`;
 const UPDATE_PROJECT_VIEW = `mutation RdmcpUpdateProjectView($viewId: ID!, $name: String, $layout: ProjectV2ViewLayout, $filter: String, $configuration: ProjectV2ViewConfigurationInput) {
-  updateProjectV2View(input: { viewId: $viewId, name: $name, layout: $layout, filter: $filter, configuration: $configuration }) { projectV2View { id name layout filter configuration { visibleFields(first: 100) { nodes { id } pageInfo { hasNextPage } } } } }
+  updateProjectV2View(input: { viewId: $viewId, name: $name, layout: $layout, filter: $filter, configuration: $configuration }) { projectV2View { id name layout filter configuration { visibleFields(first: 100) { nodes { ... on ProjectV2Field { id } ... on ProjectV2IterationField { id } ... on ProjectV2MultiSelectField { id } ... on ProjectV2SingleSelectField { id } } pageInfo { hasNextPage } } } } }
 }`;
 const DELETE_PROJECT_VIEW = `mutation RdmcpDeleteProjectView($viewId: ID!) { deleteProjectV2View(input: { viewId: $viewId }) { projectV2View { id } } }`;
 const PROJECT_ITEMS = `query RdmcpProjectItems($projectId: ID!, $after: String) {
@@ -288,12 +288,18 @@ export class GitHubProjectsApi {
     const token = await this.#getToken();
     await this.#assertProjectOwner(project, token);
     await this.#assertViewFields(project, clean.visibleFieldIds ?? [], token);
-    const result = await this.#graphql<{ createProjectV2View?: { projectV2View?: unknown } }>("RdmcpCreateProjectView", CREATE_PROJECT_VIEW, { projectId: project, name: clean.name, layout: clean.layout, filter: clean.filter ?? null, configuration: { visibleFieldIds: clean.visibleFieldIds ?? [] } }, { token, mutation: true });
+    const result = await this.#graphql<{ createProjectV2View?: { projectV2View?: unknown } }>("RdmcpCreateProjectView", CREATE_PROJECT_VIEW, { projectId: project, name: clean.name, layout: clean.layout, configuration: { visibleFieldIds: clean.visibleFieldIds ?? [] } }, { token, mutation: true });
     const raw = result.createProjectV2View?.projectV2View;
     if (typeof raw !== "object" || raw === null || typeof (raw as { id?: unknown }).id !== "string") throw new GitHubProjectsApiError("invalid_response", "unknown");
     const viewId = (raw as { id: string }).id;
-    const view = await this.#verifyProjectView(project, viewId, clean);
-    return { view, outcome: { applied: true } };
+    try {
+      if (clean.filter !== undefined) {
+        const updated = await this.#graphql<{ updateProjectV2View?: { projectV2View?: { id?: string } } }>("RdmcpUpdateProjectView", UPDATE_PROJECT_VIEW, { viewId, filter: clean.filter }, { token, mutation: true });
+        if (updated.updateProjectV2View?.projectV2View?.id !== viewId) throw new GitHubProjectsApiError("invalid_response", "unknown");
+      }
+      const view = await this.#verifyProjectView(project, viewId, clean);
+      return { view, outcome: { applied: true } };
+    } catch (error) { throw unknownAfterMutation(error); }
   }
 
   async updateProjectView(projectId: string, viewId: string, input: GitHubProjectViewInput): Promise<{ view: GitHubProjectView; outcome: GitHubMutationOutcome }> {

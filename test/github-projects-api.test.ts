@@ -228,8 +228,8 @@ test("custom field and view definitions use fixed Project-scoped mutations with 
         return response({ data: { createProjectV2View: { projectV2View: viewNode() } } });
       }
       if (body.operationName === "RdmcpUpdateProjectView") {
-        const configuration = body.variables.configuration as { visibleFieldIds: string[] };
-        view = { ...(view ?? {}), name: body.variables.name, layout: body.variables.layout, filter: body.variables.filter, visibleFieldIds: configuration.visibleFieldIds };
+        const configuration = body.variables.configuration as { visibleFieldIds: string[] } | undefined;
+        view = { ...(view ?? {}), ...(typeof body.variables.name === "string" ? { name: body.variables.name } : {}), ...(typeof body.variables.layout === "string" ? { layout: body.variables.layout } : {}), ...(typeof body.variables.filter === "string" ? { filter: body.variables.filter } : {}), ...(configuration ? { visibleFieldIds: configuration.visibleFieldIds } : {}) };
         return response({ data: { updateProjectV2View: { projectV2View: { id: "V_1" } } } });
       }
       if (body.operationName === "RdmcpDeleteProjectView") { view = undefined; return response({ data: { deleteProjectV2View: { projectV2View: { id: "V_1" } } } }); }
@@ -251,7 +251,11 @@ test("custom field and view definitions use fixed Project-scoped mutations with 
   assert.deepEqual(updatedView.view.visibleFieldIds, ["F_TITLE"]);
   assert.deepEqual(await api.deleteProjectView("PVT_1", "V_1"), { applied: true });
   assert.ok(calls.every((call) => call.query.startsWith("query Rdmcp") || call.query.startsWith("mutation Rdmcp")));
-  assert.ok(calls.some((call) => call.operationName === "RdmcpCreateProjectView" && /configuration/.test(call.query)));
+  const createView = calls.find((call) => call.operationName === "RdmcpCreateProjectView")!;
+  assert.match(createView.query, /configuration/);
+  assert.doesNotMatch(createView.query, /filter:\s*\$filter/, "the create input does not support filters");
+  assert.ok(calls.some((call) => call.operationName === "RdmcpUpdateProjectView" && call.variables.filter === "status:Todo"), "a requested create filter is applied through the supported update mutation");
+  assert.ok(calls.every((call) => !/nodes\s*\{\s*id\s*\}/.test(call.query)), "union fields are selected through concrete type fragments");
   assert.ok(calls.every((call) => !/deleteProjectV2\(/.test(call.query)), "Project deletion remains unavailable");
 });
 
