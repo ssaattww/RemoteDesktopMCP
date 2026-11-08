@@ -18,7 +18,8 @@ test("GitHub Projects client exposes only fixed self-owned project operations", 
       calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, authorization: new Headers(init?.headers).get("authorization") });
       if (calls.length === 1) return response({ data: { viewer: { login: "example", projectsV2: { nodes: [project], pageInfo: { hasNextPage: false, endCursor: null } } } } });
       if (calls.length === 2) return response({ data: { viewer: { id: "U_1", login: "example" } } });
-      return response({ data: { viewer: { login: "example" }, createProjectV2: { projectV2: { ...project, title: "New" } } } });
+      if (calls.length === 3) return response({ data: { createProjectV2: { projectV2: { ...project, title: "New" } } } });
+      return response({ data: { viewer: { login: "example" }, node: { ...project, title: "New", shortDescription: "", owner: { login: "example" } } } });
     },
   });
 
@@ -26,13 +27,13 @@ test("GitHub Projects client exposes only fixed self-owned project operations", 
   const created = await api.createProject("New");
   assert.equal(created.project.title, "New");
   assert.deepEqual(created.outcome, { applied: true });
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.ok(calls.every((call) => call.url === "https://api.github.com/graphql"));
   assert.ok(calls.every((call) => call.authorization === `Bearer ${token}`));
   assert.match(String(calls[0]?.body.query), /projectsV2/);
   assert.match(String(calls[1]?.body.query), /viewer \{ id login \}/);
   assert.doesNotMatch(String(calls[2]?.body.query), /deleteProjectV2|updateProjectV2Field|clearProjectV2ItemFieldValue/);
-  assert.doesNotMatch(String(calls[2]?.body.query), /viewer/);
+  assert.match(String(calls[3]?.body.query), /shortDescription/);
   assert.equal(calls[2]?.body.variables && (calls[2]?.body.variables as Record<string, unknown>).ownerId, "U_1");
   assert.deepEqual(credentialCalls, ["google:issuer:subject", "google:issuer:subject"], "the create flow pins the checked credential for its mutation");
   assert.equal("graphql" in api, false, "no public generic GraphQL method is exposed");
@@ -67,6 +68,10 @@ test("permission and rate-limit responses are classified without retry", async (
     await assert.rejects(api.listProjects(), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === code);
     assert.equal(count, 1);
   }
+  const graphqlLimit = new GitHubProjectsApi("principal", "expected", credentialProvider(), { request: async () => response({ data: { viewer: { login: "expected" } }, errors: [{ type: "RATE_LIMITED", message: "private details" }] }) });
+  await assert.rejects(graphqlLimit.listProjects(), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "rate_limited" && !error.message.includes("private details"));
+  const forbiddenWithLimitHeader = new GitHubProjectsApi("principal", "expected", credentialProvider(), { request: async () => new Response("private details", { status: 403, headers: { "x-ratelimit-remaining": "0" } }) });
+  await assert.rejects(forbiddenWithLimitHeader.listProjects(), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "rate_limited");
 });
 
 test("project updates check owner before the fixed title/description mutation", async () => {
@@ -95,13 +100,14 @@ test("Project fields and Issue or pull request links use fixed read and add oper
       if (body.operationName === "RdmcpIssueOrPullRequest") return response({ data: { viewer: { login: "example" }, node: { __typename: "PullRequest", id: "PR_1" } } });
       if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
       if (body.operationName === "RdmcpAddProjectItem") return response({ data: { addProjectV2ItemById: { item: { id: "ITEM_1", type: "PULL_REQUEST" } } } });
+      if (body.operationName === "RdmcpProjectItemState") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", type: "PULL_REQUEST", project: { id: "PVT_1" }, isArchived: false, content: { __typename: "PullRequest", id: "PR_1", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fieldValues: { nodes: [], pageInfo: { hasNextPage: false } } } } });
       throw new Error(`Unexpected operation ${body.operationName}`);
     },
   });
   const fields = await api.listProjectFields("PVT_1");
   assert.deepEqual(fields, [{ id: "F_TEXT", name: "Notes", type: "TEXT", isIssueField: false }, { id: "F_STATUS", name: "Status", type: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo" }] }]);
   assert.deepEqual(await api.addIssueOrPullRequest("PVT_1", "PR_1"), { itemId: "ITEM_1", outcome: { applied: true } });
-  assert.deepEqual(operations, ["RdmcpProjectFields", "RdmcpProjectOwner", "RdmcpIssueOrPullRequest", "RdmcpAddProjectItem"]);
+  assert.deepEqual(operations, ["RdmcpProjectFields", "RdmcpProjectOwner", "RdmcpIssueOrPullRequest", "RdmcpAddProjectItem", "RdmcpProjectItemState"]);
 });
 
 test("Project item reads return issue or pull request links and only Project field values", async () => {
@@ -109,10 +115,10 @@ test("Project item reads return issue or pull request links and only Project fie
     request: async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { operationName: string };
       assert.equal(body.operationName, "RdmcpProjectItems");
-      return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, items: { nodes: [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { __typename: "PullRequest", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fieldValues: { nodes: [{ __typename: "ProjectV2ItemFieldTextValue", text: "review", field: { id: "F_TEXT", name: "Notes" } }, { __typename: "ProjectV2ItemFieldSingleSelectValue", name: "In progress", optionId: "O_PROGRESS", field: { id: "F_STATUS", name: "Status" } }], pageInfo: { hasNextPage: false } } }], pageInfo: { hasNextPage: false, endCursor: null } } } } });
+      return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, items: { nodes: [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { __typename: "PullRequest", id: "PR_1", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fieldValues: { nodes: [{ __typename: "ProjectV2ItemFieldTextValue", text: "review", field: { id: "F_TEXT", name: "Notes" } }, { __typename: "ProjectV2ItemFieldSingleSelectValue", name: "In progress", optionId: "O_PROGRESS", field: { id: "F_STATUS", name: "Status" } }], pageInfo: { hasNextPage: false } } }], pageInfo: { hasNextPage: false, endCursor: null } } } } });
     },
   });
-  assert.deepEqual(await api.listProjectItems("PVT_1"), [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { type: "PullRequest", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fields: [{ id: "F_TEXT", name: "Notes", type: "TEXT", value: "review" }, { id: "F_STATUS", name: "Status", type: "SINGLE_SELECT", value: "In progress" }] }]);
+  assert.deepEqual(await api.listProjectItems("PVT_1"), [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { id: "PR_1", type: "PullRequest", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fields: [{ id: "F_TEXT", name: "Notes", type: "TEXT", value: "review" }, { id: "F_STATUS", name: "Status", type: "SINGLE_SELECT", value: "In progress", optionId: "O_PROGRESS" }] }]);
 });
 
 test("Project item field values are changed only for a supported field in the same personal Project", async () => {
@@ -125,11 +131,13 @@ test("Project item field values are changed only for a supported field in the sa
       if (body.operationName === "RdmcpProjectItemOwner") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", project: { id: "PVT_1" }, isArchived: false } } });
       if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: "Status", dataType: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo" }] }], pageInfo: { hasNextPage: false } } } } });
       if (body.operationName === "RdmcpSetProjectItemField") return response({ data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: "ITEM_1" } } } });
+      if (body.operationName === "RdmcpProjectItemState") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", type: "ISSUE", project: { id: "PVT_1" }, isArchived: false, content: null, fieldValues: { nodes: [{ __typename: "ProjectV2ItemFieldSingleSelectValue", name: "Todo", optionId: "O_TODO", field: { id: "F_STATUS", name: "Status" } }], pageInfo: { hasNextPage: false } } } } });
       throw new Error(`Unexpected operation ${body.operationName}`);
     },
   });
   assert.deepEqual(await api.setProjectItemField("PVT_1", "ITEM_1", "F_STATUS", { type: "SINGLE_SELECT", optionId: "O_TODO" }), { applied: true });
-  assert.deepEqual(operations.at(-1)?.variables.value, { singleSelectOptionId: "O_TODO" });
+  assert.deepEqual(operations.find((operation) => operation.operationName === "RdmcpSetProjectItemField")?.variables.value, { singleSelectOptionId: "O_TODO" });
+  assert.equal(operations.at(-1)?.operationName, "RdmcpProjectItemState");
 
   const rejected = new GitHubProjectsApi("principal", "example", credentialProvider(), {
     request: async (_url, init) => {

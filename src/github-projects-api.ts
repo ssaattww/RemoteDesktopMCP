@@ -20,7 +20,7 @@ export type GitHubProjectSummary = {
 };
 
 export type GitHubProjectField = { id: string; name: string; type: "TEXT" | "NUMBER" | "DATE" | "SINGLE_SELECT" | "ITERATION" | "UNKNOWN"; isIssueField: boolean; options?: Array<{ id: string; name: string }> };
-export type GitHubProjectItem = { id: string; type: string; isArchived: boolean; content: { type: "Issue" | "PullRequest"; title: string; number: number; url: string } | null; fields: Array<{ id: string; name: string; type: string; value: string | number | null }> };
+export type GitHubProjectItem = { id: string; type: string; isArchived: boolean; content: { id: string; type: "Issue" | "PullRequest"; title: string; number: number; url: string } | null; fields: Array<{ id: string; name: string; type: string; value: string | number | null; optionId?: string }> };
 export type GitHubProjectFieldValue = { type: "TEXT"; text: string } | { type: "NUMBER"; number: number } | { type: "DATE"; date: string } | { type: "SINGLE_SELECT"; optionId: string };
 
 export type GitHubMutationOutcome = { applied: true } | { applied: "unknown" };
@@ -36,7 +36,7 @@ export class GitHubProjectsApiError extends Error {
 }
 
 type Viewer = { login: string };
-type GraphQLErrorShape = { message?: unknown; type?: unknown; path?: unknown };
+type GraphQLErrorShape = { message?: unknown; type?: unknown; path?: unknown; extensions?: { code?: unknown } };
 type GraphQLResponse<T> = { data?: T; errors?: GraphQLErrorShape[] };
 
 const LIST_PROJECTS = `query RdmcpListProjects($after: String) {
@@ -60,6 +60,10 @@ const PROJECT_OWNER = `query RdmcpProjectOwner($projectId: ID!) {
   viewer { login }
   node(id: $projectId) { ... on ProjectV2 { id owner { ... on User { login } } } }
 }`;
+const PROJECT_STATE = `query RdmcpProjectState($projectId: ID!) {
+  viewer { login }
+  node(id: $projectId) { ... on ProjectV2 { id title shortDescription number url closed public owner { ... on User { login } } } }
+}`;
 const PROJECT_FIELDS = `query RdmcpProjectFields($projectId: ID!) {
   viewer { login }
   node(id: $projectId) { ... on ProjectV2 {
@@ -73,7 +77,7 @@ const PROJECT_ITEMS = `query RdmcpProjectItems($projectId: ID!, $after: String) 
     id owner { ... on User { login } }
     items(first: 100, after: $after, archivedStates: [NOT_ARCHIVED, ARCHIVED]) { nodes {
       id type isArchived
-      content { __typename ... on Issue { title number url } ... on PullRequest { title number url } }
+      content { __typename ... on Issue { id title number url } ... on PullRequest { id title number url } }
       fieldValues(first: 100) { nodes {
         __typename
         ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2Field { id name } } }
@@ -88,6 +92,20 @@ const PROJECT_ITEMS = `query RdmcpProjectItems($projectId: ID!, $after: String) 
 const PROJECT_ITEM_OWNER = `query RdmcpProjectItemOwner($itemId: ID!) {
   viewer { login }
   node(id: $itemId) { ... on ProjectV2Item { id project { id } isArchived } }
+}`;
+const PROJECT_ITEM_STATE = `query RdmcpProjectItemState($itemId: ID!) {
+  viewer { login }
+  node(id: $itemId) { ... on ProjectV2Item {
+    id type project { id } isArchived
+    content { __typename ... on Issue { id title number url } ... on PullRequest { id title number url } }
+    fieldValues(first: 100) { nodes {
+      __typename
+      ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2Field { id name } } }
+      ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2Field { id name } } }
+      ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2Field { id name } } }
+      ... on ProjectV2ItemFieldSingleSelectValue { name optionId field { ... on ProjectV2SingleSelectField { id name } } }
+    } pageInfo { hasNextPage } }
+  } }
 }`;
 const ISSUE_OR_PULL_REQUEST = `query RdmcpIssueOrPullRequest($contentId: ID!) {
   viewer { login }
@@ -139,7 +157,9 @@ export class GitHubProjectsApi {
     if (!ownerId) throw new GitHubProjectsApiError("invalid_response");
     const created = await this.#graphql<{ createProjectV2?: { projectV2?: unknown } }>("RdmcpCreateProject", CREATE_PROJECT, { ownerId, title: cleanTitle }, { token, mutation: true });
     if (!created.createProjectV2?.projectV2) throw new GitHubProjectsApiError("invalid_response", "unknown");
-    return { project: parseProject(created.createProjectV2.projectV2), outcome: { applied: true } };
+    const projectId = parseProject(created.createProjectV2.projectV2).id;
+    const project = await this.#verifyProject(projectId, { title: cleanTitle }, token);
+    return { project, outcome: { applied: true } };
   }
 
   async updateProject(projectId: string, input: { title?: string; shortDescription?: string }): Promise<{ project: GitHubProjectSummary; outcome: GitHubMutationOutcome }> {
@@ -152,7 +172,8 @@ export class GitHubProjectsApi {
     if (owner.node?.owner?.login?.toLowerCase() !== this.expectedLogin.toLowerCase()) throw new GitHubProjectsApiError("forbidden");
     const response = await this.#graphql<{ updateProjectV2?: { projectV2?: unknown } }>("RdmcpUpdateProject", UPDATE_PROJECT, { projectId: id, title, shortDescription }, { token, mutation: true });
     if (!response.updateProjectV2?.projectV2) throw new GitHubProjectsApiError("invalid_response", "unknown");
-    return { project: parseProject(response.updateProjectV2.projectV2), outcome: { applied: true } };
+    const project = await this.#verifyProject(id, { ...(title !== null ? { title } : {}), ...(shortDescription !== null ? { shortDescription } : {}) }, token);
+    return { project, outcome: { applied: true } };
   }
 
   async listProjectFields(projectId: string): Promise<GitHubProjectField[]> {
@@ -189,6 +210,8 @@ export class GitHubProjectsApi {
     const result = await this.#graphql<{ addProjectV2ItemById?: { item?: { id?: string } } }>("RdmcpAddProjectItem", ADD_PROJECT_ITEM, { projectId: project, contentId: content }, { token, mutation: true });
     const itemId = result.addProjectV2ItemById?.item?.id;
     if (!itemId) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const item = await this.#verifyProjectItem(itemId, project, token);
+    if (item.content?.id !== content) throw new GitHubProjectsApiError("invalid_response", "unknown");
     return { itemId, outcome: { applied: true } };
   }
 
@@ -211,7 +234,31 @@ export class GitHubProjectsApi {
     if (normalized.type === "SINGLE_SELECT" && !definition.options?.some((option) => option.id === normalized.value.singleSelectOptionId)) throw new GitHubProjectsApiError("invalid_response");
     const result = await this.#graphql<{ updateProjectV2ItemFieldValue?: { projectV2Item?: { id?: string } } }>("RdmcpSetProjectItemField", SET_PROJECT_ITEM_FIELD, { projectId: project, itemId: item, fieldId: field, value: normalized.value }, { token, mutation: true });
     if (result.updateProjectV2ItemFieldValue?.projectV2Item?.id !== item) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const verified = await this.#verifyProjectItem(item, project, token);
+    if (!verified.fields.some((entry) => entry.id === field && fieldValueMatches(entry, normalized.value))) throw new GitHubProjectsApiError("invalid_response", "unknown");
     return { applied: true };
+  }
+
+  async #verifyProject(projectId: string, expected: { title?: string; shortDescription?: string }, token: string): Promise<GitHubProjectSummary> {
+    let result: { node?: unknown | null };
+    try { result = await this.#graphql("RdmcpProjectState", PROJECT_STATE, { projectId }, { token }); }
+    catch (error) { throw unknownAfterMutation(error); }
+    if (!result.node || typeof result.node !== "object") throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const projectData = result.node as Record<string, unknown>;
+    if (typeof (projectData.owner as { login?: unknown } | undefined)?.login !== "string" || (projectData.owner as { login: string }).login.toLowerCase() !== this.expectedLogin.toLowerCase()) throw new GitHubProjectsApiError("forbidden", "unknown");
+    const project = parseProject(projectData);
+    if ((expected.title !== undefined && projectData.title !== expected.title) || (expected.shortDescription !== undefined && projectData.shortDescription !== expected.shortDescription)) throw new GitHubProjectsApiError("invalid_response", "unknown");
+    return project;
+  }
+
+  async #verifyProjectItem(itemId: string, projectId: string, token: string): Promise<GitHubProjectItem> {
+    let result: { node?: unknown | null };
+    try { result = await this.#graphql("RdmcpProjectItemState", PROJECT_ITEM_STATE, { itemId }, { token }); }
+    catch (error) { throw unknownAfterMutation(error); }
+    if (!result.node || typeof result.node !== "object") throw new GitHubProjectsApiError("invalid_response", "unknown");
+    const raw = result.node as Record<string, unknown>;
+    if ((raw.project as { id?: unknown } | undefined)?.id !== projectId) throw new GitHubProjectsApiError("forbidden", "unknown");
+    return parseProjectItem(raw);
   }
 
   async #getToken(): Promise<string> {
@@ -242,13 +289,13 @@ export class GitHubProjectsApi {
       throw new GitHubProjectsApiError("request_failed", mutation ? "unknown" : false);
     }
     if (response.status === 401) throw new GitHubProjectsApiError("credential_rejected", mutation ? "unknown" : false);
-    if (response.status === 403) throw new GitHubProjectsApiError("forbidden", mutation ? "unknown" : false);
+    if (response.status === 403) throw new GitHubProjectsApiError(isRateLimitedResponse(response) ? "rate_limited" : "forbidden", mutation ? "unknown" : false);
     if (response.status === 429) throw new GitHubProjectsApiError("rate_limited", mutation ? "unknown" : false);
     if (!response.ok) throw new GitHubProjectsApiError("api_error", mutation ? "unknown" : false);
     let payload: GraphQLResponse<T>;
     try { payload = await readBoundedJson<GraphQLResponse<T>>(response); }
     catch { throw new GitHubProjectsApiError("invalid_response", mutation ? "unknown" : false); }
-    if (Array.isArray(payload.errors) && payload.errors.length > 0) throw new GitHubProjectsApiError("api_error", mutation ? "unknown" : false);
+    if (Array.isArray(payload.errors) && payload.errors.length > 0) throw new GitHubProjectsApiError(payload.errors.some(isRateLimitGraphQLError) ? "rate_limited" : "api_error", mutation ? "unknown" : false);
     if (!payload.data) throw new GitHubProjectsApiError("invalid_response", mutation ? "unknown" : false);
     if (!mutation) {
       const viewer = (payload.data as { viewer?: Viewer }).viewer;
@@ -256,6 +303,28 @@ export class GitHubProjectsApi {
     }
     return payload.data;
   }
+}
+
+function isRateLimitedResponse(response: Response): boolean {
+  return response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after");
+}
+
+function isRateLimitGraphQLError(error: GraphQLErrorShape): boolean {
+  const type = typeof error.type === "string" ? error.type.toUpperCase() : "";
+  const code = typeof error.extensions?.code === "string" ? error.extensions.code.toUpperCase() : "";
+  return [type, code].some((value) => value === "RATE_LIMITED" || value === "ABUSE_DETECTION");
+}
+
+function unknownAfterMutation(error: unknown): GitHubProjectsApiError {
+  return error instanceof GitHubProjectsApiError ? new GitHubProjectsApiError(error.code, "unknown") : new GitHubProjectsApiError("request_failed", "unknown");
+}
+
+function fieldValueMatches(field: GitHubProjectItem["fields"][number], value: Record<string, string | number>): boolean {
+  if (field.type === "TEXT") return field.value === value.text;
+  if (field.type === "NUMBER") return field.value === value.number;
+  if (field.type === "DATE") return field.value === value.date;
+  if (field.type === "SINGLE_SELECT") return field.optionId === value.singleSelectOptionId;
+  return false;
 }
 
 function requireText(value: string, field: string, max: number): string {
@@ -296,8 +365,8 @@ function parseProjectItem(value: unknown): GitHubProjectItem {
     if (typeof item.content !== "object") throw new GitHubProjectsApiError("invalid_response");
     const record = item.content as Record<string, unknown>;
     if (record.__typename === "Issue" || record.__typename === "PullRequest") {
-      if (typeof record.title !== "string" || typeof record.number !== "number" || typeof record.url !== "string") throw new GitHubProjectsApiError("invalid_response");
-      content = { type: record.__typename, title: record.title, number: record.number, url: record.url };
+      if (typeof record.id !== "string" || typeof record.title !== "string" || typeof record.number !== "number" || typeof record.url !== "string") throw new GitHubProjectsApiError("invalid_response");
+      content = { id: record.id, type: record.__typename, title: record.title, number: record.number, url: record.url };
     }
   }
   const fieldValues = item.fieldValues;
@@ -319,7 +388,7 @@ function parseProjectItem(value: unknown): GitHubProjectItem {
     else if (type === "ProjectV2ItemFieldSingleSelectValue" && typeof fieldValue.name === "string") { type = "SINGLE_SELECT"; value = fieldValue.name; }
     else if (type === "ProjectV2ItemFieldIterationValue" && typeof fieldValue.title === "string") { type = "ITERATION"; value = fieldValue.title; }
 
-    return [{ id: fieldRecord.id, name: fieldRecord.name, type, value }];
+    return [{ id: fieldRecord.id, name: fieldRecord.name, type, value, ...(typeof fieldValue.optionId === "string" ? { optionId: fieldValue.optionId } : {}) }];
   });
   return { id: item.id, type: item.type, isArchived: item.isArchived, content, fields };
 }
