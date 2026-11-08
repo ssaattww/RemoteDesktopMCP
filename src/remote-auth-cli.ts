@@ -7,7 +7,8 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { configFromEnv } from "./index.js";
-import { GoogleOidcClient, PublicAuthService } from "./public-auth.js";
+import { createFileOAuthStateStore, GoogleOidcClient, PublicAuthService } from "./public-auth.js";
+import { GitHubProjectsCredentialStore } from "./github-projects-credentials.js";
 import { assertPrivateFile, assertSafePrivateParent, createPrivateFile, ensureSafeDataDirectory } from "./private-storage.js";
 
 const LOCAL_CALLBACK = "http://localhost:8765/callback";
@@ -69,7 +70,47 @@ async function authorizeGoogle() {
   await new Promise<void>((resolve) => server.once("close", resolve));
 }
 
+async function configureGitHubProjects() {
+  const envPath = path.join(current, ".env"); await assertSafePrivateParent(path.dirname(envPath)); await assertPrivateFile(envPath); process.loadEnvFile(envPath);
+  const cfg = configFromEnv();
+  if (!cfg.publicAuth || !cfg.githubProjects) throw new Error("Set Google authentication and GITHUB_PROJECTS_LOGIN before registering a GitHub credential.");
+  const state = await createFileOAuthStateStore(cfg.dataDir).load();
+  if (state.allowedSubjects.length !== 1) throw new Error("Exactly one approved RemoteDesktopMCP user is required.");
+  const identity = state.allowedSubjects[0]!;
+  const principal = `google:${identity.iss}:${identity.sub}`;
+  const token = await askSecret("GitHub personal access token (input hidden): ");
+  const store = new GitHubProjectsCredentialStore(cfg.dataDir);
+  const metadata = await store.register(principal, cfg.githubProjects.login, token);
+  console.log(`GitHub credential stored for the approved account ${metadata.login} (account ID ${metadata.githubUserId}).`);
+}
+
+async function askSecret(prompt: string): Promise<string> {
+  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== "function") throw new Error("Credential registration requires a local interactive terminal.");
+  output.write(prompt);
+  input.setRawMode(true);
+  input.resume();
+  let value = "";
+  return new Promise((resolve, reject) => {
+    const finish = (error?: Error) => {
+      input.off("data", onData);
+      input.setRawMode(false);
+      output.write("\n");
+      if (error) reject(error); else resolve(value);
+    };
+    const onData = (chunk: Buffer) => {
+      for (const byte of chunk) {
+        if (byte === 3) { finish(new Error("Credential registration was cancelled.")); return; }
+        if (byte === 13 || byte === 10) { finish(); return; }
+        if (byte === 8 || byte === 127) { value = value.slice(0, -1); continue; }
+        if (byte >= 32 && byte <= 126 && value.length < 16_384) value += String.fromCharCode(byte);
+      }
+    };
+    input.on("data", onData);
+  });
+}
+
 const command = process.argv[2];
 if (command === "configure" && process.argv[3]) await configure(process.argv[3]);
 else if (command === "authorize-google") await authorizeGoogle();
-else console.error("Usage: npm run remote-auth -- configure <google-client.json> [--base-url https://host] [--root path] | authorize-google");
+else if (command === "github-projects") await configureGitHubProjects();
+else console.error("Usage: npm run remote-auth -- configure <google-client.json> [--base-url https://host] [--root path] | authorize-google | github-projects");

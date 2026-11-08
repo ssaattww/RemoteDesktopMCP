@@ -94,7 +94,10 @@ export async function prepareWindowsJobLauncher(dataDir) {
     await removeRegularCacheFile(manifestPath);
     const compiler = findCSharpCompiler();
     if (!compiler) throw new Error("The .NET Framework C# compiler is unavailable; owned process launch is disabled.");
-    const temporaryRunnerPath = `${runnerPath}.${randomUUID()}.tmp.exe`;
+    // The content hash belongs on the final cache entry, not the throwaway
+    // compiler output. Keep the temporary name short for .NET Framework's
+    // MAX_PATH-limited compiler when the isolated data directory is deep.
+    const temporaryRunnerPath = path.join(cacheDir, `${randomUUID()}.tmp.exe`);
     try {
       execFileSync(compiler, ["/nologo", "/target:exe", `/out:${temporaryRunnerPath}`, sourcePath], {
         windowsHide: true,

@@ -107,6 +107,19 @@ test("invalid executables fail closed through the helper", { skip: !onWindows },
   assert.match(result.stderr, /CreateProcess failed/);
 });
 
+test("the compiler output path stays below MAX_PATH for a deep private cache", { skip: !onWindows }, async () => {
+  const dataDir = path.join(temporaryDataDir, "n".repeat(90));
+  await mkdir(dataDir);
+  const cacheDir = path.join(dataDir, ".wj");
+  const oldTemporaryName = path.join(cacheDir, `${"a".repeat(64)}.${"b".repeat(36)}.tmp.exe`);
+  const shortTemporaryName = path.join(cacheDir, `${"b".repeat(36)}.tmp.exe`);
+  assert.ok(oldTemporaryName.length > 260, "the fixture must cover the previous overlong name");
+  assert.ok(shortTemporaryName.length <= 260, "the new temporary name must fit the legacy compiler path limit");
+  await prepareWindowsJobLauncher(dataDir);
+  const { runnerPath, manifestPath } = await getCachePaths(dataDir);
+  await assertRunnerManifest(runnerPath, manifestPath);
+});
+
 test("the launcher does not wrap calls outside the owner context", { skip: !onWindows }, async () => {
   const wrap = await prepareWindowsJobLauncher(temporaryDataDir);
   const spawn = wrap(nodeSpawn, () => false);

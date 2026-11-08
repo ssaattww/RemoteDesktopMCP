@@ -14,7 +14,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { verifyPassword } from "./hash-password.js";
-import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
+import { AUTH_COOKIE, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, PublicAuthService, type GitHubProjectsScope, type OAuthResourceScope, type PublicAuthConfig, type PublicAuthOptions } from "./public-auth.js";
+import { GitHubProjectsApi, type GitHubProjectsCredentialProvider } from "./github-projects-api.js";
+import { createGitHubProjectsServer } from "./github-projects-mcp.js";
+import { GitHubProjectsCredentialStore } from "./github-projects-credentials.js";
 import { assertPrivateAuditStorage, createPrivateFile, ensurePrivateDirectory, ensureSafeDataDirectory, protectPrivateFile } from "./private-storage.js";
 
 import { applyTodoChanges, snapshotTodoItems, todoChangesSchema, isTodoValidationError, type TodoItem } from "./shared-todo.js";
@@ -60,7 +63,7 @@ const TODO_GRACE_MS = 300_000;
 const REQUIRED_TOOLS = ["get_config", "start_search", "get_more_search_results", "stop_search", "read_file", "edit_block", "start_process", "read_process_output", "force_terminate", "list_sessions", "_rdmcp_stop_owner", "_rdmcp_resume_owner"];
 
 export type ProcessAdapter = { start(command: string, timeoutMs: number, workingDirectory?: string): Promise<string>; read(pid: number, offset: number, timeoutMs: number): Promise<string>; terminate(pid: number, timeoutMs: number): Promise<string>; sessions(): Promise<string> };
-export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; sessionLinkTransport?: SessionLinkTransport };
+export type RuntimeConfig = { adminUsers?: string[]; baseUrl: string; tokenSecret: string; users: User[]; roots: Root[]; dataDir: string; port: number; chunkBytes: number; nodeId: string; nodeLabel: string; dcCommand: string; dcArgs: string[]; dcManagedConfig?: boolean; allowedRedirectOrigins: Set<string>; authMode?: "password" | "google"; publicAuth?: PublicAuthConfig; publicAuthOptions?: PublicAuthOptions; githubProjects?: { login: string; credentials: GitHubProjectsCredentialProvider; request?: typeof fetch }; linkNoReplace?: (existingPath: string, newPath: string) => Promise<void>; linkProtectedConfig?: (existingPath: string, newPath: string) => Promise<void>; processAdapter?: ProcessAdapter; sessionLinkTransport?: SessionLinkTransport };
 const get = (env: NodeJS.ProcessEnv, name: string) => { const value = env[name]; if (!value) throw new Error(`${name} is required. See .env.example.`); return value; };
 const parse = <T>(env: NodeJS.ProcessEnv, name: string): T => { try { return JSON.parse(get(env, name)) as T; } catch { throw new Error(`${name} must contain valid JSON.`); } };
 const makeId = () => randomBytes(32).toString("base64url");
@@ -120,11 +123,13 @@ export function configFromEnv(env = process.env): RuntimeConfig {
   const googleClientSecret = env.GOOGLE_CLIENT_SECRET;
   const googleRedirectUri = env.GOOGLE_REDIRECT_URI ?? `${baseUrl}/google/callback`;
   if (authMode === "google" && (!googleClientId || !googleClientSecret || googleRedirectUri !== `${baseUrl}/google/callback`)) throw new Error("Google mode requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI=${BASE_URL}/google/callback.");
+  const githubProjectsLogin = env.GITHUB_PROJECTS_LOGIN;
+  if (githubProjectsLogin && (authMode !== "google" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(githubProjectsLogin))) throw new Error("GITHUB_PROJECTS_LOGIN requires Google authentication and a valid GitHub login.");
   // Owner-scoped termination depends on the fixed Desktop Commander module
   // layout. Arbitrary launchers cannot be verified to install that bridge.
   const customArgs = (env.DESKTOP_COMMANDER_ARGS ?? "").split(" ").filter(Boolean);
   if (env.DESKTOP_COMMANDER_COMMAND || customArgs.length) throw new Error("Only the managed Desktop Commander launcher is supported because owner-scoped emergency stop requires the pinned backend.");
-  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: process.execPath, dcArgs: [bundled, "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}) };
+  return { adminUsers: (env.ADMIN_USERS ?? "").split(",").map((value) => value.trim()).filter(Boolean), baseUrl, tokenSecret, users, roots, dataDir, port: Number(env.PORT ?? 3000), chunkBytes, nodeId: env.LOCAL_NODE_ID ?? "local", nodeLabel: env.LOCAL_NODE_LABEL ?? "This PC", dcCommand: process.execPath, dcArgs: [bundled, "--no-onboarding"], dcManagedConfig: true, allowedRedirectOrigins, authMode, ...(authMode === "google" ? { publicAuth: { baseUrl, tokenSecret, dataDir, googleClientId: googleClientId!, googleClientSecret: googleClientSecret!, googleRedirectUri } } : {}), ...(githubProjectsLogin ? { githubProjects: { login: githubProjectsLogin, credentials: new GitHubProjectsCredentialStore(dataDir) } } : {}) };
 }
 
 class Mutex {
@@ -245,6 +250,7 @@ export class RemoteDesktopService {
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
   private readonly processWatcherRuns = new Set<Promise<void>>();
+  private readonly rejectedGitHubProjectsCredentials = new Map<string, string>();
   private processWatcherFailure?: unknown;
   private processWatcherFailed = false;
   private closing = false;
@@ -278,6 +284,26 @@ export class RemoteDesktopService {
     );
   }
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
+  githubProjectsApi(principal: string): GitHubProjectsApi | undefined {
+    if (!this.cfg.githubProjects) return undefined;
+    const fingerprint = (token: string) => createHash("sha256").update(token, "utf8").digest("hex");
+    return new GitHubProjectsApi(principal, this.cfg.githubProjects.login, this.cfg.githubProjects.credentials, {
+      request: this.cfg.githubProjects.request,
+      isCredentialRejected: (subject, token) => {
+        const rejected = this.rejectedGitHubProjectsCredentials.get(subject);
+        if (!rejected) return false;
+        if (rejected === fingerprint(token)) return true;
+        this.rejectedGitHubProjectsCredentials.delete(subject);
+        return false;
+      },
+      onCredentialRejected: (subject, token) => {
+        const next = fingerprint(token);
+        const previous = this.rejectedGitHubProjectsCredentials.get(subject);
+        this.rejectedGitHubProjectsCredentials.set(subject, next);
+        return previous !== next;
+      },
+    });
+  }
   async initialize(): Promise<void> {
     await ensureSafeDataDirectory(this.cfg.dataDir);
     await this.loadAuditIndex();
@@ -1604,14 +1630,19 @@ class RateLimit {
   }
 }
 const readCookie = (header: string | undefined, name: string) => header?.split(";").map((value) => value.trim()).find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+const githubProjectsResource = (baseUrl: string) => `${baseUrl}/github-projects/mcp`;
+const validGitHubProjectsScope = (scope: string): scope is GitHubProjectsScope => scope === "github-projects:read" || scope === "github-projects:write" || scope === "github-projects:read github-projects:write";
 const publicAuthorizeRequest = (service: RemoteDesktopService, req: Request) => {
   const resource = typeof req.query.resource === "string" ? req.query.resource : "";
+  const scope = typeof req.query.scope === "string" ? req.query.scope : "";
   const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
   const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
   const challenge = typeof req.query.code_challenge === "string" ? req.query.code_challenge : "";
   const state = typeof req.query.state === "string" ? req.query.state : undefined;
-  if (clientId !== CHATGPT_CLIENT_ID || redirectUri !== CHATGPT_REDIRECT_URI || resource !== `${service.cfg.baseUrl}/mcp` || req.query.response_type !== "code" || req.query.code_challenge_method !== "S256" || req.query.scope !== "mcp" || (state?.length ?? 0) > 2048 || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return undefined;
-  return { clientId, redirectUri, resource, state, challenge };
+  const expectedResource = scope === "mcp" ? `${service.cfg.baseUrl}/mcp` : validGitHubProjectsScope(scope) ? githubProjectsResource(service.cfg.baseUrl) : "";
+  if (scope !== "mcp" && !service.cfg.githubProjects) return undefined;
+  if (clientId !== CHATGPT_CLIENT_ID || redirectUri !== CHATGPT_REDIRECT_URI || !expectedResource || resource !== expectedResource || req.query.response_type !== "code" || req.query.code_challenge_method !== "S256" || (state?.length ?? 0) > 2048 || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return undefined;
+  return { clientId, redirectUri, resource, scope: scope as OAuthResourceScope, state, challenge };
 };
 export function createApp(service: RemoteDesktopService): Express {
   const app = express(); const rate = new RateLimit(); app.disable("x-powered-by"); app.use((req, res, next) => {
@@ -1629,7 +1660,8 @@ export function createApp(service: RemoteDesktopService): Express {
   mountUserConsole(app, service);
   app.get("/health", (_req, res) => res.json({ ok: true, service: "remote-desktop-mcp", mode: service.publicAuth ? "google" : "local-development" }));
   app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json({ resource: `${service.cfg.baseUrl}/mcp`, authorization_servers: [service.cfg.baseUrl], scopes_supported: ["mcp"] }));
-  app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_response_iss_parameter_supported: Boolean(service.publicAuth), authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, ...(service.publicAuth ? { client_id_metadata_document_supported: true } : { registration_endpoint: `${service.cfg.baseUrl}/register` }), response_types_supported: ["code"], grant_types_supported: service.publicAuth ? ["authorization_code", "refresh_token"] : ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: ["mcp"] }));
+  app.get("/.well-known/oauth-protected-resource/github-projects/mcp", (_req, res) => service.publicAuth && service.cfg.githubProjects ? res.json({ resource: githubProjectsResource(service.cfg.baseUrl), authorization_servers: [service.cfg.baseUrl], scopes_supported: ["github-projects:read", "github-projects:write"] }) : res.status(404).json({ error: "not_found" }));
+  app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({ issuer: service.cfg.baseUrl, authorization_response_iss_parameter_supported: Boolean(service.publicAuth), authorization_endpoint: `${service.cfg.baseUrl}/authorize`, token_endpoint: `${service.cfg.baseUrl}/token`, ...(service.publicAuth ? { client_id_metadata_document_supported: true } : { registration_endpoint: `${service.cfg.baseUrl}/register` }), response_types_supported: ["code"], grant_types_supported: service.publicAuth ? ["authorization_code", "refresh_token"] : ["authorization_code"], token_endpoint_auth_methods_supported: ["none"], code_challenge_methods_supported: ["S256"], scopes_supported: service.publicAuth && service.cfg.githubProjects ? ["mcp", "github-projects:read", "github-projects:write"] : ["mcp"] }));
   app.post("/register", async (req, res) => {
     if (service.publicAuth) return res.status(404).json({ error: "not_found" });
     if (!rate.allow("register")) return res.status(429).json({ error: "rate_limited" });
@@ -1701,7 +1733,12 @@ export function createApp(service: RemoteDesktopService): Express {
     const outcome = await service.publicAuth.googleCallback({ state, code: typeof req.query.code === "string" ? req.query.code : undefined, error: typeof req.query.error === "string" ? req.query.error : undefined, cookie });
     res.setHeader("Cache-Control", "no-store");
     if (outcome.redirect) return res.redirect(303, outcome.redirect);
-    if (outcome.transaction) return res.type("html").send(`<!doctype html><meta charset="utf-8"><title>Remote Desktop MCP</title><p>Allow ChatGPT to read and change files only within the configured file roots, and to start arbitrary commands as this Windows user's OS account?</p><form method="post" action="/authorize/consent"><input type="hidden" name="transaction" value="${outcome.transaction}"><button name="allow" value="yes" type="submit">Allow</button><button name="allow" value="no" type="submit">Deny</button></form>`);
+    if (outcome.transaction) {
+      const consentText = outcome.scope === "mcp"
+        ? "Allow ChatGPT to use the RemoteDesktopMCP PC tools under their existing controls?"
+        : `Allow ChatGPT to use GitHub Projects operations with scope ${outcome.scope}? This connection does not provide PC tools.`;
+      return res.type("html").send(`<!doctype html><meta charset="utf-8"><title>RemoteDesktopMCP authorization</title><p>${consentText}</p><form method="post" action="/authorize/consent"><input type="hidden" name="transaction" value="${outcome.transaction}"><button name="allow" value="yes" type="submit">Allow</button><button name="allow" value="no" type="submit">Deny</button></form>`);
+    }
     return res.status(400).type("html").send("Sign-in could not be completed.");
   });
   app.post("/authorize/consent", async (req, res) => {
@@ -1714,6 +1751,36 @@ export function createApp(service: RemoteDesktopService): Express {
     return res.status(400).type("html").send("Authorization could not be completed.");
   });
   app.all("/mcp", async (req: Request, res: Response) => { if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }); const authorization = req.header("authorization"); if (service.publicAuth && !rate.allow(`mcp:${service.publicAuth.mcpAdmissionKey(authorization) ?? "unknown"}`, 30)) return res.status(429).json({ jsonrpc: "2.0", error: { code: -32029, message: "Too many unauthenticated requests." }, id: null }); const user = service.publicAuth ? await service.publicAuth.authenticate(authorization) : service.authenticate(authorization); if (!user) { await service.audit("mcp.rejected", { reason: "authentication" }); const discoveryChallenge = `Bearer resource_metadata="${service.cfg.baseUrl}/.well-known/oauth-protected-resource"`; const renewalChallenge = `${discoveryChallenge}, error="invalid_token", error_description="Access token is invalid or expired."`; const rpc = req.body as { method?: unknown; id?: unknown } | undefined; if (authorization && rpc?.method === "tools/call") return res.status(200).json({ jsonrpc: "2.0", result: { isError: true, content: [{ type: "text", text: "Authorization expired. Reconnect to continue." }], _meta: { "mcp/www_authenticate": [renewalChallenge] } }, id: rpc.id ?? null }); res.setHeader("WWW-Authenticate", discoveryChallenge); return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null }); } const server = service.server(user); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); let cleaned = false; const cleanup = () => { if (!cleaned) { cleaned = true; void transport.close(); void server.close(); } }; res.once("finish", cleanup); req.once("aborted", cleanup); try { await server.connect(transport); await transport.handleRequest(req, res, req.body); } catch { await service.audit("mcp.failed", { user }); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null }); } });
+  app.all("/github-projects/mcp", async (req: Request, res: Response) => {
+    if (req.method !== "POST") return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
+    if (!service.publicAuth || !service.cfg.githubProjects) return res.status(404).json({ error: "not_found" });
+    const authorization = req.header("authorization");
+    const admission = service.publicAuth.githubProjectsAdmissionKey(authorization);
+    if (!rate.allow(`github_projects:${admission ?? "unknown"}`, 30)) return res.status(429).json({ jsonrpc: "2.0", error: { code: -32029, message: "Too many unauthenticated requests." }, id: null });
+    const grant = await service.publicAuth.authenticateGitHubProjects(authorization);
+    if (!grant) {
+      await service.audit("github_projects.rejected", { reason: "authentication" });
+      const metadata = `${service.cfg.baseUrl}/.well-known/oauth-protected-resource/github-projects/mcp`;
+      const discovery = `Bearer resource_metadata="${metadata}"`;
+      const renewal = `${discovery}, error="invalid_token", error_description="Access token is invalid or expired."`;
+      const rpc = req.body as { method?: unknown; id?: unknown } | undefined;
+      if (authorization && rpc?.method === "tools/call") return res.status(200).json({ jsonrpc: "2.0", result: { isError: true, content: [{ type: "text", text: "Authorization expired. Reconnect to continue." }], _meta: { "mcp/www_authenticate": [renewal] } }, id: rpc.id ?? null });
+      res.setHeader("WWW-Authenticate", discovery);
+      return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Authentication required." }, id: null });
+    }
+    const api = service.githubProjectsApi(grant.principal);
+    if (!api) return res.status(404).json({ error: "not_found" });
+    const server = createGitHubProjectsServer({ api, principal: grant.principal, scopes: grant.scopes, audit: service.audit.bind(service) });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    let cleaned = false;
+    const cleanup = () => { if (!cleaned) { cleaned = true; void transport.close(); void server.close(); } };
+    res.once("finish", cleanup); req.once("aborted", cleanup);
+    try { await server.connect(transport); await transport.handleRequest(req, res, req.body); }
+    catch {
+      await service.audit("github_projects.mcp_failed", { principal: grant.principal });
+      if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error." }, id: null });
+    }
+  });
   app.use((error: unknown, _req: Request, res: Response, next: unknown) => { void next; void service.audit("http.failed", { route: "authentication" }).catch(() => undefined); if (!res.headersSent) { const status = typeof error === "object" && error !== null && "status" in error && (error as { status?: unknown }).status === 413 ? 413 : 500; res.status(status).type("text").send(status === 413 ? "Request is too large." : "Request could not be completed."); } });
   return app;
 }

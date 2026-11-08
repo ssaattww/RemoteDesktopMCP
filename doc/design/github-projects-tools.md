@@ -30,9 +30,9 @@ flowchart LR
 
 - HTTP 認証結果を `{ issuer, subject }` を持つ不変の利用者識別情報とし、現行の平坦な `user` 文字列だけを認証情報の識別キーに使わない。RemoteDesktopMCP 利用者一人に GitHub 利用者一人を対応させ、GitHub の不変な数値利用者 ID を保護された設定情報に記録する。別利用者間で認証情報を共有しない。初期は本人一人で、複数アカウント切替画面は作らない。
 - プロジェクト用接続口は認証対象識別子 `github-projects` のみを受理する。ツール情報の取得と各 `tools/call` で権限を再検証する。`github-projects:read` は照会、`github-projects:write` は列挙済み更新だけに使い、管理者権限は設けない。プロジェクト用トークンを PC 接続口で、PC 用トークンをプロジェクト用接続口で受理しない。
-- 現行の OAuth 認証は PC 用 `/mcp` と権限 `mcp` の組に限られる。プロジェクト用接続口を実装する場合は、既存の認可コード交換・更新・認証時の照合を拡張し、接続先と認証対象の識別値 `aud`、`github-projects:read`／`github-projects:write` の権限を対応させて発行・照合する。更新後も元の接続口と権限を維持し、PC 用トークンとの相互利用を拒否する。この認証拡張は現行コードにはまだない。
-- GitHub 認証方式は本人が選択済みの個人 PAT。登録はローカル専用の隠し入力を使うコマンド行操作を候補とし、MCP 引数、チャット、コマンド行、`shell` 履歴、環境変数に PAT を置かない。登録時に固定 `GET /user` で GitHub 利用者 ID を確認してから保存する。登録画面／保管機能は未実装。
-- Windows は DPAPI の `CurrentUser`、Ubuntu／Linux は `Secret Service` を OS の保護領域として使い、実行 OS 利用者と保護領域の実行主体を一致させる。PAT 本体を `.env` に置かない。保護領域がない・施錠中・復号不能ならプロジェクト操作を拒否し、平文へ切り替えない。RemoteDesktopMCP の他機能はそのまま利用可能とする。DPAPI の利用者設定とサービス主体の一致、画面のない Linux 環境での鍵解除、複製／移行は実環境で未検証。
+- 現行 OAuth 認証を PC 用 `/mcp` と権限 `mcp` の組に加え、プロジェクト用接続口にも拡張した。接続先と認証対象の識別値 `aud`、`github-projects:read`／`github-projects:write` の権限を対応させて発行・照合し、更新後も元の接続口と権限を維持する。両入口で相手側の token を拒否する。
+- GitHub 認証方式は本人が選択済みの個人 PAT。`npm run remote-auth -- github-projects` は承認済み RemoteDesktopMCP 利用者を読み、ローカル端末の非表示入力から PAT を受け取る。MCP 引数、チャット、コマンド行引数、`shell` 履歴、環境変数、監査記録へ PAT を置かない。登録時に固定 `GET /user` で GitHub 数値利用者 ID を確認し、既存の結び付け先と異なる ID への置換を拒否する。この登録操作はユーザーがローカルで明示実行するまで行わない。
+- Windows は DPAPI の `CurrentUser`、Ubuntu／Linux は `Secret Service` を OS の保護領域として使い、実行 OS 利用者と保護領域の実行主体を一致させる。Windows では固定・非対話の PowerShell 処理へ非公開標準入力で暗号化対象を渡し、DPAPI 保護した値だけを `DATA_DIR` の ACL 保護ファイルへ保存する。Linux では `secret-tool` を固定引数で呼び、PAT は標準入力で Secret Service へ渡す。PAT を `.env`、環境変数、コマンド引数へ置かず、保護領域がない・施錠中・復号不能ならプロジェクト操作を拒否し、平文へ切り替えない。Windows の合成値で CurrentUser の保存・再読込を確認したが、サービス再起動後の実アカウント、DPAPI profile 移行、画面のない Linux 環境の D-Bus／鍵解除は未検証。
 - 保護領域の識別名はサーバー管理のアプリ名と RemoteDesktopMCP 利用者 ID から生成する。設定情報にトークン値は含めない。交換時は新 PAT の `/user` を検証し、GitHub 利用者 ID が既存対応と一致した場合だけ置換する。通常利用中は再入力を要求しない。`401` 後も自動更新・削除・再入力要求をせず、書き込みを停止して一度だけ復旧方法を知らせる。`403` は権限／組織方針による拒否または利用制限の応答となり得るため、応答本文と応答ヘッダーから判別できる場合に分類し、再設定を促さない。
 - PAT の必要な `scope` や `fine-grained`／`classic` の最終設定はこの設計で確定しない。個人 `Project #4` と利用者所有プロジェクトの表示設定 API の対応制約は、権限粒度調査・認証情報の実証を保留している。GitHub PAT の実権限が広くても、サーバー側の許可一覧を越える `GraphQL` 更新や `REST` の経路／本文は公開しない。
 

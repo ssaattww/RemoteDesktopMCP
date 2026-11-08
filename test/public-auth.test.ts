@@ -124,6 +124,46 @@ async function authorizedCode(auth: PublicAuthService) {
   return new URL(consent.redirect).searchParams.get("code") ?? "";
 }
 
+async function authorizedCodeForScope(auth: PublicAuthService, scope: "mcp" | "github-projects:read" | "github-projects:write" | "github-projects:read github-projects:write", resource: string) {
+  const begun = await auth.begin({ clientId, redirectUri: CHATGPT_REDIRECT_URI, resource, scope, state: "chatgpt-state", challenge });
+  const googleState = new URL(begun.redirect).searchParams.get("state");
+  assert.ok(googleState);
+  const callback = await auth.googleCallback({ state: googleState, code: "google-code", cookie: begun.cookie });
+  assert.ok(callback.transaction);
+  assert.equal(callback.scope, scope);
+  const consent = await auth.consent({ transaction: callback.transaction, cookie: begun.cookie, allow: true });
+  assert.ok(consent.redirect);
+  return new URL(consent.redirect).searchParams.get("code") ?? "";
+}
+
+test("GitHub Projects OAuth audience and scopes stay isolated from the PC MCP endpoint", async () => {
+  const auth = publicAuth();
+  await auth.initialize();
+  await auth.addAllowedSubject(subject);
+  const projectsResource = `${baseUrl}/github-projects/mcp`;
+  const projectCode = await authorizedCodeForScope(auth, "github-projects:read github-projects:write", projectsResource);
+  const projectGrant = requireTokens(await auth.token({ grantType: "authorization_code", code: projectCode, verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource: projectsResource }));
+
+  assert.equal(projectGrant.scope, "github-projects:read github-projects:write");
+  assert.ok(auth.githubProjectsAdmissionKey(`Bearer ${projectGrant.access_token}`));
+  assert.equal(auth.mcpAdmissionKey(`Bearer ${projectGrant.access_token}`), undefined);
+  assert.equal(await auth.authenticate(`Bearer ${projectGrant.access_token}`), undefined);
+  assert.deepEqual(await auth.authenticateGitHubProjects(`Bearer ${projectGrant.access_token}`), {
+    principal: `google:${subject.iss}:${subject.sub}`,
+    scopes: ["github-projects:read", "github-projects:write"],
+  });
+  assert.deepEqual(await auth.token({ grantType: "refresh_token", refreshToken: projectGrant.refresh_token, clientId, resource }), { error: "invalid_grant" });
+  const refreshedProjectGrant = requireTokens(await auth.token({ grantType: "refresh_token", refreshToken: projectGrant.refresh_token, clientId, resource: projectsResource }));
+  assert.equal(refreshedProjectGrant.scope, projectGrant.scope);
+  assert.ok(await auth.authenticateGitHubProjects(`Bearer ${refreshedProjectGrant.access_token}`));
+
+  const pcCode = await authorizedCodeForScope(auth, "mcp", resource);
+  const pcGrant = requireTokens(await auth.token({ grantType: "authorization_code", code: pcCode, verifier, clientId, redirectUri: CHATGPT_REDIRECT_URI, resource }));
+  assert.equal(await auth.authenticate(`Bearer ${pcGrant.access_token}`), `google:${subject.iss}:${subject.sub}`);
+  assert.equal(await auth.authenticateGitHubProjects(`Bearer ${pcGrant.access_token}`), undefined);
+  assert.equal(auth.githubProjectsAdmissionKey(`Bearer ${pcGrant.access_token}`), undefined);
+});
+
 test("RA-03: Google ID token verifies its RSA signature and bound claims", async () => {
   const now = Date.now();
   const { privateKey, publicKey } = await generateKeyPair("RS256");
