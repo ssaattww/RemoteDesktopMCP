@@ -53,6 +53,27 @@ test("mutation transport loss is reported as unknown and is not retried", async 
   assert.equal(requestCount, 2);
 });
 
+test("a rejected credential blocks later requests until the credential changes", async () => {
+  let rejected = "";
+  let requestCount = 0;
+  const credentials = credentialProvider();
+  const options = {
+    isCredentialRejected: (_principal: string, candidate: string) => candidate === rejected,
+    onCredentialRejected: (_principal: string, candidate: string) => { rejected = candidate; },
+    request: async (_input: string | URL | Request, init?: RequestInit) => {
+      requestCount += 1;
+      const body = JSON.parse(String(init?.body)) as { operationName: string };
+      if (body.operationName === "RdmcpViewerId") return response({ data: { viewer: { id: "U_1", login: "example" } } });
+      return response({}, 401);
+    },
+  };
+  const first = new GitHubProjectsApi("principal", "example", credentials, options);
+  await assert.rejects(first.createProject("New"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "credential_rejected" && error.applied === "unknown");
+  const laterRequest = new GitHubProjectsApi("principal", "example", credentials, options);
+  await assert.rejects(laterRequest.createProject("Another"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "credential_rejected" && error.applied === false);
+  assert.equal(requestCount, 2, "the same rejected PAT is not sent again");
+});
+
 test("API identity mismatch and GraphQL errors fail closed without exposing response details", async () => {
   const mismatch = new GitHubProjectsApi("principal", "expected", credentialProvider(), { request: async () => response({ data: { viewer: { login: "different", projectsV2: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } }) });
   await assert.rejects(mismatch.listProjects(), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "identity_mismatch");

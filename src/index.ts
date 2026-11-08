@@ -250,6 +250,7 @@ export class RemoteDesktopService {
   private readonly ownedUploads = new Map<string, OwnedUploadArtifact>();
   private readonly processWatchers = new Map<string, NodeJS.Timeout>();
   private readonly processWatcherRuns = new Set<Promise<void>>();
+  private readonly rejectedGitHubProjectsCredentials = new Map<string, string>();
   private processWatcherFailure?: unknown;
   private processWatcherFailed = false;
   private closing = false;
@@ -283,7 +284,21 @@ export class RemoteDesktopService {
     );
   }
   constructor(readonly cfg: RuntimeConfig) { this.dc = new DesktopCommander(cfg, this.audit.bind(this), () => this.rememberProtectedConfigIdentity(), () => this.requireCurrentOperation()); this.linkNoReplace = cfg.linkNoReplace ?? link; this.linkProtectedConfig = cfg.linkProtectedConfig ?? link; this.publicAuth = cfg.publicAuth ? new PublicAuthService(cfg.publicAuth, cfg.publicAuthOptions) : undefined; }
-  githubProjectsApi(principal: string): GitHubProjectsApi | undefined { return this.cfg.githubProjects ? new GitHubProjectsApi(principal, this.cfg.githubProjects.login, this.cfg.githubProjects.credentials, { request: this.cfg.githubProjects.request }) : undefined; }
+  githubProjectsApi(principal: string): GitHubProjectsApi | undefined {
+    if (!this.cfg.githubProjects) return undefined;
+    const fingerprint = (token: string) => createHash("sha256").update(token, "utf8").digest("hex");
+    return new GitHubProjectsApi(principal, this.cfg.githubProjects.login, this.cfg.githubProjects.credentials, {
+      request: this.cfg.githubProjects.request,
+      isCredentialRejected: (subject, token) => {
+        const rejected = this.rejectedGitHubProjectsCredentials.get(subject);
+        if (!rejected) return false;
+        if (rejected === fingerprint(token)) return true;
+        this.rejectedGitHubProjectsCredentials.delete(subject);
+        return false;
+      },
+      onCredentialRejected: (subject, token) => { this.rejectedGitHubProjectsCredentials.set(subject, fingerprint(token)); },
+    });
+  }
   async initialize(): Promise<void> {
     await ensureSafeDataDirectory(this.cfg.dataDir);
     await this.loadAuditIndex();

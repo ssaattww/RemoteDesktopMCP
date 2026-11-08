@@ -122,15 +122,19 @@ const SET_PROJECT_ITEM_FIELD = `mutation RdmcpSetProjectItemField($projectId: ID
  * a project's title/short description. Administrative operations are absent. */
 export class GitHubProjectsApi {
   private readonly request: typeof fetch;
+  private readonly isCredentialRejected?: (principal: string, token: string) => boolean;
+  private readonly onCredentialRejected?: (principal: string, token: string) => void;
 
   constructor(
     private readonly principal: string,
     private readonly expectedLogin: string,
     private readonly credentials: GitHubProjectsCredentialProvider,
-    options: { request?: typeof fetch } = {},
+    options: { request?: typeof fetch; isCredentialRejected?: (principal: string, token: string) => boolean; onCredentialRejected?: (principal: string, token: string) => void } = {},
   ) {
     if (!principal || !expectedLogin || expectedLogin.trim() !== expectedLogin) throw new Error("A configured principal and GitHub login are required.");
     this.request = options.request ?? fetch;
+    this.isCredentialRejected = options.isCredentialRejected;
+    this.onCredentialRejected = options.onCredentialRejected;
   }
 
   async listProjects(): Promise<GitHubProjectSummary[]> {
@@ -246,7 +250,9 @@ export class GitHubProjectsApi {
     if (!result.node || typeof result.node !== "object") throw new GitHubProjectsApiError("invalid_response", "unknown");
     const projectData = result.node as Record<string, unknown>;
     if (typeof (projectData.owner as { login?: unknown } | undefined)?.login !== "string" || (projectData.owner as { login: string }).login.toLowerCase() !== this.expectedLogin.toLowerCase()) throw new GitHubProjectsApiError("forbidden", "unknown");
-    const project = parseProject(projectData);
+    let project: GitHubProjectSummary;
+    try { project = parseProject(projectData); }
+    catch (error) { throw unknownAfterMutation(error); }
     if ((expected.title !== undefined && projectData.title !== expected.title) || (expected.shortDescription !== undefined && projectData.shortDescription !== expected.shortDescription)) throw new GitHubProjectsApiError("invalid_response", "unknown");
     return project;
   }
@@ -258,12 +264,14 @@ export class GitHubProjectsApi {
     if (!result.node || typeof result.node !== "object") throw new GitHubProjectsApiError("invalid_response", "unknown");
     const raw = result.node as Record<string, unknown>;
     if ((raw.project as { id?: unknown } | undefined)?.id !== projectId) throw new GitHubProjectsApiError("forbidden", "unknown");
-    return parseProjectItem(raw);
+    try { return parseProjectItem(raw); }
+    catch (error) { throw unknownAfterMutation(error); }
   }
 
   async #getToken(): Promise<string> {
     const token = await this.credentials.getToken(this.principal);
     if (!token || token.length > 16_384 || /[\r\n]/.test(token)) throw new GitHubProjectsApiError("credential_unavailable");
+    if (this.isCredentialRejected?.(this.principal, token)) throw new GitHubProjectsApiError("credential_rejected");
     return token;
   }
 
@@ -288,7 +296,7 @@ export class GitHubProjectsApi {
     } catch {
       throw new GitHubProjectsApiError("request_failed", mutation ? "unknown" : false);
     }
-    if (response.status === 401) throw new GitHubProjectsApiError("credential_rejected", mutation ? "unknown" : false);
+    if (response.status === 401) { this.onCredentialRejected?.(this.principal, token); throw new GitHubProjectsApiError("credential_rejected", mutation ? "unknown" : false); }
     if (response.status === 403) throw new GitHubProjectsApiError(isRateLimitedResponse(response) ? "rate_limited" : "forbidden", mutation ? "unknown" : false);
     if (response.status === 429) throw new GitHubProjectsApiError("rate_limited", mutation ? "unknown" : false);
     if (!response.ok) throw new GitHubProjectsApiError("api_error", mutation ? "unknown" : false);
