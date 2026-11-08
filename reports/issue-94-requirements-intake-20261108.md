@@ -20,6 +20,7 @@
 | 人間専用操作 | Project 削除、公開／非公開の切替、メンバー追加・削除、アクセス権変更を RDMCP の公開ツールに含めない。サーバー側でも許可操作を制限し、任意 API／コマンドを公開しない |
 | 認証・認可 | 読み取りと更新を区別し、それとは別に GitHub の認証方式・実権限を確認する |
 | アカウント対応 | 初期は GitHub アカウント1つで利用する。RDMCP アカウントと GitHub アカウントを一対一に対応させ、credential を他利用者と共有しない。複数連携の仕様・実装は今回決めず、先行しない |
+| 設定の手間 | 通常利用のたびに token を再入力させない。PAT が revoke／expire した例外時は自動復旧できない場合があることを区別し、繰り返し催促せず、操作を停止して一度だけ理由と復旧方法を案内する |
 | 根拠 | 現行 API の対応範囲、未対応、既存 RDMCP との重複・共通基盤を調べ、未確定事項を確定扱いしない |
 | 開発手順 | implementation 前に Issue・branch・PR を正式に紐付け、development-orchestrator を入口にする |
 | 最新の順序 | ユーザーと要件をまとめることを優先し、製品設計・実装を先行させない |
@@ -82,11 +83,11 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 | 発行・登録 | 利用者が GitHub の設定画面で発行し、RDMCP へ安全に登録する必要がある。入力・貼付け経路で token を履歴、clipboard、例外、監査ログへ残さない要件がある | App registration と callback／認可フローの準備後、利用者本人が GitHub で認可するため、token 文字列を本人が RDMCP に直接入力しなくてよい。server-side confidential client の client secret と token は引き続き安全に扱う必要がある |
 | 利用者との紐付け | PAT は GitHub user account に属する。RDMCP アカウントと PAT 所有者を一対一で結び、credential をアカウント間で共有しない | user access token は認可した GitHub user の代理で動作し、権限・到達 resource は App と本人の共通範囲。RDMCP アカウントと GitHub user ID を一対一で対応させ、credential を分離する |
 | 保管・ログ | PAT は RDMCP の認証済み設定経路から登録し、アカウント ID ごとに暗号化保管する案。secret／UI／HTTP logging の具体策は下記に記録 | GitHub は private key／client secret／token の安全な保管を推奨。App user token は今回は採用しない |
-| 期限・更新 | PAT に期限を設定し、期限前の利用者主導の再発行・安全な再登録を要件とする。期限値や更新時期は未決定 | 期限付き user access token は既定で 8 時間、refresh token は 6 か月。GitHub App は今回は採用しない |
+| 期限・更新 | PAT には App refresh token のような更新経路がない。期限付きで使うなら期限後に本人が新 token を発行して再登録する必要がある。今回はその通常運用を避けたい | 期限付き user access token は既定で 8 時間、refresh token は 6 か月。GitHub App は今回は採用しない |
 | 失効 | 利用者が GitHub の PAT settings から削除できる。RDMCP は認証失敗を検出して使用を停止し、利用者に再登録を求める必要がある | 利用者は GitHub アカウントから App 認可を取り消せる。App は revoke webhook を受けた本人分の API 呼出しを停止し、401 でも停止・再認可へ誘導する必要がある |
 | 主な運用負担 | App registration が不要で立ち上げは単純だが、手動共有・更新・失効確認を利用者が担い、長期 secret の漏えい影響を管理する | 初期登録・認可・安全な client secret／refresh token 管理と更新処理が必要だが、GitHub user との帰属や期限付き更新を flow に組み込める |
 
-公式資料は fine-grained PAT の Projects 対応可否や権限粒度の比較には使っていない。ユーザー指示により、その調査は保留する。上表の期限値は GitHub.com 文書にある一般値であり、対象個人 Project #4 の認証・書込み成功を意味しない。
+公式資料では fine-grained PAT は user-owned Projects に対応しないとされる。これは API 対応制約の確認であり、トークン権限の細分化調査はユーザー指示により保留中。上表の期限値は GitHub.com 文書にある一般値であり、classic PAT による対象個人 Project #4 の認証・書込み成功を意味しない。
 
 資料: [PAT の作成・管理](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)、[GitHub App のセキュリティベストプラクティス](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app)、[user access token の発行](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)、[user token の更新](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)、[期限切れ・失効](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation)。
 
@@ -96,10 +97,13 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 - token の登録場所は ChatGPT／MCP 会話・tool 引数ではなく、RDMCP の認証済み HTTPS 設定画面とする案。画面では password 入力を使い、TLS・認証・CSRF 検証を行う。token を URL、browser storage、画面再表示、response、通常 log、監査、例外、HTTP debug に含めず、登録 request body も記録しない。UI は browser の password 保存を要求しないが、browser 側の保存挙動は完全には制御できないため、token を会話・clipboard・履歴へ残さず安全な入力経路を使う案を確認する。GitHub の `GET /user` で token 所有者を確認して RDMCP アカウントへ一対一で固定する。Project #4 の read/write 権限試験とは分ける。
 - PAT はサーバー側のみで扱い、GitHub API の Authorization header にだけ渡す。at-rest は AES-256-GCM で暗号化した credential record とし、暗号鍵は `DATA_DIR` 外のサービス secret store に分離する。既存の `src/private-storage.ts` はファイル ACL／mode と private directory を検査するが、暗号化までは行わないため、DATA_DIR の保護だけを encrypted vault とみなさない。Node 標準 `crypto` を使えば暗号ライブラリ追加は不要。token は子 process・Desktop Commander に渡さず、必要時のみ server memory で復号し、再起動時にも暗号文と別置き鍵から復旧する。鍵の形式・rotation は実装時に検証する。
 - token は password manager がフォームを保存しないよう設定し、貼付け履歴や clipboard へ残る可能性は利用者へ説明する。登録成功後は token を再表示せず、監査には RDMCP account ID、GitHub user ID、設定・削除操作、結果、固定 error code のみを記録する。request/response body と Authorization header は既存の監査／operation detail 経路へ送らない。
-- 再設定では新 token を server memory で一時検証し、既存の GitHub user ID と一致する場合だけ暗号文を原子的に置換する。認証失敗・429 等で新 token が検証できない場合は既存値を保持し、値を echo しない。削除では保存済み暗号文を消し、memory reference を破棄して以降の API 呼出しを停止する。GitHub 側で PAT を revoke した場合も 401 を検出して自動再試行・別 credential への fallback をせず、利用者に再設定を求める。
-- 外部設定は GitHub で本人が PAT を発行し、有効期限を設定すること、RDMCP 運用者が暗号化鍵を `DATA_DIR` 外の secret store に安全に登録すること。token subtype と Projects に必要な権限範囲は、権限粒度調査の保留が解除されるまで選ばない。credential 発行・設定・継続利用・権限変更は操作時の個別確認を得る。
+- 新しい PAT を登録する場面が将来発生した場合は、同じ GitHub user ID と検証できた時だけ暗号文を原子的に置換する。再設定を普段の手順にせず、失効／認証拒否時は書込みを止め、利用者へ一度だけ復旧の理由を示す。GitHub が revoke／expire した PAT は復活・自動更新できず、利用再開には新 PAT の発行と再登録が必要。credential が失効した状態の RDMCP 自動復旧は保証しない。
+- 外部設定は GitHub で本人が PAT を一度発行し、RDMCP 運用者が暗号化鍵を `DATA_DIR` 外の secret store に安全に登録すること。期限なしの classic PAT が選べ、利用元の組織ポリシーにも反しない場合は、通常の期限切れ再入力を避ける運用候補。ただし classic PAT は fine-grained PAT より広く、GitHub は本人がアクセスできる repository を広く扱えると注意している。実際の範囲は付与 scope にも依存するが、必要 scope の選定は権限粒度調査の保留対象であり、今回は確定しない。fine-grained PAT は personal Project #4 を含む user-owned Projects に使えないという現行資料上の制約がある。classic PAT の広い access を許容できるかは残る協議事項。
+- 期限なし PAT でも放置すれば無期限に有効とは限らない。GitHub は PAT を1年間未使用の場合に自動削除する。通常の Projects 操作を使う間は token 使用が継続する想定だが、長期間 RDMCP を使わなかった後の再開では新 token が必要になる可能性を残す。
+- 組織リソースについて、組織 owner は classic／fine-grained 両 PAT を拒否できる。fine-grained PAT は管理者承認必須にもでき、期限ポリシーに合わない token はその組織への API 呼出し時に拒否され得る。これらは organization resource へのアクセス制限であり、個人 Project #4 の利用可否とは分けて扱う。将来 organization Project を対象にするときは、organization／enterprise policy・SSO・承認状態の確認が必要。
+- credential 発行・設定・継続利用・権限変更は操作時の個別確認を得る。
 
-上記は本人の認証方式決定に沿った実装提案であり、設定画面・保存形式の最終設計または実装承認ではない。Project #4 での PAT による read/write は未検証のため、token 設定前に権限粒度調査の再開と検証範囲の確認が必要。PAT の一般的な期限設定・失効動作の根拠は上記 GitHub 公式資料に限る。
+上記は本人の認証方式決定に沿った実装提案であり、設定画面・保存形式の最終設計または実装承認ではない。通常利用で token の再入力を求めない方針は確定したが、PAT の失効後に再入力なしで復活できると約束することはできない。PAT が期限切れまたは revoke された場合 GitHub は復活を許さず、新しい PAT が必要と明記している。よって「例外時も絶対再設定なし」と「PAT 直設定」は両立しない。
 
 ## 根拠資料
 
@@ -107,6 +111,9 @@ branch と Draft PR の作成、Issue の正式リンクは完了した。今後
 - [GraphQL Projects schema](https://docs.github.com/en/graphql/reference/projects)
 - [REST Projects](https://docs.github.com/en/rest/projects/projects)
 - [REST Project views](https://docs.github.com/en/rest/projects/views)
+- [PAT の作成・管理と user-owned Projects の制約](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- [PAT 期限切れ・失効](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation)
+- [組織の PAT policy](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization)
 
 ## 追加確定事項（最新要件）
 
