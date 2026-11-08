@@ -42,6 +42,22 @@
 
 UI のすべてが API から同じように操作できるとは未検証。API 非対応時は未対応と理由を示し、任意 PC 操作や画面操作へ自動的に迂回しないことを要求候補として確認する。
 
+## 公式 API で確認した操作範囲（要件・実動作は未確定）
+
+| 対象 | 現行公式 API 資料で確認できたこと | RDMCP 側の扱い／未確定点 |
+| --- | --- | --- |
+| Project | GraphQL で一覧・取得・作成・通常 metadata（title、short description、readme）更新が可能。`updateProjectV2` は close/reopen と public/private 変更も持ち、Project delete mutation もある | 削除と visibility 変更は人間専用として操作 allowlist から除外する。Collaborator／team access 更新や team link も除外する。Project 作成で `teamId` を指定すると Team に read 権限が与えられるため使わない。新規 Project 作成、close/reopen、repo link、通常 metadata 更新をどこまで提供するかは未決定 |
+| Items | 既存 Issue／PR の Project 追加、draft issue 作成・更新・Issue 変換、field value 更新、並べ替え、archive／unarchive、Project item 削除がある | item 削除は Issue／PR 本体削除とは異なり Project から外す操作。archive／削除、draft-to-Issue、Issue／PR 本体の title/body/assignee/labels 等の更新はリスクと認可範囲が異なり、許可対象が未決定。Project item 専用操作を既定候補とし、本体更新を暗黙に含めない |
+| Fields | custom field の取得・作成・更新・削除が GraphQL にある。text／number／date／single-select／multi-select／iteration 型、select option と iteration 設定の編集もある | Item の field value 更新は可能。field schema 削除や option 置換は既存 item 値に影響し得るため、field 定義全体の管理を要件に含めるか、値の更新だけかを決める |
+| Views | GraphQL で view の一覧・設定（layout、filter、visible fields、group/sort 情報）を読める。create/update/delete mutation があるが、GraphQL update input で確認できるのは name/layout/filter/visible field configuration。REST は user-owned／organization-owned project の view 作成と table/board/roadmap、filter、visible fields、sort、group 設定を文書化している | REST view 記事で確認できるのは create endpoint。GraphQL mutation の更新入力には sort/group の項目が見当たらない。view の全設定を変更できると断定しない。view の完全な read/create/update/delete が必須か、API 非対応箇所を人間 UI に残すかは未決定 |
+| その他 | Project status update や workflow/template 操作にも GraphQL mutation がある。現行資料の確認だけでは GitHub Projects UI 全機能（insights/charts 等）との完全一致を判定できない | 「GitHub Projects と同等」は主要なデータ・操作 API を専用ツールで扱う意図として確認済み。特定の UI 機能まで API で 1:1 に実現できるという保証ではない。未調査の UI 専用機能を任意 API／PC 操作で補完しない |
+
+Project deletion、public/private、members/collaborator/access の mutation を製品ツールに含めない。特に Project 作成の `teamId`、team との link/unlink、協力者更新は権限境界に触れるため、Project 作成ツールの入力 schema に露出させない。専用ツールは GitHub API operation allowlist をサーバー内部に持ち、GraphQL 文や REST path/body を任意指定する汎用 request tool は公開しない。
+
+本人に実装前に確認が必要な点は、(1) 新しい Project の作成・close/reopen・repo link を許すか、(2) item の archive／Project からの削除と draft issue の作成／Issue 変換を許すか、Issue／PR 本体の更新は別途許可するか、(3) custom field schema/options/iterations の作成・変更・削除を含めるか、(4) view の filter/layout/表示列だけでなく REST が対応する sort/group と view の更新・削除まで要件とするか、(5) status updates/workflows/templates/insights などの追加 Project 機能を同等性に含めるか、である。
+
+根拠：[GraphQL Projects schema](https://docs.github.com/en/graphql/reference/projects)、[REST Project views](https://docs.github.com/en/rest/projects/views)。これらは schema と API 資料の対応確認であり、PAT・個人 Project #4 での成功や UI 操作との完全な同等性を実証したものではない。REST docs は user-owned Project の view 作成 endpoint について fine-grained PAT を利用できないとも記載する。token 権限粒度の一般調査と実 credential による検証は既定の保留のまま。
+
 ## ユーザーと決める事項
 
 1. 「同等」の対象は GitHub を正本にする操作経路か、RDMCP 内の独立した Project 管理まで含むか。現時点は前者を有力候補としているが確定しない。
