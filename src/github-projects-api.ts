@@ -19,7 +19,7 @@ export type GitHubProjectSummary = {
   public: boolean;
 };
 
-export type GitHubProjectField = { id: string; name: string; type: "TEXT" | "NUMBER" | "DATE" | "SINGLE_SELECT" | "MULTI_SELECT" | "ITERATION" | "UNKNOWN"; isIssueField: boolean; options?: Array<{ id: string; name: string; color: string; description: string }>; iterationConfiguration?: { duration: number; startDate: string | null; startDay: number; iterations: Array<{ id: string; title: string; startDate: string; duration: number }> } };
+export type GitHubProjectField = { id: string; name: string; type: "TEXT" | "NUMBER" | "DATE" | "SINGLE_SELECT" | "MULTI_SELECT" | "ITERATION" | "UNKNOWN"; isIssueField: boolean; options?: Array<{ id: string; name: string; color: string; description: string }>; iterationConfiguration?: { duration: number; startDate: string | null; startDay: number; iterations: Array<{ id: string; title: string; startDate: string; duration: number }>; completedIterations: Array<{ id: string; title: string; startDate: string; duration: number }> } };
 export type GitHubProjectView = { id: string; name: string; layout: "TABLE_LAYOUT" | "BOARD_LAYOUT" | "ROADMAP_LAYOUT"; filter: string; visibleFieldIds: string[] };
 export type GitHubProjectFieldDefinition =
   | { type: "TEXT" | "NUMBER" | "DATE"; name: string }
@@ -77,7 +77,7 @@ const PROJECT_FIELDS = `query RdmcpProjectFields($projectId: ID!) {
   viewer { login }
   node(id: $projectId) { ... on ProjectV2 {
     id owner { ... on User { login } }
-    fields(first: 100) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType isIssueField } ... on ProjectV2SingleSelectField { options { id name color description } } ... on ProjectV2MultiSelectField { multiSelectOptions { id name color description } } ... on ProjectV2IterationField { configuration { duration startDay iterations { id title startDate duration } } } } pageInfo { hasNextPage } }
+    fields(first: 100) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType isIssueField } ... on ProjectV2SingleSelectField { options { id name color description } } ... on ProjectV2MultiSelectField { multiSelectOptions { id name color description } } ... on ProjectV2IterationField { configuration { duration startDay iterations { id title startDate duration } completedIterations { id title startDate duration } } } } pageInfo { hasNextPage } }
   } }
 }`;
 const CREATE_PROJECT_FIELD = `mutation RdmcpCreateProjectField($projectId: ID!, $name: String!, $dataType: ProjectV2CustomFieldType!, $singleSelectOptions: [ProjectV2SingleSelectFieldOptionInput!], $multiSelectOptions: [ProjectV2MultiSelectFieldOptionInput!], $iterationConfiguration: ProjectV2IterationFieldConfigurationInput) {
@@ -389,7 +389,7 @@ export class GitHubProjectsApi {
     if (!definition || definition.isIssueField || definition.type !== normalized.type) throw new GitHubProjectsApiError("forbidden");
     if (normalized.type === "SINGLE_SELECT" && !definition.options?.some((option) => option.id === normalized.value.singleSelectOptionId)) throw new GitHubProjectsApiError("invalid_response");
     if (normalized.type === "MULTI_SELECT" && (normalized.value.multiSelectOptionIds as string[]).some((optionId) => !definition.options?.some((option) => option.id === optionId))) throw new GitHubProjectsApiError("invalid_response");
-    if (normalized.type === "ITERATION" && !definition.iterationConfiguration?.iterations.some((iteration) => iteration.id === normalized.value.iterationId)) throw new GitHubProjectsApiError("invalid_response");
+    if (normalized.type === "ITERATION" && ![...(definition.iterationConfiguration?.iterations ?? []), ...(definition.iterationConfiguration?.completedIterations ?? [])].some((iteration) => iteration.id === normalized.value.iterationId)) throw new GitHubProjectsApiError("invalid_response");
     const result = await this.#graphql<{ updateProjectV2ItemFieldValue?: { projectV2Item?: { id?: string } } }>("RdmcpSetProjectItemField", SET_PROJECT_ITEM_FIELD, { projectId: project, itemId: item, fieldId: field, value: normalized.value }, { token, mutation: true });
     if (result.updateProjectV2ItemFieldValue?.projectV2Item?.id !== item) throw new GitHubProjectsApiError("invalid_response", "unknown");
     const verified = await this.#verifyProjectItem(item, project, token);
@@ -608,14 +608,16 @@ function parseField(value: unknown): GitHubProjectField {
   if (item.configuration !== undefined && item.configuration !== null) {
     if (typeof item.configuration !== "object") throw new GitHubProjectsApiError("invalid_response");
     const config = item.configuration as Record<string, unknown>;
-    if (typeof config.duration !== "number" || typeof config.startDay !== "number" || !Array.isArray(config.iterations)) throw new GitHubProjectsApiError("invalid_response");
-    const iterations = config.iterations.map((value) => {
+    if (typeof config.duration !== "number" || typeof config.startDay !== "number" || !Array.isArray(config.iterations) || !Array.isArray(config.completedIterations)) throw new GitHubProjectsApiError("invalid_response");
+    const parseIterations = (values: unknown[]) => values.map((value) => {
       if (typeof value !== "object" || value === null) throw new GitHubProjectsApiError("invalid_response");
       const iteration = value as Record<string, unknown>;
       if (typeof iteration.id !== "string" || typeof iteration.title !== "string" || typeof iteration.startDate !== "string" || typeof iteration.duration !== "number") throw new GitHubProjectsApiError("invalid_response");
       return { id: iteration.id, title: iteration.title, startDate: iteration.startDate, duration: iteration.duration };
     });
-    iterationConfiguration = { duration: config.duration, startDate: iterations[0]?.startDate ?? null, startDay: config.startDay, iterations };
+    const iterations = parseIterations(config.iterations);
+    const completedIterations = parseIterations(config.completedIterations);
+    iterationConfiguration = { duration: config.duration, startDate: iterations[0]?.startDate ?? null, startDay: config.startDay, iterations, completedIterations };
   }
   return { id: item.id, name: item.name, type, isIssueField: item.isIssueField, ...(options ? { options } : {}), ...(iterationConfiguration ? { iterationConfiguration } : {}) };
 }
@@ -804,3 +806,4 @@ async function readBoundedJson<T>(response: Response): Promise<T> {
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
+

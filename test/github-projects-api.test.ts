@@ -208,7 +208,7 @@ test("multi-select and iteration values use validated IDs and clear only custom 
       if (body.operationName === "RdmcpProjectItemOwner") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", project: { id: "PVT_1" }, isArchived: false } } });
       if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [
         { __typename: "ProjectV2MultiSelectField", id: "F_TAGS", name: "Tags", dataType: "MULTI_SELECT", isIssueField: false, multiSelectOptions: [{ id: "O_BUG", name: "Bug", color: "RED", description: "" }, { id: "O_URGENT", name: "Urgent", color: "ORANGE", description: "" }] },
-        { __typename: "ProjectV2IterationField", id: "F_SPRINT", name: "Sprint", dataType: "ITERATION", isIssueField: false, configuration: { duration: 7, startDay: 1, iterations: [{ id: "ITER_1", title: "Week 1", startDate: "2026-11-02", duration: 7 }] } },
+        { __typename: "ProjectV2IterationField", id: "F_SPRINT", name: "Sprint", dataType: "ITERATION", isIssueField: false, configuration: { duration: 7, startDay: 1, iterations: [{ id: "ITER_1", title: "Week 1", startDate: "2026-11-02", duration: 7 }], completedIterations: [{ id: "ITER_PAST", title: "Week 0", startDate: "2026-10-26", duration: 7 }] } },
         { __typename: "ProjectV2Field", id: "F_ISSUE_LABELS", name: "Labels", dataType: "TEXT", isIssueField: true },
       ], pageInfo: { hasNextPage: false } } } } });
       if (body.operationName === "RdmcpSetProjectItemField") {
@@ -237,6 +237,8 @@ test("multi-select and iteration values use validated IDs and clear only custom 
   assert.equal(operations.filter((operation) => operation.operationName === "RdmcpSetProjectItemField").length, mutationCount, "unknown and duplicate options are rejected before mutation");
   assert.deepEqual(await api.setProjectItemField("PVT_1", "ITEM_1", "F_SPRINT", { type: "ITERATION", iterationId: "ITER_1" }), { applied: true });
   assert.deepEqual(operations.filter((operation) => operation.operationName === "RdmcpSetProjectItemField")[1]?.variables.value, { iterationId: "ITER_1" });
+  assert.deepEqual(await api.setProjectItemField("PVT_1", "ITEM_1", "F_SPRINT", { type: "ITERATION", iterationId: "ITER_PAST" }), { applied: true }, "completed configured iterations remain valid values");
+  assert.match(operations.find((operation) => operation.operationName === "RdmcpProjectFields")?.query ?? "", /completedIterations/);
   await assert.rejects(api.setProjectItemField("PVT_1", "ITEM_1", "F_SPRINT", { type: "ITERATION", iterationId: "ITER_OLD" }), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "invalid_response");
   assert.deepEqual(await api.clearProjectItemField("PVT_1", "ITEM_1", "F_TAGS"), { applied: true });
   assert.match(operations.find((operation) => operation.operationName === "RdmcpClearProjectItemField")?.query ?? "", /clearProjectV2ItemFieldValue/);
@@ -308,7 +310,7 @@ test("custom field and view definitions use fixed Project-scoped mutations with 
 
 test("iteration field updates retain existing iteration IDs and verify the replacement", async () => {
   const operations: Array<{ operationName: string; variables: Record<string, unknown> }> = [];
-  let configuration = { duration: 7, startDay: 1, iterations: [{ id: "ITER_1", title: "Week 1", startDate: "2026-11-02", duration: 7 }] };
+  let configuration = { duration: 7, startDay: 1, iterations: [{ id: "ITER_1", title: "Week 1", startDate: "2026-11-02", duration: 7 }], completedIterations: [] as Array<{ id: string; title: string; startDate: string; duration: number }> };
   const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
     request: async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown> };
@@ -317,7 +319,7 @@ test("iteration field updates retain existing iteration IDs and verify the repla
       if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2IterationField", id: "F_ITER", name: "Sprint", dataType: "ITERATION", isIssueField: false, configuration }], pageInfo: { hasNextPage: false } } } } });
       if (body.operationName === "RdmcpUpdateProjectField") {
         const requested = body.variables.iterationConfiguration as typeof configuration;
-        configuration = { ...requested, startDay: 1, iterations: requested.iterations.map((iteration, index) => ({ ...iteration, id: iteration.id ?? `ITER_${index + 1}` })) };
+        configuration = { ...requested, completedIterations: configuration.completedIterations, startDay: 1, iterations: requested.iterations.map((iteration, index) => ({ ...iteration, id: iteration.id ?? `ITER_${index + 1}` })) };
         return response({ data: { updateProjectV2Field: { projectV2Field: { id: "F_ITER" } } } });
       }
       throw new Error(`Unexpected operation ${body.operationName}`);
@@ -329,3 +331,4 @@ test("iteration field updates retain existing iteration IDs and verify the repla
   assert.equal(sent.iterations.length, 2);
   assert.equal(operations.at(-1)?.operationName, "RdmcpProjectFields", "the field is read back after replacement");
 });
+
