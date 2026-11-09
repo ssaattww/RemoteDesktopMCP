@@ -146,7 +146,7 @@ export function createGitHubProjectsServer(input: {
 
     server.registerTool("project_item_set_field_value", {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-      description: "Set a Project item's supported custom text, number, date, or single-select field. Issue or pull request fields such as labels, assignees, milestone, state, title, and body are excluded.",
+      description: "Set a Project item's supported custom text, number, date, single-select, multi-select, or iteration field. Issue or pull request fields such as labels, assignees, milestone, state, title, and body are excluded.",
       inputSchema: {
         project_id: z.string().trim().min(1).max(200),
         item_id: z.string().trim().min(1).max(200),
@@ -156,12 +156,14 @@ export function createGitHubProjectsServer(input: {
           z.object({ type: z.literal("NUMBER"), number: z.number().finite() }),
           z.object({ type: z.literal("DATE"), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }),
           z.object({ type: z.literal("SINGLE_SELECT"), option_id: z.string().trim().min(1).max(200) }),
+          z.object({ type: z.literal("MULTI_SELECT"), option_ids: z.array(z.string().trim().min(1).max(200)).min(1).max(100) }),
+          z.object({ type: z.literal("ITERATION"), iteration_id: z.string().trim().min(1).max(200) }),
         ]),
       },
       _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
     }, async ({ project_id, item_id, field_id, value }) => {
       await input.audit("github_projects.started", { principal: input.principal, tool: "project_item_set_field_value", projectId: project_id, itemId: item_id, fieldId: field_id });
-      const apiValue: GitHubProjectFieldValue = value.type === "TEXT" ? value : value.type === "NUMBER" ? value : value.type === "DATE" ? value : { type: "SINGLE_SELECT", optionId: value.option_id };
+      const apiValue: GitHubProjectFieldValue = value.type === "TEXT" ? value : value.type === "NUMBER" ? value : value.type === "DATE" ? value : value.type === "SINGLE_SELECT" ? { type: "SINGLE_SELECT", optionId: value.option_id } : value.type === "MULTI_SELECT" ? { type: "MULTI_SELECT", optionIds: value.option_ids } : { type: "ITERATION", iterationId: value.iteration_id };
       try {
         const outcome = await input.api.setProjectItemField(project_id, item_id, field_id, apiValue);
         await input.audit("github_projects.completed", { principal: input.principal, tool: "project_item_set_field_value", projectId: project_id, itemId: item_id, fieldId: field_id, applied: outcome.applied });
@@ -169,6 +171,27 @@ export function createGitHubProjectsServer(input: {
       } catch (error) {
         await auditFailure(input.audit, input.principal, "project_item_set_field_value", error, project_id);
         return operationError("The Project field value could not be set; check its current state before deciding whether to try again.", error, true);
+      }
+    });
+
+    server.registerTool("project_item_clear_field_value", {
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      description: "Clear a Project item's custom field value. Issue-derived fields such as labels, assignees, and milestone are excluded.",
+      inputSchema: {
+        project_id: z.string().trim().min(1).max(200),
+        item_id: z.string().trim().min(1).max(200),
+        field_id: z.string().trim().min(1).max(200),
+      },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, item_id, field_id }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_item_clear_field_value", projectId: project_id, itemId: item_id, fieldId: field_id });
+      try {
+        const outcome = await input.api.clearProjectItemField(project_id, item_id, field_id);
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_item_clear_field_value", projectId: project_id, itemId: item_id, fieldId: field_id, applied: outcome.applied });
+        return { content: [{ type: "text", text: JSON.stringify(outcome) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_item_clear_field_value", error, project_id);
+        return operationError("The Project field value could not be cleared; check its current state before deciding whether to try again.", error, true);
       }
     });
 

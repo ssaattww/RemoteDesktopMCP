@@ -32,7 +32,7 @@ test("GitHub Projects client exposes only fixed self-owned project operations", 
   assert.ok(calls.every((call) => call.authorization === `Bearer ${token}`));
   assert.match(String(calls[0]?.body.query), /projectsV2/);
   assert.match(String(calls[1]?.body.query), /viewer \{ id login \}/);
-  assert.doesNotMatch(String(calls[2]?.body.query), /deleteProjectV2|updateProjectV2Field|clearProjectV2ItemFieldValue/);
+  assert.doesNotMatch(String(calls[2]?.body.query), /deleteProjectV2|updateProjectV2Field/);
   assert.match(String(calls[3]?.body.query), /shortDescription/);
   assert.equal(calls[2]?.body.variables && (calls[2]?.body.variables as Record<string, unknown>).ownerId, "U_1");
   assert.deepEqual(credentialCalls, ["google:issuer:subject", "google:issuer:subject"], "the create flow pins the checked credential for its mutation");
@@ -195,6 +195,53 @@ test("Project item field values are changed only for a supported field in the sa
     },
   });
   await assert.rejects(rejected.setProjectItemField("PVT_1", "ITEM_1", "F_ISSUE_TEXT", { type: "TEXT", text: "must not edit Issue fields" }), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "forbidden");
+});
+
+test("multi-select and iteration values use validated IDs and clear only custom fields", async () => {
+  const operations: Array<{ operationName: string; variables: Record<string, unknown>; query: string }> = [];
+  const values = new Map<string, { type: string; field: { id: string; name: string }; options?: Array<{ id: string; name: string }>; iterationId?: string; title?: string; value?: string }>();
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
+    request: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown>; query: string };
+      operations.push(body);
+      if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+      if (body.operationName === "RdmcpProjectItemOwner") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", project: { id: "PVT_1" }, isArchived: false } } });
+      if (body.operationName === "RdmcpProjectFields") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, fields: { nodes: [
+        { __typename: "ProjectV2MultiSelectField", id: "F_TAGS", name: "Tags", dataType: "MULTI_SELECT", isIssueField: false, multiSelectOptions: [{ id: "O_BUG", name: "Bug", color: "RED", description: "" }, { id: "O_URGENT", name: "Urgent", color: "ORANGE", description: "" }] },
+        { __typename: "ProjectV2IterationField", id: "F_SPRINT", name: "Sprint", dataType: "ITERATION", isIssueField: false, configuration: { duration: 7, startDay: 1, iterations: [{ id: "ITER_1", title: "Week 1", startDate: "2026-11-02", duration: 7 }] } },
+        { __typename: "ProjectV2Field", id: "F_ISSUE_LABELS", name: "Labels", dataType: "TEXT", isIssueField: true },
+      ], pageInfo: { hasNextPage: false } } } } });
+      if (body.operationName === "RdmcpSetProjectItemField") {
+        const fieldId = String(body.variables.fieldId);
+        const field = fieldId === "F_TAGS" ? { id: "F_TAGS", name: "Tags" } : { id: "F_SPRINT", name: "Sprint" };
+        const value = body.variables.value as Record<string, unknown>;
+        values.set(fieldId, fieldId === "F_TAGS"
+          ? { type: "ProjectV2ItemFieldMultiSelectValue", field, options: (value.multiSelectOptionIds as string[]).map((id) => ({ id, name: id === "O_BUG" ? "Bug" : "Urgent" })), value: "Bug,Urgent" }
+          : { type: "ProjectV2ItemFieldIterationValue", field, iterationId: String(value.iterationId), title: "Week 1" });
+        return response({ data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: "ITEM_1" } } } });
+      }
+      if (body.operationName === "RdmcpClearProjectItemField") {
+        values.delete(String(body.variables.fieldId));
+        return response({ data: { clearProjectV2ItemFieldValue: { projectV2Item: { id: "ITEM_1" } } } });
+      }
+      if (body.operationName === "RdmcpProjectItemState") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", type: "ISSUE", project: { id: "PVT_1" }, isArchived: false, content: null, fieldValues: { nodes: [...values.values()].map((entry) => ({ __typename: entry.type, ...entry, ...(entry.iterationId ? { title: entry.title } : {}) })), pageInfo: { hasNextPage: false } } } } });
+      throw new Error(`Unexpected operation ${body.operationName}`);
+    },
+  });
+
+  assert.deepEqual(await api.setProjectItemField("PVT_1", "ITEM_1", "F_TAGS", { type: "MULTI_SELECT", optionIds: ["O_BUG", "O_URGENT"] }), { applied: true });
+  assert.deepEqual(operations.find((operation) => operation.operationName === "RdmcpSetProjectItemField")?.variables.value, { multiSelectOptionIds: ["O_BUG", "O_URGENT"] });
+  const mutationCount = operations.filter((operation) => operation.operationName === "RdmcpSetProjectItemField").length;
+  await assert.rejects(api.setProjectItemField("PVT_1", "ITEM_1", "F_TAGS", { type: "MULTI_SELECT", optionIds: ["O_UNKNOWN"] }), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "invalid_response");
+  await assert.rejects(api.setProjectItemField("PVT_1", "ITEM_1", "F_TAGS", { type: "MULTI_SELECT", optionIds: ["O_BUG", " O_BUG "] }));
+  assert.equal(operations.filter((operation) => operation.operationName === "RdmcpSetProjectItemField").length, mutationCount, "unknown and duplicate options are rejected before mutation");
+  assert.deepEqual(await api.setProjectItemField("PVT_1", "ITEM_1", "F_SPRINT", { type: "ITERATION", iterationId: "ITER_1" }), { applied: true });
+  assert.deepEqual(operations.filter((operation) => operation.operationName === "RdmcpSetProjectItemField")[1]?.variables.value, { iterationId: "ITER_1" });
+  await assert.rejects(api.setProjectItemField("PVT_1", "ITEM_1", "F_SPRINT", { type: "ITERATION", iterationId: "ITER_OLD" }), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "invalid_response");
+  assert.deepEqual(await api.clearProjectItemField("PVT_1", "ITEM_1", "F_TAGS"), { applied: true });
+  assert.match(operations.find((operation) => operation.operationName === "RdmcpClearProjectItemField")?.query ?? "", /clearProjectV2ItemFieldValue/);
+  await assert.rejects(api.clearProjectItemField("PVT_1", "ITEM_1", "F_ISSUE_LABELS"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "forbidden");
+  assert.equal(operations.some((operation) => operation.operationName === "RdmcpClearProjectItemField" && operation.variables.fieldId === "F_ISSUE_LABELS"), false, "Issue-derived fields are rejected before mutation");
 });
 
 test("custom field and view definitions use fixed Project-scoped mutations with readback", async () => {
