@@ -1,4 +1,4 @@
-﻿# Phase 一覧
+# Phase 一覧
 
 更新規則: このファイルは `task-breakdown-planner`、`task-consistency-manager`、`progress-sync-manager` を通してのみ更新する。
 
@@ -40,6 +40,6 @@
 
 | Phase | 内容 | 対象 | 完了条件 | 状態 |
 | --- | --- | --- | --- | --- |
-| GHP | Issue #94 / Draft PR #95、GitHub Projects の専用読み書きと PC 操作を公開しない境界 | GHP-01〜GHP-05 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | 第1段で専用 HTTP/MCP 経路、分離 audience/scope、Project metadata、Issue／PR の Project 追加、項目と対応欄の読み取り、独自 text/number/date/single-select 欄の更新を実装。保護資格情報 provider は追加し Windows DPAPI の合成値 round-trip を確認。実行時設定、Linux Secret Service 実環境、Project field schema/view、review は未確認または未完了 |
+| GHP | Issue #94、PR #95・#96 merged、第2段 PR #97 | GHP-01〜GHP-06 | API 対応範囲と未対応の明示、認可隔離、型付き読み書き、監査・停止・回帰、通常・独立レビュー。運用認証の変更は別承認 | GHP-01 と第1段 GHP-02 は main に squash merge 済み。GHP-06 は PR #97 の実装 commit `7f76943` に完了。Ubuntu CI と Windows 全8 shard は成功し、独立レビュー指摘2点を修正・追確認済み。記録専用の後続 commit の CI は再実行中。focused Projects tests 17件、check/build/lint、差分検査も成功。全体 npm test は328件中326件成功、1件 skip、1件失敗。失敗した終了タイミング検査は単独5件成功、原因・頻度未確定。実 credential 設定・実 GitHub 接続／書き込みは未実施 |
 
-GHP の設計確認は完了。専用入口は scope 別 OAuth と Projects 用 MCP registry を持ち、PC MCP registry を経由しない。OS 保護資格情報 provider とローカル登録 CLI を追加し、実際の登録・設定は行っていない。Project metadata、Issue／PR の追加、項目・対応欄の読取、対応する独自欄の更新を実装した。Linux Secret Service 実環境、Project field schema/view、実 GitHub 接続と書き込み、独立レビューは未確認または未完了。
+GHP の設計確認は完了。PR #95 の設計、PR #96 の第1段実装は main に統合済み。専用入口は scope 別 OAuth と Projects 用 MCP registry を持ち、PC MCP registry を経由しない。OS 保護資格情報 provider とローカル登録 CLI を追加したが、実際の登録・設定は行っていない。第2段 PR #97 HEAD `7f76943` で独自欄定義（text／number／date／single-select／multi-select／iteration）と view CRUD を実装済み。Ubuntu CI と Windows 全8 shard が成功し、独立レビュー指摘2点を修正・追確認済み。Focused Projects tests、check、build、lint、差分検査も成功。全体テストは328件中326件成功、1件 skip、1件失敗。失敗した既存のプロセス終了タイミング検査は単独実行で5件成功、原因・頻度未確定。Linux Secret Service 実環境、実 GitHub 接続・書き込み、GitHub 上の正式レビューは未確認または未実施。

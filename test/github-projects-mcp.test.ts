@@ -15,7 +15,8 @@ async function connectedServer(scopes: GitHubProjectsScope[], failCreate = false
       const body = JSON.parse(String(init?.body)) as { operationName: string };
       if (body.operationName === "RdmcpListProjects") return new Response(JSON.stringify({ data: { viewer: { login: "example", projectsV2: { nodes: [project], pageInfo: { hasNextPage: false, endCursor: null } } } } }));
       if (body.operationName === "RdmcpViewerId") return new Response(JSON.stringify({ data: { viewer: { id: "U_1", login: "example" } } }));
-      if (body.operationName === "RdmcpProjectFields") return new Response(JSON.stringify({ data: { viewer: { login: "example" }, node: { id: project.id, owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2Field", id: "F_TEXT", name: "Notes", dataType: "TEXT", isIssueField: false }, { __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: "Status", dataType: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo" }] }], pageInfo: { hasNextPage: false } } } } }));
+      if (body.operationName === "RdmcpProjectFields") return new Response(JSON.stringify({ data: { viewer: { login: "example" }, node: { id: project.id, owner: { login: "example" }, fields: { nodes: [{ __typename: "ProjectV2Field", id: "F_TEXT", name: "Notes", dataType: "TEXT", isIssueField: false }, { __typename: "ProjectV2SingleSelectField", id: "F_STATUS", name: "Status", dataType: "SINGLE_SELECT", isIssueField: false, options: [{ id: "O_TODO", name: "Todo", color: "GRAY", description: "" }] }], pageInfo: { hasNextPage: false } } } } }));
+      if (body.operationName === "RdmcpProjectViews") return new Response(JSON.stringify({ data: { viewer: { login: "example" }, node: { id: project.id, owner: { login: "example" }, views: { nodes: [{ id: "V_1", name: "Default", layout: "TABLE_LAYOUT", filter: "", configuration: { visibleFields: { nodes: [{ id: "F_TEXT" }], pageInfo: { hasNextPage: false } } } }], pageInfo: { hasNextPage: false } } } } }));
       if (body.operationName === "RdmcpProjectItems") return new Response(JSON.stringify({ data: { viewer: { login: "example" }, node: { id: project.id, owner: { login: "example" }, items: { nodes: [{ id: "ITEM_1", type: "ISSUE", isArchived: false, content: { __typename: "Issue", id: "ISSUE_5", title: "Work item", number: 5, url: "https://github.com/example/repo/issues/5" }, fieldValues: { nodes: [{ __typename: "ProjectV2ItemFieldTextValue", text: "note", field: { id: "F_TEXT", name: "Notes" } }], pageInfo: { hasNextPage: false } } }], pageInfo: { hasNextPage: false, endCursor: null } } } } }));
       if (body.operationName === "RdmcpProjectState") return new Response(JSON.stringify({ data: { viewer: { login: "example" }, node: { ...project, title: "New roadmap", shortDescription: "", owner: { login: "example" } } } }));
       if (body.operationName === "RdmcpProjectOwner") return new Response(JSON.stringify({ data: { viewer: { login: "example" }, node: { id: project.id, owner: { login: "example" } } } }));
@@ -39,7 +40,7 @@ test("read scope exposes only read tools and calls the fixed API client", async 
   const connected = await connectedServer(["github-projects:read"]);
   try {
     const tools = await connected.client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ["projects_list", "project_fields_list", "project_items_list"]);
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ["projects_list", "project_fields_list", "project_views_list", "project_items_list"]);
     assert.deepEqual(tools.tools[0]?._meta?.securitySchemes, [{ type: "oauth2", scopes: ["github-projects:read"] }]);
     assert.doesNotMatch(JSON.stringify(tools.tools), /process_start|project_delete|visibility|collaborator|command|graphql/);
     const result = await connected.client.callTool({ name: "projects_list", arguments: {} });
@@ -50,6 +51,8 @@ test("read scope exposes only read tools and calls the fixed API client", async 
     assert.match(items.content.find((item) => item.type === "text")?.text ?? "", /Work item/);
     const fields = await connected.client.callTool({ name: "project_fields_list", arguments: { project_id: "PVT_4" } });
     assert.match(fields.content.find((item) => item.type === "text")?.text ?? "", /F_STATUS/);
+    const views = await connected.client.callTool({ name: "project_views_list", arguments: { project_id: "PVT_4" } });
+    assert.match(views.content.find((item) => item.type === "text")?.text ?? "", /TABLE_LAYOUT/);
   } finally { await connected.client.close(); await connected.server.close(); }
 });
 
@@ -57,7 +60,7 @@ test("write scope adds only typed project metadata operations", async () => {
   const connected = await connectedServer(["github-projects:write"]);
   try {
     const tools = await connected.client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ["projects_list", "project_fields_list", "project_items_list", "project_create", "project_update", "project_item_add", "project_item_set_field_value"]);
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ["projects_list", "project_fields_list", "project_views_list", "project_items_list", "project_create", "project_update", "project_item_add", "project_item_set_field_value", "project_field_create", "project_field_update", "project_field_delete", "project_view_create", "project_view_update", "project_view_delete"]);
     assert.deepEqual(tools.tools[0]?._meta?.securitySchemes, [{ type: "oauth2", scopes: ["github-projects:write"] }]);
     const result = await connected.client.callTool({ name: "project_create", arguments: { title: "New roadmap" } });
     assert.equal(result.isError, undefined);
