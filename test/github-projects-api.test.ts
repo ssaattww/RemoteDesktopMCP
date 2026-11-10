@@ -39,6 +39,134 @@ test("GitHub Projects client exposes only fixed self-owned project operations", 
   assert.equal("graphql" in api, false, "no public generic GraphQL method is exposed");
 });
 
+test("Project README update sends only the README property and verifies the saved value", async () => {
+  const operations: Array<{ operationName: string; variables: Record<string, unknown>; query: string }> = [];
+  let readme = "old";
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown>; query: string };
+    operations.push(body);
+    if (body.operationName === "RdmcpProjectReadme") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, readme } } });
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    assert.equal(body.operationName, "RdmcpUpdateProjectReadme");
+    assert.deepEqual(Object.keys(body.variables).sort(), ["projectId", "readme"]);
+    assert.match(body.query, /readme: \$readme/);
+    assert.doesNotMatch(body.query, /public:|closed:/);
+    readme = String(body.variables.readme);
+    return response({ data: { updateProjectV2: { projectV2: { id: "PVT_1", readme } } } });
+  } });
+  assert.deepEqual(await api.updateProjectReadme("PVT_1", "updated README"), { applied: true });
+  assert.equal(await api.getProjectReadme("PVT_1"), "updated README");
+  assert.equal(operations.filter((entry) => entry.operationName === "RdmcpProjectReadme").length, 2);
+});
+
+test("draft creation checks the Project and reads the resulting draft back without Issue fields", async () => {
+  const operations: string[] = [];
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown>; query: string };
+    operations.push(body.operationName);
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    if (body.operationName === "RdmcpCreateDraft") {
+      assert.deepEqual(body.variables, { projectId: "PVT_1", title: "Draft", body: "Notes" });
+      assert.doesNotMatch(body.query, /assignee|milestone|label/);
+      return response({ data: { addProjectV2DraftIssue: { projectItem: { id: "ITEM_DRAFT" } } } });
+    }
+    assert.equal(body.operationName, "RdmcpDraftState");
+    return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_DRAFT", project: { id: "PVT_1" }, content: { __typename: "DraftIssue", id: "DRAFT_1", title: "Draft", body: "Notes", assignees: { nodes: [] }, milestone: null, labels: { nodes: [] } } } } });
+  } });
+  assert.deepEqual(await api.createDraftIssue("PVT_1", "Draft", "Notes"), { itemId: "ITEM_DRAFT", outcome: { applied: true } });
+  assert.deepEqual(operations, ["RdmcpProjectOwner", "RdmcpCreateDraft", "RdmcpDraftState"]);
+});
+
+test("draft conversion requires an owned repository and passes its ID to the fixed mutation", async () => {
+  const operations: string[] = [];
+  const api = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown>; query: string };
+    operations.push(body.operationName);
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    if (body.operationName === "RdmcpDraftState") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_DRAFT", project: { id: "PVT_1" }, content: { __typename: "DraftIssue", id: "DRAFT_1", title: "Draft", body: "Notes" } } } });
+    if (body.operationName === "RdmcpRepositoryOwner") return response({ data: { viewer: { login: "example" }, node: { id: "REPO_1", owner: { __typename: "User", login: "example" } } } });
+    if (body.operationName === "RdmcpConvertDraft") {
+      assert.deepEqual(body.variables, { itemId: "ITEM_DRAFT", repositoryId: "REPO_1" });
+      assert.match(body.query, /repositoryId: \$repositoryId/);
+      return response({ data: { convertProjectV2DraftIssueItemToIssue: { item: { id: "ITEM_DRAFT" } } } });
+    }
+    assert.equal(body.operationName, "RdmcpProjectItemState");
+    return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_DRAFT", type: "ISSUE", project: { id: "PVT_1" }, isArchived: false, content: { __typename: "Issue", id: "ISSUE_1", title: "Draft", number: 1, url: "https://github.com/example/repo/issues/1" }, fieldValues: { nodes: [], pageInfo: { hasNextPage: false } } } } });
+  } });
+  const converted = await api.convertDraftIssue("PVT_1", "ITEM_DRAFT", "REPO_1");
+  assert.equal(converted.item.content?.type, "Issue");
+  assert.deepEqual(operations, ["RdmcpProjectOwner", "RdmcpDraftState", "RdmcpRepositoryOwner", "RdmcpConvertDraft", "RdmcpProjectItemState"]);
+
+  const rejected = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string };
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    if (body.operationName === "RdmcpDraftState") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_DRAFT", project: { id: "PVT_1" }, content: { __typename: "DraftIssue", id: "DRAFT_1", title: "Draft", body: "Notes" } } } });
+    if (body.operationName === "RdmcpRepositoryOwner") return response({ data: { viewer: { login: "example" }, node: { id: "REPO_1", owner: { __typename: "Organization", login: "example" } } } });
+    throw new Error("Conversion must not be attempted for a non-personal repository.");
+  } });
+  await assert.rejects(rejected.convertDraftIssue("PVT_1", "ITEM_DRAFT", "REPO_1"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "forbidden");
+});
+
+test("draft partial updates send only specified fields and preserve concurrent changes to the other field", async () => {
+  for (const changedField of ["title", "body"] as const) {
+    let current = { title: "Original title", body: "Original body" };
+    let mutationBody: { variables: Record<string, unknown>; query: string } | undefined;
+    const api = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { operationName: string; variables: Record<string, unknown>; query: string };
+      if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+      if (body.operationName === "RdmcpDraftState") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_DRAFT", project: { id: "PVT_1" }, content: { __typename: "DraftIssue", id: "DRAFT_1", ...current } } } });
+      mutationBody = body;
+      if (changedField === "title") {
+        assert.deepEqual(Object.keys(body.variables).sort(), ["draftIssueId", "title"]);
+        assert.match(body.query, /title: \$title/);
+        assert.doesNotMatch(body.query, /body: \$body/);
+        current = { title: "Updated title", body: "Concurrent body change" };
+      } else {
+        assert.deepEqual(Object.keys(body.variables).sort(), ["body", "draftIssueId"]);
+        assert.match(body.query, /body: \$body/);
+        assert.doesNotMatch(body.query, /title: \$title/);
+        current = { title: "Concurrent title change", body: "Updated body" };
+      }
+      return response({ data: { updateProjectV2DraftIssue: { draftIssue: { id: "DRAFT_1" } } } });
+    } });
+    const result = changedField === "title"
+      ? await api.updateDraftIssue("PVT_1", "ITEM_DRAFT", { title: "Updated title" })
+      : await api.updateDraftIssue("PVT_1", "ITEM_DRAFT", { body: "Updated body" });
+    assert.ok(mutationBody);
+    assert.equal(result.draft.title, current.title);
+    assert.equal(result.draft.body, current.body);
+  }
+});
+
+test("draft pre-mutation verification failures are unapplied while post-mutation readback failures are unknown", async () => {
+  let mutationCount = 0;
+  const preflight = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string };
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    return response({ data: { viewer: { login: "example" } }, errors: [{ message: "private response" }] });
+  } });
+  await assert.rejects(preflight.updateDraftIssue("PVT_1", "ITEM_DRAFT", { title: "Updated" }), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "api_error" && error.applied === false);
+  await assert.rejects(preflight.convertDraftIssue("PVT_1", "ITEM_DRAFT", "REPO_1"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "api_error" && error.applied === false);
+
+  const postflight = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string };
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    if (body.operationName === "RdmcpDraftState" && mutationCount === 0) return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_DRAFT", project: { id: "PVT_1" }, content: { __typename: "DraftIssue", id: "DRAFT_1", title: "Original", body: "Original body" } } } });
+    if (body.operationName === "RdmcpUpdateDraftTitle") { mutationCount += 1; return response({ data: { updateProjectV2DraftIssue: { draftIssue: { id: "DRAFT_1" } } } }); }
+    return response({}, 503);
+  } });
+  await assert.rejects(postflight.updateDraftIssue("PVT_1", "ITEM_DRAFT", { title: "Updated" }), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "api_error" && error.applied === "unknown");
+  assert.equal(mutationCount, 1);
+
+  const createReadback = new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string };
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    if (body.operationName === "RdmcpCreateDraft") return response({ data: { addProjectV2DraftIssue: { projectItem: { id: "ITEM_DRAFT" } } } });
+    return response({}, 503);
+  } });
+  await assert.rejects(createReadback.createDraftIssue("PVT_1", "Draft", "Body"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "api_error" && error.applied === "unknown" && error.itemId === "ITEM_DRAFT");
+});
+
 test("mutation transport loss is reported as unknown and is not retried", async () => {
   let requestCount = 0;
   const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
@@ -156,15 +284,31 @@ test("Project fields and Issue or pull request links use fixed read and add oper
   assert.deepEqual(operations, ["RdmcpProjectFields", "RdmcpProjectOwner", "RdmcpIssueOrPullRequest", "RdmcpAddProjectItem", "RdmcpProjectItemState"]);
 });
 
-test("Project item reads return issue or pull request links and only Project field values", async () => {
+test("Project item list returns Issue/PR links and bounded draft metadata", async () => {
   const api = new GitHubProjectsApi("principal", "example", credentialProvider(), {
     request: async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { operationName: string };
       assert.equal(body.operationName, "RdmcpProjectItems");
-      return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, items: { nodes: [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { __typename: "PullRequest", id: "PR_1", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fieldValues: { nodes: [{ __typename: "ProjectV2ItemFieldTextValue", text: "review", field: { id: "F_TEXT", name: "Notes" } }, { __typename: "ProjectV2ItemFieldSingleSelectValue", name: "In progress", optionId: "O_PROGRESS", field: { id: "F_STATUS", name: "Status" } }], pageInfo: { hasNextPage: false } } }], pageInfo: { hasNextPage: false, endCursor: null } } } } });
+      assert.match(String((JSON.parse(String(init?.body)) as { query: string }).query), /\.\.\. on DraftIssue \{ id title \}/);
+      assert.doesNotMatch(String((JSON.parse(String(init?.body)) as { query: string }).query), /\.\.\. on DraftIssue \{ id title body \}/);
+      return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" }, items: { nodes: [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { __typename: "PullRequest", id: "PR_1", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fieldValues: { nodes: [{ __typename: "ProjectV2ItemFieldTextValue", text: "review", field: { id: "F_TEXT", name: "Notes" } }, { __typename: "ProjectV2ItemFieldSingleSelectValue", name: "In progress", optionId: "O_PROGRESS", field: { id: "F_STATUS", name: "Status" } }], pageInfo: { hasNextPage: false } } }, { id: "ITEM_DRAFT", type: "DRAFT_ISSUE", isArchived: false, content: { __typename: "DraftIssue", id: "DRAFT_1", title: "Draft task" }, fieldValues: { nodes: [], pageInfo: { hasNextPage: false } } }], pageInfo: { hasNextPage: false, endCursor: null } } } } });
     },
   });
-  assert.deepEqual(await api.listProjectItems("PVT_1"), [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { id: "PR_1", type: "PullRequest", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fields: [{ id: "F_TEXT", name: "Notes", type: "TEXT", value: "review" }, { id: "F_STATUS", name: "Status", type: "SINGLE_SELECT", value: "In progress", optionId: "O_PROGRESS" }] }]);
+  assert.deepEqual(await api.listProjectItems("PVT_1"), [{ id: "ITEM_1", type: "PULL_REQUEST", isArchived: false, content: { id: "PR_1", type: "PullRequest", title: "Change", number: 12, url: "https://github.com/example/repo/pull/12" }, fields: [{ id: "F_TEXT", name: "Notes", type: "TEXT", value: "review" }, { id: "F_STATUS", name: "Status", type: "SINGLE_SELECT", value: "In progress", optionId: "O_PROGRESS" }] }, { id: "ITEM_DRAFT", type: "DRAFT_ISSUE", isArchived: false, content: { id: "DRAFT_1", type: "DraftIssue", title: "Draft task" }, fields: [] }]);
+});
+
+test("Project item removal confirms only an explicit null readback node", async () => {
+  const createApi = (readback: "null" | "missing") => new GitHubProjectsApi("principal", "example", credentialProvider(), { request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { operationName: string };
+    if (body.operationName === "RdmcpProjectOwner") return response({ data: { viewer: { login: "example" }, node: { id: "PVT_1", owner: { login: "example" } } } });
+    if (body.operationName === "RdmcpProjectItemOwner") return response({ data: { viewer: { login: "example" }, node: { id: "ITEM_1", project: { id: "PVT_1" } } } });
+    if (body.operationName === "RdmcpRemoveItem") return response({ data: { deleteProjectV2Item: { deletedItemId: "ITEM_1" } } });
+    assert.equal(body.operationName, "RdmcpProjectItemState");
+    return response({ data: { viewer: { login: "example" }, ...(readback === "null" ? { node: null } : {}) } });
+  } });
+
+  assert.deepEqual(await createApi("null").removeProjectItem("PVT_1", "ITEM_1"), { applied: true });
+  await assert.rejects(createApi("missing").removeProjectItem("PVT_1", "ITEM_1"), (error: unknown) => error instanceof GitHubProjectsApiError && error.code === "invalid_response" && error.applied === "unknown");
 });
 
 test("Project item field values are changed only for a supported field in the same personal Project", async () => {

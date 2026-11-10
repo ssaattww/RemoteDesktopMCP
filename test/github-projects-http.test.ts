@@ -116,7 +116,7 @@ test("Projects MCP uses its isolated route, token audience, and tool registry wi
   try {
     await client.connect(transport);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ["projects_list", "project_fields_list", "project_views_list", "project_items_list"]);
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ["projects_list", "project_fields_list", "project_views_list", "project_items_list", "project_draft_get", "project_readme_get"]);
     const list = await client.callTool({ name: "projects_list", arguments: {} });
     assert.match(list.content.find((item) => item.type === "text")?.text ?? "", /Roadmap/);
     assert.equal(apiCalls, 1);
