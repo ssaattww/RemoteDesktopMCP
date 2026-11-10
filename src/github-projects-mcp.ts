@@ -72,7 +72,7 @@ export function createGitHubProjectsServer(input: {
 
     server.registerTool("project_items_list", {
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
-      description: "List Issue and pull request links and field values for a personal Project. Issue or pull request bodies and labels are not returned.",
+      description: "List Issue and pull request links, draft titles, and Project field values. Draft bodies are available through project_draft_get; Issue or pull request bodies and labels are not returned.",
       inputSchema: { project_id: z.string().trim().min(1).max(200) },
       _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
     }, async ({ project_id }) => {
@@ -85,6 +85,33 @@ export function createGitHubProjectsServer(input: {
         await auditFailure(input.audit, input.principal, "project_items_list", error, project_id);
         return operationError("Project items could not be listed.", error, false);
       }
+    });
+
+    server.registerTool("project_draft_get", {
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      description: "Read the title and body of one draft item in its personal Project.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), item_id: z.string().trim().min(1).max(200) },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, item_id }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_draft_get", projectId: project_id, itemId: item_id });
+      try {
+        const draft = await input.api.readDraftIssue(project_id, item_id);
+        await input.audit("github_projects.completed", { principal: input.principal, tool: "project_draft_get", projectId: project_id, itemId: item_id });
+        return { content: [{ type: "text", text: JSON.stringify(draft) }] };
+      } catch (error) {
+        await auditFailure(input.audit, input.principal, "project_draft_get", error, project_id);
+        return operationError("Draft item could not be read.", error, false);
+      }
+    });
+
+    server.registerTool("project_readme_get", {
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      description: "Read the README of a personal Project.", inputSchema: { project_id: z.string().trim().min(1).max(200) },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_readme_get", projectId: project_id });
+      try { const readme = await input.api.getProjectReadme(project_id); await input.audit("github_projects.completed", { principal: input.principal, tool: "project_readme_get", projectId: project_id }); return { content: [{ type: "text", text: readme }] }; }
+      catch (error) { await auditFailure(input.audit, input.principal, "project_readme_get", error, project_id); return operationError("Project README could not be read.", error, false); }
     });
   }
 
@@ -126,6 +153,56 @@ export function createGitHubProjectsServer(input: {
         return operationError("The GitHub Project could not be updated; check its current state before deciding whether to try again.", error, true);
       }
     });
+
+    server.registerTool("project_readme_update", {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      description: "Update only the README of a personal Project. Public and closed state cannot be changed through this tool.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), readme: z.string().max(65_536) },
+      _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, readme }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_readme_update", projectId: project_id });
+      try { const outcome = await input.api.updateProjectReadme(project_id, readme); await input.audit("github_projects.completed", { principal: input.principal, tool: "project_readme_update", projectId: project_id, applied: outcome.applied }); return { content: [{ type: "text", text: JSON.stringify(outcome) }] }; }
+      catch (error) { await auditFailure(input.audit, input.principal, "project_readme_update", error, project_id); return operationError("Project README could not be updated; check its current state before retrying.", error, true); }
+    });
+
+    server.registerTool("project_draft_create", {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }, description: "Create a draft item in a personal Project.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), title: z.string().trim().min(1).max(256), body: z.string().max(65_536).optional() }, _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, title, body }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_draft_create", projectId: project_id });
+      try { const result = await input.api.createDraftIssue(project_id, title, body ?? ""); await input.audit("github_projects.completed", { principal: input.principal, tool: "project_draft_create", projectId: project_id, itemId: result.itemId, applied: true }); return { content: [{ type: "text", text: JSON.stringify(result) }] }; }
+      catch (error) { await auditFailure(input.audit, input.principal, "project_draft_create", error, project_id); return operationError("Draft item could not be created; check its current state before retrying.", error, true); }
+    });
+
+    server.registerTool("project_draft_update", {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }, description: "Update the title or body of a draft item in its personal Project.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), item_id: z.string().trim().min(1).max(200), title: z.string().trim().min(1).max(256).optional(), body: z.string().max(65_536).optional() }, _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, item_id, title, body }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_draft_update", projectId: project_id, itemId: item_id });
+      try { const result = await input.api.updateDraftIssue(project_id, item_id, { title, body }); await input.audit("github_projects.completed", { principal: input.principal, tool: "project_draft_update", projectId: project_id, itemId: item_id, applied: result.outcome.applied }); return { content: [{ type: "text", text: JSON.stringify(result) }] }; }
+      catch (error) { await auditFailure(input.audit, input.principal, "project_draft_update", error, project_id); return operationError("Draft item could not be updated; check its current state before retrying.", error, true); }
+    });
+
+    server.registerTool("project_draft_convert", {
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true }, description: "Convert a draft item into a new Issue in a repository owned by the authenticated GitHub user.",
+      inputSchema: { project_id: z.string().trim().min(1).max(200), item_id: z.string().trim().min(1).max(200), repository_id: z.string().trim().min(1).max(200) }, _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+    }, async ({ project_id, item_id, repository_id }) => {
+      await input.audit("github_projects.started", { principal: input.principal, tool: "project_draft_convert", projectId: project_id, itemId: item_id });
+      try { const result = await input.api.convertDraftIssue(project_id, item_id, repository_id); await input.audit("github_projects.completed", { principal: input.principal, tool: "project_draft_convert", projectId: project_id, itemId: item_id, applied: result.outcome.applied }); return { content: [{ type: "text", text: JSON.stringify(result) }] }; }
+      catch (error) { await auditFailure(input.audit, input.principal, "project_draft_convert", error, project_id); return operationError("Draft item could not be converted; check its current state before retrying.", error, true); }
+    });
+
+    for (const action of ["archive", "restore", "remove"] as const) {
+      server.registerTool(`project_item_${action}`, {
+        annotations: { readOnlyHint: false, destructiveHint: action === "remove", openWorldHint: true }, description: action === "remove" ? "Remove an item link from a personal Project without deleting the Issue or pull request." : `${action === "archive" ? "Archive" : "Restore"} an item in its personal Project.`,
+        inputSchema: { project_id: z.string().trim().min(1).max(200), item_id: z.string().trim().min(1).max(200) }, _meta: { securitySchemes, "openai/securitySchemes": securitySchemes },
+      }, async ({ project_id, item_id }) => {
+        const tool = `project_item_${action}`;
+        await input.audit("github_projects.started", { principal: input.principal, tool, projectId: project_id, itemId: item_id });
+        try { const outcome = action === "remove" ? await input.api.removeProjectItem(project_id, item_id) : await input.api.setProjectItemArchived(project_id, item_id, action === "archive"); await input.audit("github_projects.completed", { principal: input.principal, tool, projectId: project_id, itemId: item_id, applied: outcome.applied }); return { content: [{ type: "text", text: JSON.stringify(outcome) }] }; }
+        catch (error) { await auditFailure(input.audit, input.principal, `project_item_${action}`, error, project_id); return operationError(`Project item could not be ${action === "remove" ? "removed" : `${action}d`}; check its current state before retrying.`, error, true); }
+      });
+    }
 
     server.registerTool("project_item_add", {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -344,7 +421,7 @@ function operationError(message: string, error: unknown, mutation: boolean) {
   const recovery = recoveryNotice ? " RDMCP has stopped reusing this credential. Check its status before deciding whether to replace it." : "";
   return {
     isError: true,
-    structuredContent: { errorCode, applied, recoveryNotice },
-    content: [{ type: "text" as const, text: `${message} Outcome: ${applied}. Reference: ${errorCode}.${recovery}` }],
+    structuredContent: { errorCode, applied, recoveryNotice, ...(apiError?.itemId ? { itemId: apiError.itemId } : {}) },
+    content: [{ type: "text" as const, text: `${message} Outcome: ${applied}.${apiError?.itemId ? ` Draft item ID: ${apiError.itemId}.` : ""} Reference: ${errorCode}.${recovery}` }],
   };
 }
