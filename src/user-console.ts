@@ -2,7 +2,7 @@
 import type { Express, Request, Response } from "express";
 import { readSessionLogs } from "./admin.js";
 import type { RemoteDesktopService } from "./index.js";
-import { GoogleOidcClient, type GoogleIdentity } from "./public-auth.js";
+import { GoogleOidcError, GoogleOidcClient, type GoogleIdentity } from "./public-auth.js";
 import { verifyPassword } from "./hash-password.js";
 import { userConsoleClientScript } from "./user-console-client.js";
 import { formatSessionTime } from "./session-time.js";
@@ -82,6 +82,8 @@ type Login = { principal: string; expires: number; csrf: string; email?: string;
 type Pending = { binding: string; nonce: string; expires: number };
 type Budget = { attempts: number; reset: number };
 
+type LoginFailureReason = "flow_missing" | "flow_expired" | "binding_cookie_missing" | "binding_cookie_mismatch" | "google_unavailable" | "google_error" | "code_missing" | "identity_not_allowed" | "approval_check_failed" | "google_token_exchange_failed" | "google_signing_keys_failed" | "google_id_token_invalid" | "google_exchange_failed";
+
 export function mountUserConsole(app: Express, service: RemoteDesktopService) {
   const logins = new Map<string, Login>();
   const pending = new Map<string, Pending>();
@@ -139,15 +141,35 @@ export function mountUserConsole(app: Express, service: RemoteDesktopService) {
     res.setHeader("Cache-Control", "no-store"); res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"); res.setHeader("Referrer-Policy", "no-referrer"); res.setHeader("X-Content-Type-Options", "nosniff");
     const state = typeof req.query.state === "string" ? req.query.state : "";
     if (!state.startsWith("user_")) return next();
-    clean();
     const flow = pending.get(state);
-    if (!flow || flow.expires <= Date.now() || flow.binding !== cookie(req.header("cookie"), "rdmcp_user_google_binding") || !google || !verifier || typeof req.query.code !== "string" || req.query.error) return res.status(403).send("ログインできません。");
+    const binding = cookie(req.header("cookie"), "rdmcp_user_google_binding");
+    // Capture expiry before cleanup; an absent flow can also mean a restart,
+    // replay, or an earlier cleanup. Never log the request or raw exception.
+    const expired = Boolean(flow && flow.expires <= Date.now());
+    clean();
+    const reject = async (reason: LoginFailureReason) => {
+      const diagnosticId = id();
+      const fields = { diagnosticId, stage: "google_callback", reason };
+      try { await service.audit("user.login_failed", fields); }
+      catch { console.error(JSON.stringify({ at: new Date().toISOString(), event: "user.login_failed", ...fields, audit_write_failed: true })); }
+      return res.status(403).send("ログインできません。");
+    };
+    if (!flow) return reject("flow_missing");
+    if (expired) return reject("flow_expired");
+    if (!binding) return reject("binding_cookie_missing");
+    if (flow.binding !== binding) return reject("binding_cookie_mismatch");
+    if (!google || !verifier) return reject("google_unavailable");
+    if (req.query.error) return reject("google_error");
+    if (typeof req.query.code !== "string") return reject("code_missing");
     pending.delete(state);
-    try {
-      const identity = await verifier.exchangeCode({ code: req.query.code, state, nonce: flow.nonce, redirectUri: google.googleRedirectUri });
-      if (!await service.publicAuth?.isAllowedIdentity(identity)) return res.status(403).send("ログインできません。");
-      const token = id(); remember(logins, token, newLogin(principalFor(identity), { identity }), 2_000); setLoginCookie(res, token, 3600); setCookie(res, "", 0, "rdmcp_user_google_binding", "/"); return res.redirect(303, "/user");
-    } catch { return res.status(403).send("ログインできません。"); }
+    let identity: GoogleIdentity;
+    try { identity = await verifier.exchangeCode({ code: req.query.code, state, nonce: flow.nonce, redirectUri: google.googleRedirectUri }); }
+    catch (error) { return reject(error instanceof GoogleOidcError ? error.reason : "google_exchange_failed"); }
+    let allowed: boolean;
+    try { allowed = Boolean(await service.publicAuth?.isAllowedIdentity(identity)); }
+    catch { return reject("approval_check_failed"); }
+    if (!allowed) return reject("identity_not_allowed");
+    const token = id(); remember(logins, token, newLogin(principalFor(identity), { identity }), 2_000); setLoginCookie(res, token, 3600); setCookie(res, "", 0, "rdmcp_user_google_binding", "/"); return res.redirect(303, "/user");
   });
   const userLogin = async (req: Request): Promise<Login | undefined> => {
     const login = current(req);

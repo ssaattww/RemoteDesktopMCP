@@ -87,6 +87,13 @@ async function boundedJson(response: Response): Promise<Record<string, unknown>>
   const parsed: unknown = JSON.parse(text); if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("The Google identity response was invalid."); return parsed as Record<string, unknown>;
 }
 
+export class GoogleOidcError extends Error {
+  constructor(readonly reason: "google_token_exchange_failed" | "google_signing_keys_failed" | "google_id_token_invalid", error: unknown) {
+    super(error instanceof Error ? error.message : "Google authentication failed.");
+    this.name = "GoogleOidcError";
+  }
+}
+
 export class GoogleOidcClient implements OidcVerifier {
   private jwks?: ReturnType<typeof createLocalJWKSet>;
   private jwksExpires = 0;
@@ -97,17 +104,23 @@ export class GoogleOidcClient implements OidcVerifier {
     return url.toString();
   }
   async exchangeCode(input: OidcExchangeInput): Promise<GoogleIdentity> {
-    const response = await this.request(GOOGLE_TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ code: input.code, client_id: this.clientId, client_secret: this.clientSecret, redirect_uri: input.redirectUri, grant_type: "authorization_code" }), signal: AbortSignal.timeout(10_000), redirect: "error" });
-    const token = (await boundedJson(response)).id_token;
-    if (typeof token !== "string" || token.length > 16 * 1024) throw new Error("The Google identity token was missing.");
-    return this.verifyIdToken(token, input.nonce);
+    let token: unknown;
+    try {
+      const response = await this.request(GOOGLE_TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ code: input.code, client_id: this.clientId, client_secret: this.clientSecret, redirect_uri: input.redirectUri, grant_type: "authorization_code" }), signal: AbortSignal.timeout(10_000), redirect: "error" });
+      token = (await boundedJson(response)).id_token;
+      if (typeof token !== "string" || token.length > 16 * 1024) throw new Error("The Google identity token was missing.");
+    } catch (error) { throw new GoogleOidcError("google_token_exchange_failed", error); }
+    try { return await this.verifyIdToken(token as string, input.nonce); }
+    catch (error) { throw error instanceof GoogleOidcError ? error : new GoogleOidcError("google_id_token_invalid", error); }
   }
   async verifyIdToken(token: string, nonce: string): Promise<GoogleIdentity> {
     if (!this.jwks || this.jwksExpires <= this.now()) {
-      const response = await this.request(GOOGLE_JWKS_URL, { signal: AbortSignal.timeout(10_000), redirect: "error" });
-      const jwks = await boundedJson(response) as unknown as { keys: JsonWebKey[] };
-      if (!Array.isArray(jwks.keys) || jwks.keys.length > 20) throw new Error("The Google signing keys were invalid.");
-      this.jwks = createLocalJWKSet(jwks); this.jwksExpires = this.now() + 60 * 60_000;
+      try {
+        const response = await this.request(GOOGLE_JWKS_URL, { signal: AbortSignal.timeout(10_000), redirect: "error" });
+        const jwks = await boundedJson(response) as unknown as { keys: JsonWebKey[] };
+        if (!Array.isArray(jwks.keys) || jwks.keys.length > 20) throw new Error("The Google signing keys were invalid.");
+        this.jwks = createLocalJWKSet(jwks); this.jwksExpires = this.now() + 60 * 60_000;
+      } catch (error) { throw new GoogleOidcError("google_signing_keys_failed", error); }
     }
     const options: JWTVerifyOptions = { issuer: [...GOOGLE_ISSUERS], audience: this.clientId, algorithms: ["RS256"], requiredClaims: ["exp", "iat", "iss", "sub", "aud"], maxTokenAge: "10m", clockTolerance: 10 };
     const verified = await jwtVerify(token, this.jwks, options);

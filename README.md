@@ -65,6 +65,30 @@ npm.cmd run lint
 通常のファイル操作とプロセス操作は、固定版
 `@wonderwhy-er/desktop-commander@0.2.51` の stdio MCP 接続へ委譲します。
 
+### Googleログイン失敗の診断
+
+使用者画面の `/google/callback` がログインを拒否すると、
+`DATA_DIR/audit.jsonl` に `user.login_failed` を記録します。
+`diagnosticId` は試行ごとの診断ID、`stage` は `google_callback`、
+`reason` は次の固定値です。
+
+| reason | 確認する箇所 |
+| --- | --- |
+| `flow_missing` | 対応する開始状態がない。再起動・使用済み・以前の期限切れ清掃など |
+| `flow_expired` | 残っていた開始状態が5分の有効期限を超過 |
+| `binding_cookie_missing` / `binding_cookie_mismatch` | 開始時のブラウザーCookieの欠落・不一致 |
+| `google_unavailable` / `google_error` / `code_missing` | 認証設定・Googleのエラー応答・コード欠落 |
+| `google_token_exchange_failed` | トークン交換の通信・応答処理 |
+| `google_signing_keys_failed` | Googleの公開鍵取得・応答処理 |
+| `google_id_token_invalid` | IDトークンの署名・有効期限・クレーム検証 |
+| `google_exchange_failed` | 独自の認証検証器で発生した未分類の例外 |
+| `identity_not_allowed` / `approval_check_failed` | 許可対象外・許可状態読取などの例外 |
+
+監査ログを書けない場合は、同じ診断を `audit_write_failed: true` とともに
+標準エラーへJSONで出力します。運用時は標準エラーをログファイルへ保存してください。
+認証コード・state・Cookie・トークン・メールアドレス・秘密値・生の例外は記録しません。
+この記録はコールバックに到達した失敗が対象で、TLSや接続前の障害は対象外です。
+
 ## ファイル操作のパス基準
 
 `file_search`、`content_search`、`file_read`、`file_patch`、`file_transfer_*` は、
