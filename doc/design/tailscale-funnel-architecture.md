@@ -255,6 +255,10 @@ RemoteDesktopMCP が停止中の場合、Funnel 経由のリクエストは失�
 - 未認証 `/mcp` リクエストの拒否
 - レート制限による拒否
 
+使用者のGoogleログイン失敗は `user.login_failed` として処理段階と固定理由コードを記録する。
+この診断では認証前の `iss` / `sub` やメールアドレスを記録せず、独立した診断IDを使用する。
+監査ログを書けない場合の標準エラー出力を含む詳細は [使用者の画面と緊急停止](user-console-emergency-stop.md#googleログイン失敗の記録issue-104) に従う。
+
 Funnel の動作状況は Tailscale 側のログで確認し、RemoteDesktopMCP の監査ログとは分けて扱う。
 
 ## 検証項目
